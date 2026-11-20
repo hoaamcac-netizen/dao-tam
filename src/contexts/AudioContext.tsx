@@ -19,8 +19,8 @@ import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
 
-const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 400 ký tự
-const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 600 ký tự
+const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 250 ký tự
+const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 350 ký tự
 const PREFETCH_LOOKAHEAD_COUNT = 1; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
 const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn cứng tối đa 3 đoạn trong bộ nhớ đệm
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
@@ -50,7 +50,7 @@ function makeQueuedChunkBlobKey(chunk: QueuedAudioChunk, voice: string): string 
 /**
  * Ghép tên chương vào đầu văn bản:
  * - Đoạn đầu tiên (chunk 0) cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
- * - Các đoạn tiếp theo gộp 400 - 600 ký tự theo dấu câu/xuống dòng, đọc mượt cả ở tốc độ 2x.
+ * - Các đoạn tiếp theo gộp 250 - 350 ký tự theo dấu câu/xuống dòng, đọc mượt ở tốc độ 2x và không bị Edge TTS ngắt giữa chừng.
  */
 function buildChapterQueuedChunks(
   novelId: string,

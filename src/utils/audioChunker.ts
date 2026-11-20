@@ -20,8 +20,8 @@ export const TTS_MAX_RETRIES = 3;
 export const TTS_RETRY_DELAY_MS = 2000;
 export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 150;
 export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 250;
-export const DEFAULT_CHUNK_MIN_LENGTH = 400;
-export const DEFAULT_CHUNK_MAX_LENGTH = 600;
+export const DEFAULT_CHUNK_MIN_LENGTH = 250;
+export const DEFAULT_CHUNK_MAX_LENGTH = 350;
 export const MAX_BLOB_CACHE_ENTRIES = 3;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -138,6 +138,7 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
 export function cleanTextForTTS(raw: string): string {
   if (!raw) return '';
   return raw
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
     .replace(/<[^>]*>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, ' và ')
@@ -145,6 +146,9 @@ export function cleanTextForTTS(raw: string): string {
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/&lt;|&gt;/gi, ' ')
     .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/&/g, ' và ')
+    .replace(/[“”„‟«»]/g, '"')
+    .replace(/[‘’‚‛]/g, "'")
     .replace(/[*_~`#|\\<>^{}[\]•◆◇■□●○★☆※♥♡✿🌸⚔️💎]+/g, ' ')
     .replace(/[.]{4,}/g, '...')
     .replace(/[!]{2,}/g, '!')
@@ -155,10 +159,10 @@ export function cleanTextForTTS(raw: string): string {
 }
 
 /**
- * Thuật toán Chunking tối ưu khởi động nhanh & đọc mượt 2x:
+ * Thuật toán Chunking tối ưu khởi động nhanh & tổng hợp Edge TTS ổn định ở tốc độ x2:
  * - Đoạn đầu tiên (chunk 0): cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
- * - Các đoạn tiếp theo (chunk >= 1): gộp nhiều câu thành 400 - 600 ký tự theo ranh giới dấu câu / xuống dòng,
- *   tuyệt đối không cắt ngang từ, đảm bảo mỗi đoạn đọc được 12 - 15 giây kể cả ở tốc độ 2x.
+ * - Các đoạn tiếp theo (chunk >= 1): gộp câu thành 250 - 350 ký tự theo ranh giới dấu câu / xuống dòng,
+ *   tuyệt đối không cắt ngang từ, vừa đọc mượt 8 - 10s ở tốc độ x2 vừa tránh ngắt kết nối WebSocket.
  */
 export function chunkChapterContent(
   content: string,
@@ -169,8 +173,8 @@ export function chunkChapterContent(
 ): AudioChunk[] {
   if (!content || !content.trim()) return [];
 
-  const nextMinLen = Math.max(250, idealMinLength);
-  const nextMaxLen = Math.max(nextMinLen + 100, idealMaxLength);
+  const nextMinLen = Math.max(150, idealMinLength);
+  const nextMaxLen = Math.max(nextMinLen + 50, idealMaxLength);
   const headMinLen = Math.max(100, firstMinLength);
   const headMaxLen = Math.max(headMinLen + 50, firstMaxLength);
 
@@ -357,7 +361,7 @@ export function splitTextIntoSpeechChunks(
   const cleaned = cleanTextForTTS(text);
   if (!cleaned) return [];
 
-  const safeMax = Math.max(250, Math.min(DEFAULT_CHUNK_MAX_LENGTH, maxLength));
+  const safeMax = Math.max(150, Math.min(DEFAULT_CHUNK_MAX_LENGTH, maxLength));
   const rawSegments = cleaned.split(/(?<=[.?!;…])/);
   const chunks: string[] = [];
   let buffer = '';

@@ -218,7 +218,7 @@ export function useSeamlessTTS({
     applyPlaybackRateLock(audioElementRef.current, playbackRate);
   }, [playbackRate, applyPlaybackRateLock]);
 
-  // Đoạn đầu 150-250 ký tự khởi động nhanh, các đoạn sau 400-600 ký tự
+  // Đoạn đầu 150-250 ký tự khởi động nhanh, các đoạn sau 250-350 ký tự
   const chunks = useMemo(() => {
     return chunkChapterContent(content);
   }, [content]);

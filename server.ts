@@ -118,11 +118,71 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 // TỐI ƯU EDGE TTS CHO RENDER FREE (0.1 CPU, 512MB RAM)
 // 1. LRU Cache tối đa 40 đoạn để không tràn 512MB RAM
 // 2. Hàng đợi giới hạn tối đa 5 kết nối MsEdgeTTS chạy song song
-// 3. Timeout cứng 15s + đóng WebSocket/Stream sạch sẽ ngay khi xong hoặc lỗi
+// 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry tối đa 2 lần (nghỉ 500ms)
 // =========================================================================
 const MAX_AUDIO_CACHE_ITEMS = 40;
 const MAX_CONCURRENT_TTS = 5;
-const TTS_SYNTHESIS_TIMEOUT_MS = 15000;
+const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
+const TTS_BACKEND_MAX_RETRIES = 2;
+const TTS_BACKEND_RETRY_DELAY_MS = 500;
+
+function sanitizeTextForEdgeTts(rawText: string): string {
+  if (!rawText || typeof rawText !== 'string') return '';
+  return rawText
+    // Loại bỏ các ký tự điều khiển ẩn, zero-width, BOM, ký tự lỗi Unicode
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
+    // Xử lý HTML entities trước khi loại bỏ ký tự đặc biệt SSML
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, ' và ')
+    .replace(/&lt;|&gt;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    // Thay thế / loại bỏ các ký tự làm hỏng SSML (<, >, &)
+    .replace(/[<>]/g, ' ')
+    .replace(/&/g, ' và ')
+    // Chuẩn hóa dấu ngoặc kép, nháy đơn và khoảng trắng
+    .replace(/[“”„‟«»]/g, '"')
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 3000);
+}
+
+function sleepWithAbortServer(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error('Client aborted TTS request'));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error('Client aborted TTS request'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function isRetryableEdgeTtsError(err: unknown): boolean {
+  const msg = String((err as any)?.message || err || '').toLowerCase();
+  return (
+    msg.includes('stream closed') ||
+    msg.includes('no turn.end') ||
+    msg.includes('turn.end') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('quá thời gian') ||
+    msg.includes('đóng sớm') ||
+    msg.includes('websocket') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('socket') ||
+    msg.includes('không nhận được dữ liệu âm thanh')
+  );
+}
 
 interface InFlightTtsEntry {
   promise: Promise<Buffer>;
@@ -184,8 +244,9 @@ async function runEdgeTtsSynthesisOnce(
     throw new Error('Client aborted TTS request');
   }
 
+  // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp (tránh dùng lại WebSocket cũ)
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 8000,
+    connectionTimeoutMs: 10000,
     synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
   });
 
@@ -255,7 +316,7 @@ async function runEdgeTtsSynthesisOnce(
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     timer = setTimeout(() => {
-      finishWithError(new Error('Quá thời gian 15s tổng hợp âm thanh từ Edge TTS'));
+      finishWithError(new Error('Quá thời gian 20s tổng hợp âm thanh từ Edge TTS'));
     }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     tts
@@ -314,6 +375,42 @@ async function runEdgeTtsSynthesisOnce(
         finishWithError(initErr instanceof Error ? initErr : new Error(String(initErr)));
       });
   });
+}
+
+async function runEdgeTtsSynthesisWithRetry(
+  cleanText: string,
+  voiceCode: string,
+  abortSignal: AbortSignal
+): Promise<Buffer> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
+    if (abortSignal.aborted) {
+      throw new Error('Client aborted TTS request');
+    }
+
+    if (attempt > 0) {
+      await sleepWithAbortServer(TTS_BACKEND_RETRY_DELAY_MS, abortSignal);
+    }
+
+    try {
+      return await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
+    } catch (err) {
+      lastError = err;
+      if (abortSignal.aborted) {
+        throw err;
+      }
+      if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
+        console.warn(
+          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${(err as any)?.message || err}`
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Edge TTS synthesis failed'));
 }
 
 async function synthesizeEdgeTtsBuffer(
@@ -388,7 +485,7 @@ async function synthesizeEdgeTtsBuffer(
     },
     run: async () => {
       try {
-        const fullBuffer = await runEdgeTtsSynthesisOnce(
+        const fullBuffer = await runEdgeTtsSynthesisWithRetry(
           cleanText,
           voiceCode,
           entryAbortController.signal
@@ -440,8 +537,11 @@ async function handleTtsSynthesis(
     }
   }
 
-  // Sanitize text limit per chunk (max 3000 chars)
-  const cleanText = text.trim().slice(0, 3000);
+  // Làm sạch văn bản trước khi đưa vào msedge-tts (loại ký tự điều khiển, <, >, &, chuẩn hóa ngoặc/khoảng trắng)
+  const cleanText = sanitizeTextForEdgeTts(text);
+  if (!cleanText) {
+    return res.status(400).json({ error: 'Nội dung văn bản (text) không hợp lệ sau khi làm sạch' });
+  }
   const cacheKey = `${voiceCode}:::${cleanText}`;
 
   const clientAbortController = new AbortController();
