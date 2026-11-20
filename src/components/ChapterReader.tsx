@@ -8,7 +8,6 @@ import {
   formatXu
 } from '../utils/rulesAndVoices';
 import { useAudio } from '../contexts/AudioContext';
-import { backgroundAudioManager } from '../utils/backgroundAudio';
 import { fetchFullChapterContent } from '../firebase/services';
 import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 import { FONT_FAMILY_OPTIONS, resolveReaderFontCss } from '../hooks/useReaderSettings';
@@ -321,12 +320,13 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   // KẾT NỐI VÀO SINGLE SOURCE OF TRUTH: useAudio (Microsoft Edge TTS Hoài My & Nam Minh)
   const audioContext = useAudio();
 
-  // Kiểm tra xem luồng Audio đang phát có phải của đúng chương hiện tại không
+  // Kiểm tra xem luồng Audio đang phát có phải của đúng truyện & chương hiện tại không
   const isCurrentChapterAudio = Boolean(
-    audioContext.activeChapter && (
-      audioContext.activeChapter.id === chapter.id || 
-      (Number(audioContext.activeChapter.number) > 0 && Number(audioContext.activeChapter.number) === Number(chapter.number))
-    )
+    audioContext.activeChapter &&
+      audioContext.activeNovel?.id === novel.id &&
+      (audioContext.activeChapter.id === chapter.id ||
+        (Number(audioContext.activeChapter.number) > 0 &&
+          Number(audioContext.activeChapter.number) === Number(chapter.number)))
   );
 
   const chunks = useMemo(() => {
@@ -334,7 +334,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
       return audioContext.chunks || [];
     }
     if (isChapterUnlocked && chapterFullContent) {
-      return chunkChapterContent(chapterFullContent, 500, 800) || [];
+      return chunkChapterContent(chapterFullContent) || [];
     }
     return [];
   }, [isCurrentChapterAudio, audioContext.chunks, isChapterUnlocked, chapterFullContent]);
@@ -344,10 +344,14 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     audioContextRef.current = audioContext;
   }, [audioContext]);
 
-  // MEMORY LEAK PROTECTION: Giải phóng Blob URLs khi rời khỏi trang đọc nếu audio không đang phát
+  // MEMORY LEAK PROTECTION: Giải phóng tài nguyên nếu thanh Audio đã đóng và không phát
   useEffect(() => {
     return () => {
-      if (!audioContextRef.current.isPlaying && !audioContextRef.current.isLoading) {
+      if (
+        !audioContextRef.current.isPlaying &&
+        !audioContextRef.current.isLoading &&
+        !audioContextRef.current.isBarVisible
+      ) {
         audioContextRef.current.stop();
       }
     };
@@ -485,6 +489,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     const isBarSavedVisible = safeGetItem('daotam_audio_bar_visible') === 'true';
     const isDifferentChapter =
       !audioContext.activeChapter ||
+      audioContext.activeNovel?.id !== novel.id ||
       (audioContext.activeChapter.id !== chapter.id &&
         Number(audioContext.activeChapter.number) !== Number(chapter.number));
 
@@ -546,24 +551,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     };
   }, [novel?.id, chapter?.id, isTtsPlaying, onRecordRealView]);
 
-  // Đồng bộ Background Audio & Lock Screen Media Session
-  useEffect(() => {
-    if (isTtsPlaying && currentChunkIndex >= 0) {
-      backgroundAudioManager.startBackgroundPlayback({
-        title: `${novel.title} - ${chapter.title}`,
-        artist: `Tác giả: ${novel.author} • Giọng: ${
-          (activeVoiceId || '').includes('NamMinh') ? 'Nam Minh (Nam)' : 'Hoài My (Nữ)'
-        }`,
-        coverImage: novel.coverImage,
-        onPlay: () => toggleTtsPlay(),
-        onPause: () => pauseTts(),
-        onNext: () => skipNextTts(),
-        onPrev: () => skipPrevTts(),
-      });
-    } else if (!isTtsPlaying) {
-      backgroundAudioManager.pauseBackgroundPlayback();
-    }
-  }, [isTtsPlaying, currentChunkIndex, activeVoiceId, novel, chapter]);
+  // Background Audio & Lock Screen Media Session được quản lý tập trung tại AudioContext.tsx
 
   const handleChangeVoice = (newVoiceId: string) => {
     setReaderSettings((prev) => {

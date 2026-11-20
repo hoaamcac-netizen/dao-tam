@@ -35,8 +35,8 @@ async function scanVietnameseVoices() {
     return cachedViVoices;
   }
 
+  const tts = new MsEdgeTTS({ connectionTimeoutMs: 10000 });
   try {
-    const tts = new MsEdgeTTS({ connectionTimeoutMs: 10000 });
     const allVoices = await tts.getVoices();
     const viList = allVoices.filter((v: any) => v.Locale && v.Locale.toLowerCase().startsWith('vi'));
     
@@ -68,6 +68,10 @@ async function scanVietnameseVoices() {
     }
   } catch (err) {
     console.warn('[Edge TTS] Voice list scan warning, using verified defaults:', err);
+  } finally {
+    try {
+      tts.close();
+    } catch {}
   }
 
   // Fallback to the 2 real Edge TTS Vietnamese voices if scan network times out
@@ -110,11 +114,214 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
   }
 });
 
-// In-memory audio cache for synthesized sentences (Key: `${voiceCode}:::${cleanText}`)
-const audioCache = new Map<string, Buffer>();
-const inFlightTtsRequests = new Map<string, Promise<Buffer>>();
+// =========================================================================
+// TỐI ƯU EDGE TTS CHO RENDER FREE (0.1 CPU, 512MB RAM)
+// 1. LRU Cache tối đa 40 đoạn để không tràn 512MB RAM
+// 2. Hàng đợi giới hạn tối đa 5 kết nối MsEdgeTTS chạy song song
+// 3. Timeout cứng 15s + đóng WebSocket/Stream sạch sẽ ngay khi xong hoặc lỗi
+// =========================================================================
+const MAX_AUDIO_CACHE_ITEMS = 40;
+const MAX_CONCURRENT_TTS = 5;
+const TTS_SYNTHESIS_TIMEOUT_MS = 15000;
 
-async function synthesizeEdgeTtsBuffer(cleanText: string, voiceCode: string, cacheKey: string): Promise<Buffer> {
+interface InFlightTtsEntry {
+  promise: Promise<Buffer>;
+  activeClients: number;
+  abortController: AbortController;
+}
+
+interface QueuedTtsJob {
+  run: () => Promise<void>;
+  isStillWanted: () => boolean;
+  cancel: () => void;
+}
+
+// In-memory LRU audio cache for synthesized segments (Key: `${voiceCode}:::${cleanText}`)
+const audioCache = new Map<string, Buffer>();
+const inFlightTtsRequests = new Map<string, InFlightTtsEntry>();
+const ttsWaitQueue: QueuedTtsJob[] = [];
+let activeTtsWorkers = 0;
+
+function pumpTtsQueue() {
+  while (activeTtsWorkers < MAX_CONCURRENT_TTS && ttsWaitQueue.length > 0) {
+    const nextJob = ttsWaitQueue.shift()!;
+    if (!nextJob.isStillWanted()) {
+      nextJob.cancel();
+      continue;
+    }
+    activeTtsWorkers += 1;
+    Promise.resolve()
+      .then(() => nextJob.run())
+      .catch(() => {})
+      .finally(() => {
+        activeTtsWorkers = Math.max(0, activeTtsWorkers - 1);
+        pumpTtsQueue();
+      });
+  }
+}
+
+function setLruAudioCache(cacheKey: string, fullBuffer: Buffer) {
+  if (audioCache.has(cacheKey)) {
+    audioCache.delete(cacheKey);
+  }
+  while (audioCache.size >= MAX_AUDIO_CACHE_ITEMS) {
+    const oldestKey = audioCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      audioCache.delete(oldestKey);
+    } else {
+      break;
+    }
+  }
+  audioCache.set(cacheKey, fullBuffer);
+}
+
+async function runEdgeTtsSynthesisOnce(
+  cleanText: string,
+  voiceCode: string,
+  abortSignal: AbortSignal
+): Promise<Buffer> {
+  if (abortSignal.aborted) {
+    throw new Error('Client aborted TTS request');
+  }
+
+  const tts = new MsEdgeTTS({
+    connectionTimeoutMs: 8000,
+    synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+  });
+
+  let audioStream: any = null;
+  let metadataStream: any = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let isCleanedUp = false;
+
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (audioStream) {
+      try {
+        audioStream.removeAllListeners();
+        if (typeof audioStream.destroy === 'function') {
+          audioStream.destroy();
+        }
+      } catch {}
+      audioStream = null;
+    }
+    if (metadataStream) {
+      try {
+        metadataStream.removeAllListeners();
+        if (typeof metadataStream.destroy === 'function') {
+          metadataStream.destroy();
+        }
+      } catch {}
+      metadataStream = null;
+    }
+    try {
+      tts.close();
+    } catch {}
+  };
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    let settled = false;
+    const chunks: Buffer[] = [];
+
+    const finishWithError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      abortSignal.removeEventListener('abort', onAbort);
+      cleanup();
+      reject(err);
+    };
+
+    const finishWithSuccess = (buf: Buffer) => {
+      if (settled) return;
+      settled = true;
+      abortSignal.removeEventListener('abort', onAbort);
+      cleanup();
+      resolve(buf);
+    };
+
+    const onAbort = () => {
+      finishWithError(new Error('Client aborted TTS request'));
+    };
+
+    if (abortSignal.aborted) {
+      finishWithError(new Error('Client aborted TTS request'));
+      return;
+    }
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+
+    timer = setTimeout(() => {
+      finishWithError(new Error('Quá thời gian 15s tổng hợp âm thanh từ Edge TTS'));
+    }, TTS_SYNTHESIS_TIMEOUT_MS);
+
+    tts
+      .setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)
+      .then(() => {
+        if (settled || abortSignal.aborted) {
+          finishWithError(new Error('Client aborted TTS request'));
+          return;
+        }
+
+        const streams = tts.toStream(cleanText);
+        audioStream = streams.audioStream;
+        metadataStream = streams.metadataStream;
+
+        if (metadataStream && typeof metadataStream.on === 'function') {
+          metadataStream.on('error', () => {});
+          metadataStream.resume?.();
+        }
+
+        audioStream.on('data', (chunk: Buffer) => {
+          if (!settled && chunk && chunk.length > 0) {
+            chunks.push(chunk);
+          }
+        });
+
+        audioStream.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          chunks.length = 0;
+          if (buf.length > 0) {
+            finishWithSuccess(buf);
+          } else {
+            finishWithError(new Error('Không nhận được dữ liệu âm thanh từ Edge TTS'));
+          }
+        });
+
+        audioStream.on('close', () => {
+          if (!settled) {
+            const buf = Buffer.concat(chunks);
+            chunks.length = 0;
+            if (buf.length > 0) {
+              finishWithSuccess(buf);
+            } else {
+              finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm'));
+            }
+          }
+        });
+
+        audioStream.on('error', (streamErr: any) => {
+          chunks.length = 0;
+          finishWithError(
+            streamErr instanceof Error ? streamErr : new Error(String(streamErr))
+          );
+        });
+      })
+      .catch((initErr: any) => {
+        finishWithError(initErr instanceof Error ? initErr : new Error(String(initErr)));
+      });
+  });
+}
+
+async function synthesizeEdgeTtsBuffer(
+  cleanText: string,
+  voiceCode: string,
+  cacheKey: string,
+  clientSignal?: AbortSignal
+): Promise<Buffer> {
   if (audioCache.has(cacheKey)) {
     const cached = audioCache.get(cacheKey)!;
     // Refresh LRU position
@@ -123,73 +330,99 @@ async function synthesizeEdgeTtsBuffer(cleanText: string, voiceCode: string, cac
     return cached;
   }
 
-  const existingTask = inFlightTtsRequests.get(cacheKey);
-  if (existingTask) {
-    return existingTask;
+  if (clientSignal?.aborted) {
+    throw new Error('Client aborted TTS request');
   }
 
-  const task = (async () => {
-    try {
-      const tts = new MsEdgeTTS({
-        connectionTimeoutMs: 7000,
-        synthesisTimeoutMs: 12000,
-      });
-
-      await tts.setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-      const { audioStream } = tts.toStream(cleanText);
-
-      const fullBuffer = await new Promise<Buffer>((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        let settled = false;
-
-        const timer = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            reject(new Error('Quá thời gian tổng hợp âm thanh từ Edge TTS'));
-          }
-        }, 12000);
-
-        audioStream.on('data', (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-
-        audioStream.on('end', () => {
-          clearTimeout(timer);
-          if (settled) return;
-          settled = true;
-          const buf = Buffer.concat(chunks);
-          if (buf.length > 0) resolve(buf);
-          else reject(new Error('Không nhận được dữ liệu âm thanh từ Edge TTS'));
-        });
-
-        audioStream.on('error', (streamErr: any) => {
-          clearTimeout(timer);
-          if (!settled) {
-            settled = true;
-            reject(streamErr instanceof Error ? streamErr : new Error(String(streamErr)));
-          }
-        });
-      });
-
-      if (audioCache.size >= 1500) {
-        const firstKey = audioCache.keys().next().value;
-        if (firstKey) audioCache.delete(firstKey);
+  const existingEntry = inFlightTtsRequests.get(cacheKey);
+  if (existingEntry) {
+    existingEntry.activeClients += 1;
+    const onDetach = () => {
+      existingEntry.activeClients = Math.max(0, existingEntry.activeClients - 1);
+      if (existingEntry.activeClients === 0) {
+        existingEntry.abortController.abort();
       }
-      audioCache.set(cacheKey, fullBuffer);
-      return fullBuffer;
+    };
+    clientSignal?.addEventListener('abort', onDetach, { once: true });
+    try {
+      return await existingEntry.promise;
     } finally {
-      inFlightTtsRequests.delete(cacheKey);
+      clientSignal?.removeEventListener('abort', onDetach);
+      if (!clientSignal?.aborted) {
+        existingEntry.activeClients = Math.max(0, existingEntry.activeClients - 1);
+      }
     }
-  })();
+  }
 
-  inFlightTtsRequests.set(cacheKey, task);
-  return task;
+  const entryAbortController = new AbortController();
+  let resolveEntry!: (buf: Buffer) => void;
+  let rejectEntry!: (err: unknown) => void;
+
+  const entryPromise = new Promise<Buffer>((res, rej) => {
+    resolveEntry = res;
+    rejectEntry = rej;
+  });
+  // Ngăn UnhandledRejection nếu tất cả client đã ngắt kết nối trước khi promise reject
+  entryPromise.catch(() => {});
+
+  const entry: InFlightTtsEntry = {
+    promise: entryPromise,
+    activeClients: 1,
+    abortController: entryAbortController,
+  };
+  inFlightTtsRequests.set(cacheKey, entry);
+
+  const onFirstClientAbort = () => {
+    entry.activeClients = Math.max(0, entry.activeClients - 1);
+    if (entry.activeClients === 0) {
+      entryAbortController.abort();
+    }
+  };
+  clientSignal?.addEventListener('abort', onFirstClientAbort, { once: true });
+
+  ttsWaitQueue.push({
+    isStillWanted: () => entry.activeClients > 0 && !entryAbortController.signal.aborted,
+    cancel: () => {
+      inFlightTtsRequests.delete(cacheKey);
+      rejectEntry(new Error('Client aborted TTS request'));
+    },
+    run: async () => {
+      try {
+        const fullBuffer = await runEdgeTtsSynthesisOnce(
+          cleanText,
+          voiceCode,
+          entryAbortController.signal
+        );
+        setLruAudioCache(cacheKey, fullBuffer);
+        resolveEntry(fullBuffer);
+      } catch (err) {
+        rejectEntry(err);
+      } finally {
+        inFlightTtsRequests.delete(cacheKey);
+      }
+    },
+  });
+
+  pumpTtsQueue();
+
+  try {
+    return await entryPromise;
+  } finally {
+    clientSignal?.removeEventListener('abort', onFirstClientAbort);
+    if (!clientSignal?.aborted) {
+      entry.activeClients = Math.max(0, entry.activeClients - 1);
+    }
+  }
 }
 
 /**
- * Handle Edge TTS Speech Synthesis with in-memory caching and request deduplication
+ * Handle Edge TTS Speech Synthesis with LRU cache, concurrency queue & clean stream disposal
  */
-async function handleTtsSynthesis(text: string, requestedVoice: string | undefined, res: Response) {
+async function handleTtsSynthesis(
+  text: string,
+  requestedVoice: string | undefined,
+  res: Response
+) {
   if (!text || !text.trim()) {
     return res.status(400).json({ error: 'Nội dung văn bản (text) không được để trống' });
   }
@@ -207,13 +440,26 @@ async function handleTtsSynthesis(text: string, requestedVoice: string | undefin
     }
   }
 
-  // Sanitize text limit per sentence/paragraph (max 3000 chars per chunk)
+  // Sanitize text limit per chunk (max 3000 chars)
   const cleanText = text.trim().slice(0, 3000);
   const cacheKey = `${voiceCode}:::${cleanText}`;
 
+  const clientAbortController = new AbortController();
+  const onResClose = () => {
+    if (!res.writableEnded) {
+      clientAbortController.abort();
+    }
+  };
+  res.on('close', onResClose);
+
   try {
-    const fullBuffer = await synthesizeEdgeTtsBuffer(cleanText, voiceCode, cacheKey);
-    if (!res.headersSent) {
+    const fullBuffer = await synthesizeEdgeTtsBuffer(
+      cleanText,
+      voiceCode,
+      cacheKey,
+      clientAbortController.signal
+    );
+    if (!res.headersSent && !res.writableEnded && !clientAbortController.signal.aborted) {
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', fullBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
@@ -221,13 +467,19 @@ async function handleTtsSynthesis(text: string, requestedVoice: string | undefin
       res.end(fullBuffer);
     }
   } catch (err: any) {
+    if (clientAbortController.signal.aborted) {
+      return;
+    }
     console.error(`[Edge TTS Error for voice ${voiceCode}]:`, err);
-    if (!res.headersSent) {
-      const isTimeout = String(err?.message || '').includes('Quá thời gian');
+    if (!res.headersSent && !res.writableEnded) {
+      const msg = String(err?.message || 'Unknown');
+      const isTimeout = msg.includes('Quá thời gian') || msg.includes('timed out');
       res.status(isTimeout ? 504 : 502).json({
-        error: 'Không thể tạo âm thanh từ Edge TTS: ' + (err?.message || 'Unknown'),
+        error: 'Không thể tạo âm thanh từ Edge TTS: ' + msg,
       });
     }
+  } finally {
+    res.off('close', onResClose);
   }
 }
 

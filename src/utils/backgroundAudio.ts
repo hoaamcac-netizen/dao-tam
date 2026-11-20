@@ -22,17 +22,54 @@ class BackgroundAudioManager {
   private wakeLock: any = null;
   private isInitialized = false;
 
+  private silentBlobUrl: string | null = null;
+
+  private createSilentWavBlobUrl(): string {
+    const sampleRate = 8000;
+    const durationSec = 0.5;
+    const numSamples = Math.floor(sampleRate * durationSec);
+    const buffer = new ArrayBuffer(44 + numSamples);
+    const view = new DataView(buffer);
+
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + numSamples, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, 1, true); // Mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate, true); // Byte rate (8kHz * 1ch * 1byte)
+    view.setUint16(32, 1, true); // Block align
+    view.setUint16(34, 8, true); // Bits per sample
+    writeString(36, 'data');
+    view.setUint32(40, numSamples, true);
+
+    // 8-bit unsigned PCM silence = 0x80
+    const bytes = new Uint8Array(buffer, 44);
+    bytes.fill(0x80);
+
+    const blob = new Blob([buffer], { type: 'audio/wav' });
+    return URL.createObjectURL(blob);
+  }
+
   private initSilentAudio() {
     if (this.isInitialized && this.silentAudio) return;
 
     try {
-      // 1 giây âm thanh WAV rỗng chuẩn PCM base64
-      const silentWavBase64 = 
-        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-      
-      this.silentAudio = new Audio(silentWavBase64);
+      if (!this.silentBlobUrl) {
+        this.silentBlobUrl = this.createSilentWavBlobUrl();
+      }
+      this.silentAudio = new Audio(this.silentBlobUrl);
       this.silentAudio.loop = true;
-      this.silentAudio.volume = 0.05; // Giữ audio session với hệ thống
+      this.silentAudio.volume = 0.01; // Giữ audio session với hệ thống mobile mà không gây nhiễu
+      this.silentAudio.setAttribute('playsinline', 'true');
       this.isInitialized = true;
     } catch (e) {
       console.warn('Could not initialize background keep-alive audio:', e);

@@ -6,9 +6,10 @@
  */
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
-// In-memory cache for synthesized speech segments (LRU style buffer cache)
+// In-memory cache for synthesized speech segments (LRU buffer cache, max 40 items)
 const audioBufferCache = new Map<string, Buffer>();
-const MAX_CACHE_ITEMS = 300;
+const MAX_CACHE_ITEMS = 40;
+const TTS_SYNTHESIS_TIMEOUT_MS = 15000;
 
 export default async function handler(req: any, res: any) {
   // Support both GET (query parameters) and POST (JSON body)
@@ -36,13 +37,15 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  // Làm sạch văn bản và giới hạn an toàn cho từng chunk câu
+  // Làm sạch văn bản và giới hạn an toàn cho từng chunk
   const cleanText = text.trim().slice(0, 3000);
   const cacheKey = `${voiceCode}:::${cleanText}`;
 
   // Trả về ngay lập tức nếu đoạn âm thanh đã có trong cache bộ nhớ (0ms latency)
   if (audioBufferCache.has(cacheKey)) {
     const cachedBuffer = audioBufferCache.get(cacheKey)!;
+    audioBufferCache.delete(cacheKey);
+    audioBufferCache.set(cacheKey, cachedBuffer);
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Content-Length', cachedBuffer.length);
     res.setHeader('Accept-Ranges', 'bytes');
@@ -50,68 +53,114 @@ export default async function handler(req: any, res: any) {
     return res.end(cachedBuffer);
   }
 
-  try {
-    const tts = new MsEdgeTTS({
-      connectionTimeoutMs: 7000,
-      synthesisTimeoutMs: 12000,
-    });
+  const tts = new MsEdgeTTS({
+    connectionTimeoutMs: 8000,
+    synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+  });
 
-    // Cấu hình định dạng MP3 24kHz 48kbps Mono tối ưu cho giọng đọc truyện tiếng Việt (chất lượng cao, dung lượng nhẹ)
+  let audioStream: any = null;
+  let metadataStream: any = null;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let isCleanedUp = false;
+
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+    if (audioStream) {
+      try {
+        audioStream.removeAllListeners();
+        if (typeof audioStream.destroy === 'function') audioStream.destroy();
+      } catch {}
+      audioStream = null;
+    }
+    if (metadataStream) {
+      try {
+        metadataStream.removeAllListeners();
+        if (typeof metadataStream.destroy === 'function') metadataStream.destroy();
+      } catch {}
+      metadataStream = null;
+    }
+    try {
+      tts.close();
+    } catch {}
+  };
+
+  try {
+    // Cấu hình định dạng MP3 24kHz 48kbps Mono tối ưu cho giọng đọc truyện tiếng Việt
     await tts.setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
-    const { audioStream } = tts.toStream(cleanText);
+    const streams = tts.toStream(cleanText);
+    audioStream = streams.audioStream;
+    metadataStream = streams.metadataStream;
+    if (metadataStream && typeof metadataStream.on === 'function') {
+      metadataStream.on('error', () => {});
+      metadataStream.resume?.();
+    }
 
     const chunks: Buffer[] = [];
     let isTerminated = false;
 
-    // Timeout phòng ngừa kẹt luồng mạng
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       if (!isTerminated) {
         isTerminated = true;
+        cleanup();
         if (!res.headersSent) {
-          res.status(504).json({ error: 'Quá thời gian kết nối tới máy chủ Microsoft Edge TTS.' });
+          res.status(504).json({ error: 'Quá thời gian 15s kết nối tới máy chủ Microsoft Edge TTS.' });
         }
       }
-    }, 12000);
+    }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     audioStream.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
+      if (!isTerminated && chunk && chunk.length > 0) {
+        chunks.push(chunk);
+      }
     });
 
     audioStream.on('end', () => {
-      clearTimeout(timeout);
       if (isTerminated) return;
       isTerminated = true;
-
       const fullBuffer = Buffer.concat(chunks);
+      chunks.length = 0;
+      cleanup();
+
       if (fullBuffer.length > 0) {
-        // Lưu trữ vào cache
-        if (audioBufferCache.size >= MAX_CACHE_ITEMS) {
+        if (audioBufferCache.has(cacheKey)) {
+          audioBufferCache.delete(cacheKey);
+        }
+        while (audioBufferCache.size >= MAX_CACHE_ITEMS) {
           const oldestKey = audioBufferCache.keys().next().value;
-          if (oldestKey) audioBufferCache.delete(oldestKey);
+          if (oldestKey !== undefined) audioBufferCache.delete(oldestKey);
+          else break;
         }
         audioBufferCache.set(cacheKey, fullBuffer);
 
-        res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Content-Length', fullBuffer.length);
-        res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
-        return res.end(fullBuffer);
-      } else {
         if (!res.headersSent) {
-          res.status(502).json({ error: 'Không nhận được dữ liệu âm thanh từ Edge TTS.' });
+          res.setHeader('Content-Type', 'audio/mpeg');
+          res.setHeader('Content-Length', fullBuffer.length);
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
+          res.end(fullBuffer);
         }
+      } else if (!res.headersSent) {
+        res.status(502).json({ error: 'Không nhận được dữ liệu âm thanh từ Edge TTS.' });
       }
     });
 
     audioStream.on('error', (err: any) => {
-      clearTimeout(timeout);
-      if (!isTerminated && !res.headersSent) {
-        isTerminated = true;
+      if (isTerminated) return;
+      isTerminated = true;
+      chunks.length = 0;
+      cleanup();
+      if (!res.headersSent) {
         console.error('[Edge TTS Serverless Stream Error]:', err);
         res.status(502).json({ error: 'Lỗi stream Edge TTS: ' + (err?.message || 'Không xác định') });
       }
     });
   } catch (err: any) {
+    cleanup();
     console.error('[Edge TTS Serverless Handler Error]:', err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Không thể tổng hợp giọng đọc: ' + (err?.message || 'Unknown error') });

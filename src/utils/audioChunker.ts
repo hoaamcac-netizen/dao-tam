@@ -15,12 +15,14 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 8000;
+export const TTS_FETCH_TIMEOUT_MS = 20000;
 export const TTS_MAX_RETRIES = 3;
-export const TTS_RETRY_DELAY_MS = 800;
-export const DEFAULT_CHUNK_MIN_LENGTH = 500;
-export const DEFAULT_CHUNK_MAX_LENGTH = 800;
-export const MAX_BLOB_CACHE_ENTRIES = 5;
+export const TTS_RETRY_DELAY_MS = 2000;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 150;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 250;
+export const DEFAULT_CHUNK_MIN_LENGTH = 400;
+export const DEFAULT_CHUNK_MAX_LENGTH = 600;
+export const MAX_BLOB_CACHE_ENTRIES = 3;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
@@ -40,7 +42,7 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Fetch audio TTS qua AbortController giới hạn cứng 8 giây + Retry tối đa 3 lần.
+ * Fetch audio TTS qua AbortController giới hạn cứng 20 giây + Retry tối đa 3 lần (mỗi lần nghỉ 2s).
  * Hoàn toàn không đọc/ghi Firestore, chỉ giao tiếp Client <-> /api/tts.
  */
 export async function fetchTtsAudioBlobWithWatchdog(params: {
@@ -153,18 +155,24 @@ export function cleanTextForTTS(raw: string): string {
 }
 
 /**
- * Thuật toán Chunking tối ưu 500 - 800 ký tự theo ranh giới dấu chấm / xuống dòng tiếng Việt.
- * Giảm thiểu số lượng HTTP request khi nghe nền hoặc ở tốc độ 2x.
+ * Thuật toán Chunking tối ưu khởi động nhanh & đọc mượt 2x:
+ * - Đoạn đầu tiên (chunk 0): cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
+ * - Các đoạn tiếp theo (chunk >= 1): gộp nhiều câu thành 400 - 600 ký tự theo ranh giới dấu câu / xuống dòng,
+ *   tuyệt đối không cắt ngang từ, đảm bảo mỗi đoạn đọc được 12 - 15 giây kể cả ở tốc độ 2x.
  */
 export function chunkChapterContent(
   content: string,
   idealMinLength: number = DEFAULT_CHUNK_MIN_LENGTH,
-  idealMaxLength: number = DEFAULT_CHUNK_MAX_LENGTH
+  idealMaxLength: number = DEFAULT_CHUNK_MAX_LENGTH,
+  firstMinLength: number = DEFAULT_FIRST_CHUNK_MIN_LENGTH,
+  firstMaxLength: number = DEFAULT_FIRST_CHUNK_MAX_LENGTH
 ): AudioChunk[] {
   if (!content || !content.trim()) return [];
 
-  const minLen = Math.max(200, idealMinLength);
-  const maxLen = Math.max(minLen + 100, idealMaxLength);
+  const nextMinLen = Math.max(250, idealMinLength);
+  const nextMaxLen = Math.max(nextMinLen + 100, idealMaxLength);
+  const headMinLen = Math.max(100, firstMinLength);
+  const headMaxLen = Math.max(headMinLen + 50, firstMaxLength);
 
   const rawParagraphs = content
     .split(/\r?\n+/)
@@ -181,6 +189,13 @@ export function chunkChapterContent(
   let rawAccumulator = '';
   let accStartOffset = 0;
   let accParaIndex = 0;
+
+  const getActiveLimits = () => {
+    if (chunks.length === 0) {
+      return { minLen: headMinLen, maxLen: headMaxLen };
+    }
+    return { minLen: nextMinLen, maxLen: nextMaxLen };
+  };
 
   const pushChunk = (textVal: string, rawVal: string, startOffset: number, pIdx: number) => {
     const trimmedText = textVal.replace(/\s+/g, ' ').trim();
@@ -205,6 +220,38 @@ export function chunkChapterContent(
     }
   };
 
+  const appendSubUnit = (unit: string, rawSep: string, pIndex: number) => {
+    const { minLen, maxLen } = getActiveLimits();
+    if (!accumulator) {
+      accParaIndex = pIndex;
+      accStartOffset = runningCharOffset;
+      accumulator = unit;
+      rawAccumulator = unit;
+      if (accumulator.length >= minLen) {
+        flushAccumulator();
+      }
+      return;
+    }
+
+    if (accumulator.length + 1 + unit.length <= maxLen) {
+      accumulator = `${accumulator} ${unit}`;
+      rawAccumulator = `${rawAccumulator}${rawSep}${unit}`;
+      if (accumulator.length >= minLen) {
+        flushAccumulator();
+      }
+      return;
+    }
+
+    flushAccumulator();
+    accParaIndex = pIndex;
+    accStartOffset = runningCharOffset;
+    accumulator = unit;
+    rawAccumulator = unit;
+    if (getActiveLimits().minLen <= accumulator.length) {
+      flushAccumulator();
+    }
+  };
+
   for (let pIndex = 0; pIndex < rawParagraphs.length; pIndex++) {
     const paraText = rawParagraphs[pIndex];
     const sentences = paraText
@@ -215,53 +262,51 @@ export function chunkChapterContent(
     let isFirstSentenceInPara = true;
 
     for (const sentence of sentences) {
-      if (sentence.length > maxLen) {
-        flushAccumulator();
+      const { minLen, maxLen } = getActiveLimits();
+      const rawSeparator = isFirstSentenceInPara ? '\n' : ' ';
+
+      // Nếu câu hiện tại vượt quá maxLen (ví dụ > 250 ở đoạn đầu hoặc > 600 ở các đoạn sau)
+      // Hoặc đoạn đầu mới chỉ có tiêu đề ngắn (< 120 ký tự) nhưng câu tiếp theo vượt quá 250 ký tự:
+      // Tách theo ranh giới mệnh đề (dấu phẩy, hai chấm, gạch ngang) hoặc ranh giới từ (không bao giờ cắt ngang từ)
+      const needsSubSplit =
+        sentence.length > maxLen ||
+        (chunks.length === 0 && accumulator.length > 0 && accumulator.length < 120 && accumulator.length + 1 + sentence.length > maxLen);
+
+      if (needsSubSplit) {
+        if (accumulator && (accumulator.length >= 120 || chunks.length > 0)) {
+          flushAccumulator();
+        }
 
         const clauses = sentence
           .split(/(?<=[,:—–-])\s+/)
           .map((c) => c.trim())
           .filter(Boolean);
 
-        let clauseBuf = '';
-        let clauseStart = runningCharOffset;
-
+        let firstClause = true;
         for (const clause of clauses) {
-          if (clause.length > maxLen) {
-            if (clauseBuf) {
-              pushChunk(clauseBuf, clauseBuf, clauseStart, pIndex);
-              clauseStart += clauseBuf.length + 1;
-              clauseBuf = '';
-            }
-            const words = clause.split(/\s+/);
-            let wordBuf = '';
-            for (const w of words) {
-              if (wordBuf && wordBuf.length + 1 + w.length > maxLen) {
-                pushChunk(wordBuf, wordBuf, clauseStart, pIndex);
-                clauseStart += wordBuf.length + 1;
-                wordBuf = w;
+          const curMax = getActiveLimits().maxLen;
+          const sep = firstClause ? rawSeparator : ' ';
+          firstClause = false;
+
+          if (clause.length > curMax) {
+            const words = clause.split(/\s+/).filter(Boolean);
+            for (const word of words) {
+              const wordLimit = getActiveLimits().maxLen;
+              if (word.length > wordLimit) {
+                flushAccumulator();
+                pushChunk(word, word, runningCharOffset, pIndex);
               } else {
-                wordBuf = wordBuf ? `${wordBuf} ${w}` : w;
+                appendSubUnit(word, ' ', pIndex);
               }
             }
-            if (wordBuf) clauseBuf = wordBuf;
-          } else if (clauseBuf && clauseBuf.length + 1 + clause.length > maxLen) {
-            pushChunk(clauseBuf, clauseBuf, clauseStart, pIndex);
-            clauseStart += clauseBuf.length + 1;
-            clauseBuf = clause;
           } else {
-            clauseBuf = clauseBuf ? `${clauseBuf} ${clause}` : clause;
+            appendSubUnit(clause, sep, pIndex);
           }
         }
 
-        if (clauseBuf) {
-          pushChunk(clauseBuf, clauseBuf, clauseStart, pIndex);
-        }
         isFirstSentenceInPara = false;
         continue;
       }
-
-      const rawSeparator = isFirstSentenceInPara ? '\n' : ' ';
 
       if (!accumulator) {
         accParaIndex = pIndex;
@@ -283,7 +328,7 @@ export function chunkChapterContent(
         accStartOffset = runningCharOffset;
         accumulator = sentence;
         rawAccumulator = sentence;
-        if (accumulator.length >= minLen) {
+        if (getActiveLimits().minLen <= accumulator.length) {
           flushAccumulator();
         }
       }
@@ -291,8 +336,8 @@ export function chunkChapterContent(
       isFirstSentenceInPara = false;
     }
 
-    // Nếu đoạn văn vừa kết thúc và độ dài tích lũy đã đạt tối thiểu (>= 500 ký tự), ngắt đúng điểm xuống dòng
-    if (accumulator.length >= minLen) {
+    // Nếu đoạn văn vừa kết thúc và độ dài tích lũy đã đạt tối thiểu, ngắt đúng điểm xuống dòng
+    if (accumulator.length >= getActiveLimits().minLen) {
       flushAccumulator();
     }
 
@@ -307,12 +352,12 @@ export const splitChapterIntoSpeechChunks = chunkChapterContent;
 
 export function splitTextIntoSpeechChunks(
   text: string,
-  maxLength: number = 750
+  maxLength: number = DEFAULT_CHUNK_MAX_LENGTH
 ): string[] {
   const cleaned = cleanTextForTTS(text);
   if (!cleaned) return [];
 
-  const safeMax = Math.max(300, Math.min(DEFAULT_CHUNK_MAX_LENGTH, maxLength));
+  const safeMax = Math.max(250, Math.min(DEFAULT_CHUNK_MAX_LENGTH, maxLength));
   const rawSegments = cleaned.split(/(?<=[.?!;…])/);
   const chunks: string[] = [];
   let buffer = '';
@@ -340,9 +385,7 @@ export function splitTextIntoSpeechChunks(
             chunks.push(wordBuf.trim());
             wordBuf = '';
           }
-          for (let i = 0; i < word.length; i += safeMax) {
-            chunks.push(word.slice(i, i + safeMax));
-          }
+          chunks.push(word);
           continue;
         }
         const nextWordBuf = wordBuf ? `${wordBuf} ${word}` : word;
@@ -372,7 +415,7 @@ export function splitTextIntoSpeechChunks(
 
 /**
  * Bộ nhớ đệm Audio RAM trình duyệt (Blob ObjectURL Cache)
- * Giới hạn cứng tối đa 5 đoạn (MAX_BLOB_CACHE_ENTRIES = 5) để chống tràn RAM mobile.
+ * Giới hạn cứng tối đa 3 đoạn (MAX_BLOB_CACHE_ENTRIES = 3) để chống tràn RAM mobile.
  */
 class SeamlessAudioCache {
   private blobUrls = new Map<string, string>();
@@ -553,7 +596,7 @@ export class AudioStreamer {
   public setContent(content: string) {
     this.pause();
     seamlessAudioCache.clear();
-    this.chunks = chunkChapterContent(content, DEFAULT_CHUNK_MIN_LENGTH, DEFAULT_CHUNK_MAX_LENGTH);
+    this.chunks = chunkChapterContent(content);
     this.currentChunkIndex = -1;
   }
 
@@ -609,16 +652,6 @@ export class AudioStreamer {
     this.currentChunkIndex = index;
     if (this.onChunkChange) this.onChunkChange(index, chunk);
 
-    // Lookahead Buffer 4 đoạn kế tiếp (tổng tối đa 5 đoạn trong RAM gồm cả đoạn hiện tại)
-    for (let offset = 1; offset <= 4; offset++) {
-      const target = this.chunks[index + offset];
-      if (target) {
-        seamlessAudioCache
-          .fetchAndCache(this.voiceId, target.text, undefined, signal, chunk.text)
-          .catch(() => {});
-      }
-    }
-
     try {
       const audioUrl = await seamlessAudioCache.fetchAndCache(
         this.voiceId,
@@ -633,7 +666,6 @@ export class AudioStreamer {
       this.audioElement.onstalled = null;
       this.audioElement.onloadedmetadata = null;
       this.audioElement.onplaying = null;
-      this.audioElement.pause();
       this.audioElement.src = audioUrl;
       this.audioElement.defaultPlaybackRate = this.playbackRate;
       this.audioElement.playbackRate = this.playbackRate;
@@ -675,7 +707,7 @@ export class AudioStreamer {
           }
           seamlessAudioCache.revokeEntry(this.voiceId, chunk.text);
           this.playChunk(index + 1);
-        }, 5000);
+        }, 8000);
       };
 
       this.audioElement.onended = () => {
@@ -701,6 +733,14 @@ export class AudioStreamer {
       this.audioElement.defaultPlaybackRate = this.playbackRate;
       this.audioElement.playbackRate = this.playbackRate;
       this.isPlaying = true;
+
+      // Chỉ prefetch đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
+      const nextTarget = this.chunks[index + 1];
+      if (nextTarget && !signal.aborted) {
+        seamlessAudioCache
+          .fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text)
+          .catch(() => {});
+      }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.warn(`[AudioStreamer] Failed after 3 retries for chunk #${index}:`, err);

@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   AudioChunk,
-  DEFAULT_CHUNK_MAX_LENGTH,
-  DEFAULT_CHUNK_MIN_LENGTH,
   MAX_BLOB_CACHE_ENTRIES,
   chunkChapterContent,
   seamlessAudioCache,
@@ -44,9 +42,9 @@ export interface UseSeamlessTTSReturn {
   setPlaybackRate: (rate: number) => void;
 }
 
-const PREFETCH_LOOKAHEAD = 4; // Tải gối đầu i+1..i+4 (cùng đoạn i đang phát = tối đa 5 đoạn)
-const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 5
-const STALL_WATCHDOG_MS = 5000;
+const PREFETCH_LOOKAHEAD = 1; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
+const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 3
+const STALL_WATCHDOG_MS = 12000;
 
 export function useSeamlessTTS({
   content,
@@ -89,6 +87,7 @@ export function useSeamlessTTS({
 
   const isPlaybackActiveRef = useRef<boolean>(false);
   const currentIndexRef = useRef<number>(-1);
+  const consecutiveChunkErrorsRef = useRef<number>(0);
   const voiceIdRef = useRef<string>(voiceId);
   const playbackRateRef = useRef<number>(playbackRate);
   const autoPlayRef = useRef<boolean>(autoPlay);
@@ -219,9 +218,9 @@ export function useSeamlessTTS({
     applyPlaybackRateLock(audioElementRef.current, playbackRate);
   }, [playbackRate, applyPlaybackRateLock]);
 
-  // Gom đoạn tối ưu 500 - 800 ký tự
+  // Đoạn đầu 150-250 ký tự khởi động nhanh, các đoạn sau 400-600 ký tự
   const chunks = useMemo(() => {
-    return chunkChapterContent(content, DEFAULT_CHUNK_MIN_LENGTH, DEFAULT_CHUNK_MAX_LENGTH);
+    return chunkChapterContent(content);
   }, [content]);
 
   const chunksRef = useRef<AudioChunk[]>(chunks);
@@ -298,6 +297,8 @@ export function useSeamlessTTS({
 
     const audio = new Audio();
     audio.preload = 'auto';
+    audio.setAttribute('playsinline', 'true');
+    audio.setAttribute('webkit-playsinline', 'true');
     applyPlaybackRateLock(audio, playbackRateRef.current);
     audioElementRef.current = audio;
 
@@ -333,6 +334,7 @@ export function useSeamlessTTS({
     prefetchGenerationRef.current += 1;
     activeChunkTokenRef.current = '';
     isPlaybackActiveRef.current = false;
+    consecutiveChunkErrorsRef.current = 0;
     clearStallWatchdogs();
     if (prefetchAbortRef.current) {
       try {
@@ -364,7 +366,7 @@ export function useSeamlessTTS({
   }, [clearStallWatchdogs, revokeAllBlobs, updateProgressBarDomNow]);
 
   /**
-   * Lookahead Buffer 4 đoạn kế tiếp (i+1..i+4) lưu sẵn Blob URL vào Map (giới hạn cứng 5 đoạn)
+   * Chỉ tải trước (prefetch) đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
    */
   const runSequentialPrefetchQueue = useCallback(
     async (fromIndex: number, activeVoice: string, sessionNonce: number) => {
@@ -372,23 +374,15 @@ export function useSeamlessTTS({
       const genId = ++prefetchGenerationRef.current;
       const signal = prefetchAbortRef.current?.signal;
 
-      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 4]
+      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 1]
       for (const idx of Array.from(blobMapRef.current.keys())) {
         if (idx < fromIndex || idx > fromIndex + PREFETCH_LOOKAHEAD) {
           revokeChunkIndex(idx, activeVoice, curChunks[idx]?.text);
         }
       }
 
-      const targets: number[] = [];
-      for (let offset = 1; offset <= PREFETCH_LOOKAHEAD; offset++) {
-        const targetIdx = fromIndex + offset;
-        if (targetIdx >= 0 && targetIdx < (curChunks?.length || 0)) {
-          targets.push(targetIdx);
-        }
-      }
-
-      const newlyBuffered: number[] = [];
-      for (let i = 0; i < targets.length; i += 2) {
+      const targetIdx = fromIndex + 1;
+      if (targetIdx >= 0 && targetIdx < (curChunks?.length || 0)) {
         if (
           genId !== prefetchGenerationRef.current ||
           sessionNonce !== sessionNonceRef.current ||
@@ -398,34 +392,27 @@ export function useSeamlessTTS({
           return;
         }
 
-        const batch = targets.slice(i, i + 2);
-        await Promise.all(
-          batch.map(async (targetIdx) => {
-            if (blobMapRef.current.has(targetIdx)) {
-              newlyBuffered.push(targetIdx);
+        if (!blobMapRef.current.has(targetIdx)) {
+          try {
+            const url = await seamlessAudioCache.fetchAndCache(
+              activeVoice,
+              curChunks[targetIdx].text,
+              undefined,
+              signal,
+              curChunks[fromIndex]?.text
+            );
+            if (
+              genId !== prefetchGenerationRef.current ||
+              sessionNonce !== sessionNonceRef.current ||
+              !isPlaybackActiveRef.current ||
+              signal?.aborted
+            ) {
+              safeRevokeUrl(url);
               return;
             }
-            try {
-              const url = await seamlessAudioCache.fetchAndCache(
-                activeVoice,
-                curChunks[targetIdx].text,
-                undefined,
-                signal,
-                curChunks[fromIndex]?.text
-              );
-              if (
-                genId !== prefetchGenerationRef.current ||
-                sessionNonce !== sessionNonceRef.current ||
-                !isPlaybackActiveRef.current ||
-                signal?.aborted
-              ) {
-                return;
-              }
-              setBlobWithHardLimit(targetIdx, url, fromIndex);
-              newlyBuffered.push(targetIdx);
-            } catch {}
-          })
-        );
+            setBlobWithHardLimit(targetIdx, url, fromIndex);
+          } catch {}
+        }
       }
 
       if (genId === prefetchGenerationRef.current && sessionNonce === sessionNonceRef.current) {
@@ -434,7 +421,7 @@ export function useSeamlessTTS({
         );
       }
     },
-    [revokeChunkIndex, setBlobWithHardLimit]
+    [revokeChunkIndex, safeRevokeUrl, setBlobWithHardLimit]
   );
 
   const playChunk = useCallback(
@@ -533,11 +520,9 @@ export function useSeamlessTTS({
         audio.ontimeupdate = null;
         audio.onloadedmetadata = null;
 
-        audio.pause();
+        // Giữ nguyên 1 phần tử <audio> cố định và chỉ thay src (không pause giữa chừng để giữ lockscreen focus)
         audio.src = audioUrl;
         applyPlaybackRateLock(audio, playbackRateRef.current);
-
-        runSequentialPrefetchQueue(index, currentVoice, sessionNonce).catch(() => {});
 
         let stallRecoveryStage = 0;
         let isRecovering = false;
@@ -593,7 +578,10 @@ export function useSeamlessTTS({
                 abortSignal,
                 chunk.text
               );
-              if (!isCurrentChunkValid()) return;
+              if (!isCurrentChunkValid()) {
+                safeRevokeUrl(freshUrl);
+                return;
+              }
               setBlobWithHardLimit(index, freshUrl, index);
               audio.src = freshUrl;
               applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -602,6 +590,7 @@ export function useSeamlessTTS({
               applyPlaybackRateLock(audio, playbackRateRef.current);
               setIsLoading(false);
               setRetryAttempt(0);
+              consecutiveChunkErrorsRef.current = 0;
               lastMediaAdvanceAtRef.current = Date.now();
               return;
             }
@@ -609,19 +598,23 @@ export function useSeamlessTTS({
             revokeChunkIndex(index, currentVoice, chunk.text);
             setIsLoading(false);
             setRetryAttempt(0);
-            if (index + 1 < (chunksRef.current?.length || 0)) {
+            consecutiveChunkErrorsRef.current += 1;
+            if (consecutiveChunkErrorsRef.current < 2 && index + 1 < (chunksRef.current?.length || 0)) {
               playChunkRef.current(index + 1);
             } else {
               setIsPlaying(false);
               isPlaybackActiveRef.current = false;
-              setError(`Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`);
+              const errMsg = `Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`;
+              setError(errMsg);
+              onErrorRef.current?.(new Error(errMsg));
             }
           } catch (recoverErr: any) {
             if (recoverErr?.name === 'AbortError' || !isCurrentChunkValid()) return;
             revokeChunkIndex(index, currentVoice, chunk.text);
             setIsLoading(false);
             setRetryAttempt(0);
-            if (index + 1 < (chunksRef.current?.length || 0)) {
+            consecutiveChunkErrorsRef.current += 1;
+            if (consecutiveChunkErrorsRef.current < 2 && index + 1 < (chunksRef.current?.length || 0)) {
               playChunkRef.current(index + 1);
             } else {
               setIsPlaying(false);
@@ -649,6 +642,7 @@ export function useSeamlessTTS({
 
         audio.onplaying = () => {
           clearLocalStallTimer();
+          consecutiveChunkErrorsRef.current = 0;
           lastMediaAdvanceAtRef.current = Date.now();
           applyPlaybackRateLock(audio, playbackRateRef.current);
         };
@@ -666,12 +660,21 @@ export function useSeamlessTTS({
 
         stallCheckIntervalRef.current = setInterval(() => {
           if (!isCurrentChunkValid() || isRecovering) return;
+          if (typeof document !== 'undefined' && document.hidden && audio.readyState >= 2) {
+            return;
+          }
           if (!audio.paused && !audio.ended) {
+            if (audio.currentTime > lastMediaTimeRef.current + 0.05) {
+              lastMediaTimeRef.current = audio.currentTime;
+              lastMediaAdvanceAtRef.current = Date.now();
+              clearLocalStallTimer();
+              return;
+            }
             if (Date.now() - lastMediaAdvanceAtRef.current >= STALL_WATCHDOG_MS) {
               recoverFromStallOrError('stalled');
             }
           }
-        }, 2000);
+        }, 2500);
 
         // MEMORY LEAK PROTECTION: Giải phóng ngay Blob URL của đoạn vừa đọc xong
         audio.onended = () => {
@@ -685,6 +688,7 @@ export function useSeamlessTTS({
           audio.onloadedmetadata = null;
 
           revokeChunkIndex(index, currentVoice, chunk.text);
+          consecutiveChunkErrorsRef.current = 0;
 
           if (!isCurrentChunkValid()) {
             return;
@@ -699,6 +703,7 @@ export function useSeamlessTTS({
 
         await audio.play();
         applyPlaybackRateLock(audio, playbackRateRef.current);
+        consecutiveChunkErrorsRef.current = 0;
         lastMediaAdvanceAtRef.current = Date.now();
 
         if (
@@ -707,6 +712,8 @@ export function useSeamlessTTS({
           isPlaybackActiveRef.current
         ) {
           setIsPlaying(true);
+          // Chỉ prefetch đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
+          runSequentialPrefetchQueue(index, currentVoice, sessionNonce).catch(() => {});
         }
       } catch (err: any) {
         if (err?.name === 'AbortError') return;
@@ -859,6 +866,12 @@ export function useSeamlessTTS({
       setVoiceIdState(normalized);
       voiceIdRef.current = normalized;
       prefetchGenerationRef.current += 1;
+      if (prefetchAbortRef.current) {
+        try {
+          prefetchAbortRef.current.abort();
+        } catch {}
+        prefetchAbortRef.current = new AbortController();
+      }
       revokeAllBlobs();
       setBufferedIndices([]);
       if (isPlaybackActiveRef.current && currentIndexRef.current >= 0) {
