@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="vi" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Browser Extension (Urban VPN, proxy, ad blockers) compatibility shim for window.fetch
+      (function() {
+        try {
+          var _origFetch = window.fetch;
+          var _currentFetch = _origFetch;
+          Object.defineProperty(window, 'fetch', {
+            get: function() {
+              return _currentFetch;
+            },
+            set: function(fn) {
+              _currentFetch = fn;
+            },
+            configurable: true,
+            enumerable: true
+          });
+        } catch (e) {
+          try {
+            var _protoFetch = Window.prototype.fetch;
+            Object.defineProperty(Window.prototype, 'fetch', {
+              get: function() {
+                return _currentFetch || _protoFetch;
+              },
+              set: function(fn) {
+                _currentFetch = fn;
+              },
+              configurable: true,
+              enumerable: true
+            });
+          } catch (e2) {}
+        }
+
+        // Suppress external extension errors (e.g. Urban VPN chrome-extension://...)
+        window.addEventListener('error', function(event) {
+          if (!event) return;
+          var filename = event.filename || (event.error && event.error.stack) || '';
+          var msg = event.message || '';
+          if (
+            (typeof filename === 'string' && (filename.indexOf('chrome-extension://') !== -1 || filename.indexOf('moz-extension://') !== -1)) ||
+            (typeof msg === 'string' && msg.indexOf('Cannot set property fetch') !== -1)
+          ) {
+            event.preventDefault && event.preventDefault();
+            event.stopImmediatePropagation && event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (!event) return;
+          var reason = event.reason;
+          var msg = (reason && reason.message) || String(reason || '');
+          var stack = (reason && reason.stack) || '';
+          if (
+            msg.indexOf('Cannot set property fetch') !== -1 ||
+            stack.indexOf('chrome-extension://') !== -1 ||
+            stack.indexOf('moz-extension://') !== -1
+          ) {
+            event.preventDefault && event.preventDefault();
+            event.stopImmediatePropagation && event.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+      })();
+
+      try {
+        var t = localStorage.getItem('daotam_theme');
+        if (t === 'dark') {
+          document.documentElement.classList.add('dark');
+          document.documentElement.classList.remove('light');
+        } else {
+          document.documentElement.classList.add('light');
+          document.documentElement.classList.remove('dark');
+        }
+      } catch (e) {}
+    </script>
+    <title>Đạo Tâm - Nền Tảng Đọc Truyện Chữ &amp; Audio</title>
+    <meta name="description" content="Đạo Tâm - Nền tảng đọc truyện chữ và audio tự động với Dark/Light mode, mục lục chi tiết, quy chuẩn VIP tự động và đồng bộ tiến trình đọc theo tài khoản." />
+    
+    <!-- Favicon & Icons for Google Search, Chrome Tabs & Bookmarks -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#db2777" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Đạo Tâm" />
+
+    <!-- OpenGraph Social Cards -->
+    <meta property="og:site_name" content="Đạo Tâm" />
+    <meta property="og:title" content="Đạo Tâm - Nền Tảng Đọc Truyện Chữ &amp; Audio" />
+    <meta property="og:description" content="Đạo Tâm - Nền tảng đọc truyện chữ và audio tự động với Dark/Light mode, mục lục chi tiết, quy chuẩn VIP tự động và đồng bộ tiến trình đọc theo tài khoản." />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/logo.png" />
+    <meta property="og:image:alt" content="Logo Đạo Tâm" />
+
+    <!-- Twitter / X Cards -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Đạo Tâm - Nền Tảng Đọc Truyện Chữ &amp; Audio" />
+    <meta name="twitter:description" content="Đạo Tâm - Nền tảng đọc truyện chữ và audio tự động với Dark/Light mode, mục lục chi tiết, quy chuẩn VIP tự động và đồng bộ tiến trình đọc theo tài khoản." />
+    <meta name="twitter:image" content="/logo.png" />
+
+    <!-- Google Structured Data (Schema.org) for Search Engine Logo & Sitelinks -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "Đạo Tâm",
+      "alternateName": "Đạo Tâm - Nền Tảng Đọc Truyện Chữ & Audio",
+      "url": "https://ais-pre-tgoofdzgeuhg2s3gi5weaz-991058009388.asia-east1.run.app",
+      "image": "https://ais-pre-tgoofdzgeuhg2s3gi5weaz-991058009388.asia-east1.run.app/logo.png",
+      "description": "Đạo Tâm - Nền tảng đọc truyện chữ và audio tự động với Dark/Light mode, mục lục chi tiết, quy chuẩn VIP tự động và đồng bộ tiến trình đọc theo tài khoản."
+    }
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,600&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=Merriweather:ital,wght@0,300;0,400;0,700;1,400&display=swap" rel="stylesheet" />
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

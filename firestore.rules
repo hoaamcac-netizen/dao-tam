@@ -1,0 +1,241 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return (
+        isVerified() && request.auth.token.email in [
+          'hoaamcac@gmail.com',
+          'meoyeutien22@gmail.com'
+        ]
+      );
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users collection: Độc giả lưu thông tin, ví Xu, tiến trình đọc, ảnh đại diện và bút danh
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if isSignedIn() && (
+        isAdmin() ||
+        (
+          (request.auth.uid == userId || userId.matches('^usr-.*')) &&
+          (!('role' in request.resource.data) || request.resource.data.role != 'admin')
+        )
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (
+          (
+            request.auth.uid == userId ||
+            (resource != null && resource.data.uid == request.auth.uid) ||
+            (isVerified() && resource != null && resource.data.email == request.auth.token.email && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['uid', 'authProvider', 'lastLogin', 'email'])) ||
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers', 'notifications', 'authorEarnedXu', 'xuBalance'])
+          ) &&
+          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) || request.resource.data.role != 'admin')
+        )
+      );
+      allow delete: if isAdmin();
+
+      match /purchases/{purchaseId} {
+        allow read, create, update: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /purchases/{purchaseId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && (request.resource.data.userId == request.auth.uid || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    // Novels & Stories collection: Danh sách tác phẩm (hỗ trợ đồng bộ từ server /api/batch-chapters)
+    match /novels/{novelId} {
+      allow read: if true;
+      allow create, update, delete: if true;
+
+      // Chapters subcollection: Nội dung từng chương - BẮT BUỘC request.auth != null mới được đọc
+      match /chapters/{chapterId} {
+        // LỚP 2: Chặn tool cào không đăng nhập / không có token xác thực Firebase
+        allow read: if isSignedIn();
+        allow create, update, delete: if true;
+      }
+    }
+
+    match /stories/{storyId} {
+      allow read: if true;
+      allow create, update, delete: if true;
+
+      match /chapters/{chapterId} {
+        // LỚP 2: Chặn tool cào không đăng nhập
+        allow read: if isSignedIn();
+        allow create, update, delete: if true;
+      }
+    }
+
+    // Categories collection: Danh mục thể loại truyện động
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // TopUp Requests collection: Nạp tiền (Hỗ trợ độc giả gửi ảnh bill chuyển khoản đối soát)
+    match /topup_requests/{requestId} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && (isAdmin() || request.resource.data.userId == request.auth.uid);
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (resource.data.userId == request.auth.uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['billImageUrl', 'updatedAt']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Novel Submissions collection: Bản thảo tác phẩm
+    match /novel_submissions/{submissionId} {
+      allow read, create, update: if isSignedIn();
+      allow delete: if isAdmin();
+
+      // Chapters subcollection: 5 chương bản thảo thẩm định
+      match /chapters/{chapterId} {
+        allow read, create, update: if isSignedIn();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // Creator Applications collection: Đơn đăng ký Editor / Tác giả
+    match /creator_applications/{applicationId} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && (isAdmin() || request.resource.data.userId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    // Withdrawal Requests collection: Rút tiền nhuận bút
+    match /withdrawal_requests/{requestId} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.authorId == request.auth.uid);
+      allow create: if isSignedIn() && (isAdmin() || request.resource.data.authorId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    // Novel Reports collection: Báo cáo vi phạm
+    match /novel_reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // Comments collection: Bình luận thật của độc giả
+    match /comments/{commentId} {
+      allow read: if true;
+      allow create, update: if isSignedIn();
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // Donations collection: Lịch sử ủng hộ / tặng Xu giữa độc giả và người đăng truyện / tác giả
+    match /donations/{donationId} {
+      allow read: if true;
+      allow create: if isSignedIn() && (isAdmin() || request.resource.data.donorUserId == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+
+    // Notifications collection: Thông báo hệ thống, duyệt/từ chối nạp tiền gửi tới độc giả
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Conversations collection: Hội thoại trực tiếp thời gian thực
+    match /conversations/{conversationId} {
+      // 2 Quản trị viên tàng hình ('hoaamcac@gmail.com', 'meoyeutien22@gmail.com') có toàn quyền read
+      // Người dùng chỉ được đọc cuộc trò chuyện của chính mình
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid in resource.data.participants);
+      
+      // Tạo mới: Phải đăng nhập và là một bên tham gia
+      allow create: if isSignedIn() && (request.auth.uid in request.resource.data.participants);
+      
+      // Cập nhật tin nhắn cuối cùng hoặc đánh dấu đã đọc
+      allow update: if isAdmin() || (isSignedIn() && request.auth.uid in resource.data.participants);
+      
+      // Chỉ Admin mới được xóa cuộc trò chuyện
+      allow delete: if isAdmin();
+
+      // Subcollection messages: Chi tiết tin nhắn
+      match /messages/{messageId} {
+        // Admin tàng hình đọc tất cả tin nhắn
+        // Người dùng chỉ đọc được tin nhắn nếu là thành viên cuộc hội thoại
+        allow read: if isAdmin() || (
+          isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants
+        );
+
+        // Người dùng chỉ được gửi tin nhắn với tư cách chính mình vào hội thoại của mình
+        allow create: if isSignedIn() && (
+          request.resource.data.senderId == request.auth.uid &&
+          request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants
+        );
+
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // Support Chats collection: Hỗ trợ trực tuyến thời gian thực giữa độc giả và BQT
+    match /support_chats/{userId} {
+      // Độc giả đọc/sửa chat của chính mình, 2 Quản trị viên đọc/sửa toàn bộ
+      allow read, create, update: if isSignedIn() && (isAdmin() || request.auth.uid == userId);
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (isAdmin() || request.auth.uid == userId);
+        allow create: if isSignedIn() && (
+          isAdmin() ||
+          (request.auth.uid == userId && request.resource.data.uid == request.auth.uid)
+        );
+        allow update, delete: if isAdmin();
+      }
+    }
+
+    // Settings (Thông báo toàn trang: settings/global_banner)
+    // Chỉ cho phép get 1 doc (tuyệt đối không allow list), chỉ 2 Admin được ghi
+    match /settings/global_banner {
+      allow get: if true;
+      allow create, update: if isAdmin() &&
+        request.resource.data.keys().hasAll(['isActive', 'message', 'updatedAt']) &&
+        request.resource.data.keys().hasOnly(['isActive', 'message', 'updatedAt']) &&
+        request.resource.data.isActive is bool &&
+        request.resource.data.message is string &&
+        request.resource.data.message.size() <= 2000 &&
+        request.resource.data.updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    // Stats (Thống kê tài chính tích lũy: stats/finance)
+    // Chỉ cho phép 2 Admin đọc (get) và cập nhật số liệu tích lũy
+    match /stats/finance {
+      allow get: if isAdmin();
+      allow create, update: if isAdmin() &&
+        request.resource.data.keys().hasAll(['totalRevenueVnd', 'totalApprovedXu']) &&
+        request.resource.data.keys().hasOnly(['totalRevenueVnd', 'totalApprovedXu', 'updatedAt']) &&
+        (request.resource.data.totalRevenueVnd is int || request.resource.data.totalRevenueVnd is float) &&
+        request.resource.data.totalRevenueVnd >= 0 &&
+        (request.resource.data.totalApprovedXu is int || request.resource.data.totalApprovedXu is float) &&
+        request.resource.data.totalApprovedXu >= 0;
+      allow delete: if false;
+    }
+
+    // Test connection doc
+    match /test/{docId} {
+      allow read: if true;
+    }
+  }
+}
+

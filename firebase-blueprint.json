@@ -1,0 +1,380 @@
+{
+  "entities": {
+    "Donation": {
+      "title": "Donation",
+      "description": "Lịch sử giao dịch ủng hộ tặng Xu giữa độc giả và người đăng truyện",
+      "type": "object",
+      "properties": {
+        "donorUserId": { "type": "string", "description": "ID người tặng" },
+        "donorName": { "type": "string", "description": "Tên người tặng" },
+        "donorEmail": { "type": "string", "description": "Email người tặng" },
+        "recipientUserId": { "type": "string", "description": "ID người nhận (tác giả hoặc người đăng)" },
+        "recipientName": { "type": "string", "description": "Tên người nhận" },
+        "novelId": { "type": "string", "description": "ID truyện được ủng hộ" },
+        "novelTitle": { "type": "string", "description": "Tên truyện được ủng hộ" },
+        "amountXu": { "type": "number", "description": "Số Xu tặng" },
+        "message": { "type": "string", "description": "Lời nhắn gửi kèm" },
+        "createdAt": { "type": "number", "description": "Thời gian giao dịch" },
+        "status": { "type": "string", "description": "Trạng thái giao dịch" }
+      },
+      "required": ["donorUserId", "donorName", "recipientUserId", "amountXu"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Thông tin độc giả, số dư ví Xu và phân quyền",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID hiện tại gắn với tài khoản" },
+        "authProvider": { "type": "string", "description": "Phương thức đăng nhập (vd: google.com, password)" },
+        "email": { "type": "string", "description": "Email người dùng" },
+        "displayName": { "type": "string", "description": "Tên hiển thị" },
+        "avatarUrl": { "type": "string", "description": "Ảnh đại diện" },
+        "role": { "type": "string", "description": "Vai trò người dùng: admin, author hoặc reader" },
+        "isBanned": { "type": "boolean", "description": "Trạng thái bị khóa tài khoản vi phạm" },
+        "isLocked": { "type": "boolean", "description": "Trạng thái khóa đồng bộ sắp xếp Admin" },
+        "status": { "type": "string", "description": "Trạng thái tài khoản (Hoạt động, banned, Bị khóa)" },
+        "xuBalance": { "type": "number", "description": "Số dư Xu hiện tại" },
+        "purchasedChapters": { "type": "array", "description": "Danh sách chương VIP đã mở khóa" },
+        "unlockedFullBooks": { "type": "array", "description": "Danh sách truyện đã mua trọn bộ" },
+        "mergedInto": { "type": "string", "description": "ID document chính nếu document phụ đã được gộp" },
+        "mergedAt": { "type": "number", "description": "Thời điểm gộp tài khoản trùng" },
+        "lastLogin": { "type": "number", "description": "Thời điểm đăng nhập gần nhất" },
+        "createdAt": { "type": "string", "description": "Thời điểm khởi tạo" }
+      },
+      "required": ["email", "displayName", "role", "xuBalance"]
+    },
+    "Novel": {
+      "title": "Novel",
+      "description": "Thông tin tác phẩm truyện chữ và audio",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Tên truyện" },
+        "slug": { "type": "string", "description": "Đường dẫn tĩnh slug" },
+        "author": { "type": "string", "description": "Tác giả sáng tác" },
+        "editor": { "type": "string", "description": "Editor hoặc người dịch" },
+        "coverImage": { "type": "string", "description": "Ảnh bìa truyện" },
+        "mainCategory": { "type": "string", "description": "Phân mục chính: dam-my, truyen-nam, truyen-nu, truyen-sang-tac" },
+        "status": { "type": "string", "description": "Trạng thái: Đang ra hoặc Hoàn thành" },
+        "totalChapters": { "type": "number", "description": "Tổng số chương dự kiến" },
+        "views": { "type": "number", "description": "Lượt đọc" },
+        "flowerCount": { "type": "number", "description": "Số hoa đề cử (chỉ tăng bằng increment())" },
+        "coinCount": { "type": "number", "description": "Số xu được tặng (chỉ tăng bằng increment())" },
+        "rating": { "type": "number", "description": "Đánh giá sao" },
+        "description": { "type": "string", "description": "Văn án tóm tắt truyện" },
+        "fullBookPriceXu": { "type": "number", "description": "Giá Xu trọn bộ" },
+        "fullBookDiscountPriceXu": { "type": "number", "description": "Giá Xu ưu đãi combo" },
+        "isShortStory": { "type": "boolean", "description": "Đánh dấu truyện ngắn / đoản văn" },
+        "updatedAt": { "type": "number", "description": "Thời gian cập nhật thông tin truyện" },
+        "lastChapterUpdatedAt": { "type": "number", "description": "Thời gian ra hoặc sửa chương gần nhất (dùng để sắp xếp Mới cập nhật & Truyện full)" }
+      },
+      "required": ["title", "author", "coverImage", "mainCategory", "status", "totalChapters"]
+    },
+    "Chapter": {
+      "title": "Chapter",
+      "description": "Nội dung văn bản từng chương với cờ VIP và giá Xu",
+      "type": "object",
+      "properties": {
+        "number": { "type": "number", "description": "Thứ tự chương" },
+        "title": { "type": "string", "description": "Tiêu đề chương" },
+        "slug": { "type": "string", "description": "Slug chương" },
+        "content": { "type": "string", "description": "Nội dung chi tiết chương" },
+        "wordCount": { "type": "number", "description": "Số lượng từ" },
+        "isVip": { "type": "boolean", "description": "Cờ đánh dấu chương VIP" },
+        "priceXu": { "type": "number", "description": "Số Xu cần để mở khóa" },
+        "audioCache": { "type": "object", "description": "Kho lưu URL audio MP3 trên Firebase Cloud Storage theo giọng đọc và chỉ số chunk" }
+      },
+      "required": ["number", "title", "content", "isVip", "priceXu"]
+    },
+    "TopUpRequest": {
+      "title": "TopUpRequest",
+      "description": "Yêu cầu nạp Xu từ độc giả gửi tới BQT",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID người nạp" },
+        "userEmail": { "type": "string", "description": "Email người nạp" },
+        "userName": { "type": "string", "description": "Tên người nạp" },
+        "amountVnd": { "type": "number", "description": "Số tiền VNĐ" },
+        "xuAmount": { "type": "number", "description": "Số Xu quy đổi" },
+        "transferCode": { "type": "string", "description": "Mã nội dung chuyển khoản" },
+        "bankName": { "type": "string", "description": "Ngân hàng nhận" },
+        "accountNumber": { "type": "string", "description": "Số tài khoản nhận" },
+        "billImageUrl": { "type": "string", "description": "Ảnh biên lai bill chuyển khoản ngân hàng" },
+        "status": { "type": "string", "description": "pending, approved hoặc rejected" },
+        "createdAt": { "type": "number", "description": "Thời gian tạo yêu cầu" }
+      },
+      "required": ["userId", "amountVnd", "xuAmount", "transferCode", "status", "createdAt"]
+    },
+    "NovelSubmission": {
+      "title": "NovelSubmission",
+      "description": "Bản thảo truyện gửi lên BQT chờ thẩm định",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Tên truyện" },
+        "author": { "type": "string", "description": "Tác giả" },
+        "mainCategory": { "type": "string", "description": "Phân mục chính" },
+        "isShortStory": { "type": "boolean", "description": "Đánh dấu truyện ngắn / đoản văn" },
+        "description": { "type": "string", "description": "Văn án" },
+        "status": { "type": "string", "description": "pending, approved hoặc rejected" },
+        "submittedAt": { "type": "number", "description": "Thời gian gửi" }
+      },
+      "required": ["title", "author", "mainCategory", "description", "status", "submittedAt"]
+    },
+    "CreatorApplication": {
+      "title": "CreatorApplication",
+      "description": "Đơn xin nâng cấp thành Editor / Tác giả gửi tới Admin",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID người đăng ký" },
+        "userName": { "type": "string", "description": "Tên người dùng" },
+        "userEmail": { "type": "string", "description": "Email người dùng" },
+        "roleType": { "type": "string", "description": "author, editor hoặc both" },
+        "penName": { "type": "string", "description": "Bút danh sáng tác / biên tập" },
+        "status": { "type": "string", "description": "pending, approved hoặc rejected" },
+        "submittedAt": { "type": "number", "description": "Thời gian nộp đơn" }
+      },
+      "required": ["userId", "userName", "userEmail", "roleType", "penName", "status", "submittedAt"]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Yêu cầu rút tiền nhuận bút của Tác giả / Editor",
+      "type": "object",
+      "properties": {
+        "authorId": { "type": "string", "description": "ID tác giả rút tiền" },
+        "authorName": { "type": "string", "description": "Tên tác giả" },
+        "authorEmail": { "type": "string", "description": "Email tác giả" },
+        "amountXu": { "type": "number", "description": "Số Xu yêu cầu rút" },
+        "amountVnd": { "type": "number", "description": "Số tiền VNĐ quy đổi" },
+        "bankName": { "type": "string", "description": "Ngân hàng thụ hưởng" },
+        "accountNumber": { "type": "string", "description": "Số tài khoản thụ hưởng" },
+        "accountHolder": { "type": "string", "description": "Chủ tài khoản" },
+        "status": { "type": "string", "description": "pending, approved hoặc rejected" },
+        "createdAt": { "type": "number", "description": "Thời gian tạo yêu cầu" }
+      },
+      "required": ["authorId", "amountXu", "amountVnd", "bankName", "accountNumber", "accountHolder", "status", "createdAt"]
+    },
+    "NovelReport": {
+      "title": "NovelReport",
+      "description": "Báo cáo vi phạm tác phẩm gửi tới BQT",
+      "type": "object",
+      "properties": {
+        "novelId": { "type": "string", "description": "ID truyện bị báo cáo" },
+        "novelTitle": { "type": "string", "description": "Tên truyện" },
+        "author": { "type": "string", "description": "Tác giả" },
+        "reason": { "type": "string", "description": "Lý do báo cáo" },
+        "status": { "type": "string", "description": "pending, resolved hoặc dismissed" },
+        "createdAt": { "type": "number", "description": "Thời gian báo cáo" }
+      },
+      "required": ["novelId", "novelTitle", "author", "reason", "status", "createdAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Bình luận thật của độc giả cho từng tác phẩm hoặc chương",
+      "type": "object",
+      "properties": {
+        "novelId": { "type": "string", "description": "ID truyện được bình luận" },
+        "chapterNumber": { "type": "number", "description": "Số chương bình luận (nếu có)" },
+        "userId": { "type": "string", "description": "ID người bình luận" },
+        "userName": { "type": "string", "description": "Tên người bình luận" },
+        "userAvatar": { "type": "string", "description": "Avatar người bình luận" },
+        "content": { "type": "string", "description": "Nội dung bình luận" },
+        "likes": { "type": "number", "description": "Số lượt thích" },
+        "createdAt": { "type": "number", "description": "Thời gian bình luận" }
+      },
+      "required": ["novelId", "userName", "content", "createdAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Thể loại truyện",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Tên thể loại" },
+        "description": { "type": "string", "description": "Mô tả thể loại" }
+      },
+      "required": ["name"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Lưu các thông báo hệ thống và nạp tiền cho độc giả",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "ID người nhận" },
+        "title": { "type": "string", "description": "Tiêu đề thông báo" },
+        "message": { "type": "string", "description": "Nội dung chi tiết thông báo" },
+        "type": { "type": "string", "description": "Loại thông báo" },
+        "createdAt": { "type": "number", "description": "Thời gian tạo" },
+        "isRead": { "type": "boolean", "description": "Trạng thái đã đọc" },
+        "topUpRequestId": { "type": "string", "description": "Mã đơn nạp tiền liên quan" }
+      },
+      "required": ["userId", "title", "message", "type", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Lưu thông tin cuộc hội thoại 1-1 giữa Độc giả và Tác giả / Editor",
+      "type": "object",
+      "properties": {
+        "participants": { "type": "array", "description": "Danh sách ID 2 người tham gia" },
+        "participantDetails": { "type": "object", "description": "Thông tin tên, ảnh đại diện, vai trò của người tham gia" },
+        "lastMessage": { "type": "string", "description": "Nội dung tin nhắn cuối cùng" },
+        "lastSenderId": { "type": "string", "description": "ID người gửi tin nhắn cuối cùng" },
+        "lastSenderName": { "type": "string", "description": "Tên người gửi cuối cùng" },
+        "isRead": { "type": "boolean", "description": "Trạng thái đã đọc của tin nhắn cuối" },
+        "updatedAt": { "type": "number", "description": "Thời gian cập nhật gần nhất" },
+        "createdAt": { "type": "number", "description": "Thời gian tạo cuộc trò chuyện" }
+      },
+      "required": ["participants", "updatedAt", "isRead"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Nội dung từng tin nhắn trong cuộc trò chuyện",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string", "description": "ID cuộc trò chuyện" },
+        "senderId": { "type": "string", "description": "ID người gửi" },
+        "senderName": { "type": "string", "description": "Tên người gửi" },
+        "senderAvatar": { "type": "string", "description": "Ảnh đại diện người gửi" },
+        "senderRole": { "type": "string", "description": "Vai trò người gửi: reader, author hoặc editor" },
+        "text": { "type": "string", "description": "Nội dung văn bản tin nhắn" },
+        "createdAt": { "type": "number", "description": "Thời gian gửi tin nhắn" },
+        "isRead": { "type": "boolean", "description": "Trạng thái đã đọc" }
+      },
+      "required": ["conversationId", "senderId", "text", "createdAt"]
+    },
+    "SupportChatSession": {
+      "title": "SupportChatSession",
+      "description": "Metadata cuộc hội thoại hỗ trợ 1-1 giữa Độc giả và Admin",
+      "type": "object",
+      "properties": {
+        "lastMessage": { "type": "string", "description": "Nội dung tin nhắn gần nhất" },
+        "lastMessageTime": { "type": "number", "description": "Thời gian tin nhắn gần nhất (ms)" },
+        "userName": { "type": "string", "description": "Tên hiển thị của độc giả" },
+        "userEmail": { "type": "string", "description": "Email của độc giả" },
+        "unreadCount": { "type": "number", "description": "Số tin nhắn chưa đọc gửi tới Admin" },
+        "unreadAdminCount": { "type": "number", "description": "Số tin nhắn chưa đọc từ Admin gửi tới độc giả" },
+        "userAvatar": { "type": "string", "description": "Ảnh đại diện độc giả" }
+      },
+      "required": ["lastMessage", "lastMessageTime", "userName", "unreadCount"]
+    },
+    "SupportChatMessage": {
+      "title": "SupportChatMessage",
+      "description": "Chi tiết từng tin nhắn hỗ trợ 1-1 giữa Độc giả và Admin",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "UID người dùng (chỉ lưu khi senderType là user)" },
+        "text": { "type": "string", "description": "Nội dung tin nhắn" },
+        "imageUrl": { "type": "string", "description": "Đường dẫn ảnh đính kèm trong Firebase Storage" },
+        "createdAt": { "type": "number", "description": "Thời gian gửi tin nhắn (ms)" },
+        "senderType": { "type": "string", "description": "user hoặc admin" },
+        "senderName": { "type": "string", "description": "Admin (nếu là admin) hoặc tên độc giả" }
+      },
+      "required": ["createdAt", "senderType", "senderName"]
+    },
+    "GlobalBannerSetting": {
+      "title": "GlobalBannerSetting",
+      "description": "Cấu hình thông báo toàn trang hiển thị trên đầu Trang Chủ (lưu 1 document duy nhất settings/global_banner)",
+      "type": "object",
+      "properties": {
+        "isActive": { "type": "boolean", "description": "Trạng thái Bật/Tắt thông báo toàn trang" },
+        "message": { "type": "string", "description": "Nội dung thông báo toàn trang" },
+        "updatedAt": { "type": "string", "description": "Timestamp lần cập nhật gần nhất" }
+      },
+      "required": ["isActive", "message", "updatedAt"]
+    },
+    "FinanceStats": {
+      "title": "FinanceStats",
+      "description": "Thống kê doanh thu nạp và tổng Xu đã duyệt tích lũy (lưu 1 document duy nhất stats/finance)",
+      "type": "object",
+      "properties": {
+        "totalRevenueVnd": { "type": "number", "description": "Tổng doanh thu VNĐ tích lũy toàn thời gian" },
+        "totalApprovedXu": { "type": "number", "description": "Tổng số Xu đã duyệt tích lũy toàn thời gian" },
+        "updatedAt": { "type": "number", "description": "Thời điểm cập nhật gần nhất (ms)" }
+      },
+      "required": ["totalRevenueVnd", "totalApprovedXu"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Lưu thông tin độc giả và số dư ví Xu"
+    },
+    "/novels/{novelId}": {
+      "schema": "Novel",
+      "description": "Lưu danh sách tác phẩm truyện"
+    },
+    "/novels/{novelId}/chapters/{chapterId}": {
+      "schema": "Chapter",
+      "description": "Lưu nội dung các chương và trạng thái VIP"
+    },
+    "/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Lưu các bình luận thật của độc giả"
+    },
+    "/topup_requests/{requestId}": {
+      "schema": "TopUpRequest",
+      "description": "Lưu các yêu cầu nạp Xu của người dùng"
+    },
+    "/novel_submissions/{submissionId}": {
+      "schema": "NovelSubmission",
+      "description": "Lưu các bản thảo truyện nộp thẩm định"
+    },
+    "/novel_submissions/{submissionId}/chapters/{chapterId}": {
+      "schema": "Chapter",
+      "description": "Lưu 5 chương bản thảo thẩm định đính kèm đơn nộp truyện"
+    },
+    "/creator_applications/{applicationId}": {
+      "schema": "CreatorApplication",
+      "description": "Lưu đơn đăng ký nâng cấp thành Editor / Tác giả"
+    },
+    "/withdrawal_requests/{requestId}": {
+      "schema": "WithdrawalRequest",
+      "description": "Lưu các yêu cầu rút tiền nhuận bút của Tác giả"
+    },
+    "/novel_reports/{reportId}": {
+      "schema": "NovelReport",
+      "description": "Lưu các báo cáo vi phạm tác phẩm"
+    },
+    "/stories/{storyId}": {
+      "schema": "Novel",
+      "description": "Lưu thông tin tác phẩm đồng bộ"
+    },
+    "/stories/{storyId}/chapters/{chapterId}": {
+      "schema": "Chapter",
+      "description": "Lưu nội dung các chương"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Lưu danh mục thể loại truyện"
+    },
+    "/donations/{donationId}": {
+      "schema": "Donation",
+      "description": "Lưu lịch sử tặng Xu ủng hộ tác giả"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "Lưu các thông báo hệ thống và nạp tiền cho độc giả"
+    },
+    "/conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Lưu danh sách các cuộc hội thoại 1-1"
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Lưu chi tiết các tin nhắn trong cuộc hội thoại"
+    },
+    "/support_chats/{userId}": {
+      "schema": "SupportChatSession",
+      "description": "Lưu metadata các phiên hỗ trợ 1-1 Độc giả <-> Admin theo UID độc giả"
+    },
+    "/support_chats/{userId}/messages/{messageId}": {
+      "schema": "SupportChatMessage",
+      "description": "Lưu chi tiết từng tin nhắn hỗ trợ 1-1"
+    },
+    "/settings/{settingId}": {
+      "schema": "GlobalBannerSetting",
+      "description": "Cấu hình hệ thống đơn lẻ như settings/global_banner"
+    },
+    "/stats/{statId}": {
+      "schema": "FinanceStats",
+      "description": "Lưu tài liệu thống kê tổng hợp như stats/finance"
+    }
+  }
+}

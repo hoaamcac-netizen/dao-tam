@@ -1,0 +1,965 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Bảng màu chủ đạo tone Hồng ngọt ngào & sang trọng theo yêu cầu của người dùng */
+  --color-blue-50: #fdf2f8;
+  --color-blue-100: #fce7f3;
+  --color-blue-200: #fbcfe8;
+  --color-blue-300: #f472b6;
+  --color-blue-400: #f43f8e;
+  --color-blue-500: #ec4899;
+  --color-blue-600: #db2777;
+  --color-blue-700: #be185d;
+  --color-blue-800: #9d174d;
+  --color-blue-900: #831843;
+  --color-blue-950: #500724;
+
+  --color-sky-50: #fdf2f8;
+  --color-sky-100: #fce7f3;
+  --color-sky-200: #fbcfe8;
+  --color-sky-300: #f472b6;
+  --color-sky-400: #ec4899;
+  --color-sky-500: #db2777;
+  --color-sky-600: #be185d;
+  --color-sky-700: #9d174d;
+  --color-sky-800: #831843;
+  --color-sky-900: #701a37;
+  --color-sky-950: #500724;
+
+  --color-cyan-50: #fdf2f8;
+  --color-cyan-100: #fce7f3;
+  --color-cyan-200: #fbcfe8;
+  --color-cyan-300: #f472b6;
+  --color-cyan-400: #ec4899;
+  --color-cyan-500: #db2777;
+  --color-cyan-600: #be185d;
+  --color-cyan-700: #9d174d;
+  --color-cyan-800: #831843;
+  --color-cyan-900: #701a37;
+}
+
+@layer base {
+  html, body {
+    font-family: 'Be Vietnam Pro', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+
+  /* Font chuẩn hiện đại không chân */
+  h1, h2, h3, h4, h5, h6, .font-serif {
+    font-family: 'Be Vietnam Pro', 'Inter', system-ui, sans-serif !important;
+    letter-spacing: -0.015em;
+  }
+}
+
+/* ==========================================================================
+   TÙY CHỈNH THANH CUỘN (SCROLLBAR) THEO TONE MÀU LOGO ĐẠO TÂM
+   ========================================================================== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(244, 63, 94, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(225, 29, 72, 0.75);
+}
+
+/* Thanh kéo ngang cho dải khoảng chương (> 400 chương) */
+.chapter-range-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 72, 153, 0.65) rgba(241, 245, 249, 0.9);
+}
+.chapter-range-scrollbar::-webkit-scrollbar {
+  height: 7px;
+}
+.chapter-range-scrollbar::-webkit-scrollbar-track {
+  background: rgba(241, 245, 249, 0.9);
+  border-radius: 9999px;
+}
+html.dark .chapter-range-scrollbar::-webkit-scrollbar-track {
+  background: rgba(30, 41, 59, 0.8);
+}
+.chapter-range-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(236, 72, 153, 0.55);
+  border-radius: 9999px;
+}
+.chapter-range-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(219, 39, 119, 0.9);
+}
+
+/* Thanh kéo dọc rõ nét cho danh sách chương */
+.chapter-list-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(236, 72, 153, 0.6) rgba(241, 245, 249, 0.7);
+}
+.chapter-list-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+.chapter-list-scrollbar::-webkit-scrollbar-track {
+  background: rgba(241, 245, 249, 0.7);
+  border-radius: 9999px;
+}
+html.dark .chapter-list-scrollbar::-webkit-scrollbar-track {
+  background: rgba(30, 41, 59, 0.6);
+}
+.chapter-list-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(236, 72, 153, 0.5);
+  border-radius: 9999px;
+}
+.chapter-list-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(219, 39, 119, 0.85);
+}
+
+/* ==========================================================================
+   1. CHẾ ĐỘ LIGHT MODE (SÁNG, TINH TẾ, KHÔNG VIỀN, ĐỔ BÓNG NHẸ NHƯ HÌNH 2)
+   ========================================================================== */
+html.light {
+  color-scheme: light;
+}
+
+html.light body,
+html.light .min-h-screen {
+  background-color: #f8fafc !important; /* bg-slate-50 */
+  color: #000000 !important;
+}
+
+/* Header & Thanh Điều Hướng */
+html.light header {
+  background-color: rgba(255, 255, 255, 0.98) !important;
+  border: none !important;
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.06) !important;
+}
+
+html.light header .bg-\[\#0b0f19\] {
+  background-color: #f1f5f9 !important;
+  border: none !important;
+}
+
+html.light header input,
+html.light input[type="text"],
+html.light input[type="search"],
+html.light select,
+html.light textarea {
+  background-color: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.05) !important;
+  color: #000000 !important;
+}
+
+html.light header input::placeholder,
+html.light input::placeholder {
+  color: #334155 !important;
+}
+
+/* Các khối chứa Card / Section: Nền trắng, LOẠI BỎ TOÀN BỘ viền, đổ bóng nhẹ chuẩn Hình 2 */
+html.light .bg-\[\#0e1424\],
+html.light .bg-\[\#090d16\],
+html.light .bg-\[\#100e1c\],
+html.light .bg-\[\#13141c\],
+html.light .bg-\[\#14151c\],
+html.light .bg-\[\#1a1b24\],
+html.light .bg-\[\#19152b\],
+html.light .bg-\[\#181328\],
+html.light .bg-\[\#161226\],
+html.light .bg-\[\#1c1a2c\],
+html.light .bg-slate-800 {
+  background-color: #ffffff !important;
+  border: none !important;
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.05) !important;
+}
+
+html.light .bg-\[\#131b2e\],
+html.light .bg-\[\#20222f\] {
+  background-color: #f8fafc !important;
+  border: none !important;
+}
+
+/* Nút bấm (Button) chuyển từ màu xanh biển sang màu hồng đỏ/cánh sen theo màu logo làm chủ đạo như hình 2 */
+html.light button.bg-blue-600,
+html.light .bg-blue-600,
+button.bg-blue-600,
+.bg-blue-600 {
+  background-color: #e11d48 !important; /* Rose-600 */
+  color: #ffffff !important;
+  box-shadow: 0 4px 14px -2px rgba(225, 29, 72, 0.3) !important;
+}
+html.light button.bg-blue-600:hover,
+html.light .bg-blue-600:hover,
+button.bg-blue-600:hover,
+.bg-blue-600:hover {
+  background-color: #be123c !important; /* Rose-700 */
+  box-shadow: 0 6px 20px -2px rgba(225, 29, 72, 0.4) !important;
+}
+
+html.light button.bg-blue-500,
+html.light .bg-blue-500,
+button.bg-blue-500,
+.bg-blue-500 {
+  background-color: #f43f5e !important; /* Rose-500 */
+  color: #ffffff !important;
+}
+html.light button.bg-blue-500:hover,
+html.light .bg-blue-500:hover,
+button.bg-blue-500:hover,
+.bg-blue-500:hover {
+  background-color: #e11d48 !important;
+}
+
+/* Loại bỏ viền trên toàn bộ các khối chứa trong light mode */
+html.light .border-slate-800,
+html.light .border-slate-700,
+html.light .border-slate-800\/80,
+html.light .border-\[\#ebdcd5\],
+html.light .border-pink-500\/20,
+html.light .border-pink-300 {
+  border-color: #f1f5f9 !important;
+}
+
+/* ==========================================================================
+   2. QUY CHUẨN MÀU CHỮ:
+   - TIÊU ĐỀ ĐẦU DÒNG (Bảng Vàng Đề Cử, Truyện Hot, Truyện Mới Cập Nhật, Truyện Hoàn Thành):
+     MÀU XANH PASTEL (XANH BĂNG ICE BLUE #91C9FF THEO HÌNH 2)
+   - CÁC CHỮ MÀU XÁM THÌ ĐỔI SANG MÀU ĐEN (Theo yêu cầu người dùng)
+   - CHỮ FULL HAY HOÀN THÀNH VẪN MÀU XANH LÁ
+   - CHỮ ĐANG RA VẪN MÀU VÀNG
+   ========================================================================== */
+html.light h1:not(.keep-white):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.light h2:not(.keep-white):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.light h3:not(.keep-white):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.light h4:not(.keep-white):not(.title-ice-blue):not([class*="title-ice-blue"]) {
+  color: #000000 !important;
+}
+
+/* Tiêu đề đầu dòng màu Xanh Băng (Ice Blue / Xanh Pastel #91C9FF theo Hình 2) */
+.title-ice-blue,
+.title-ice-blue *,
+[class*="title-ice-blue"] {
+  color: #91C9FF !important;
+  -webkit-text-fill-color: #91C9FF !important;
+}
+
+html.light .title-ice-blue,
+html.light .title-ice-blue * {
+  color: #5ba6f8 !important; /* Xanh pastel sắc nét trên nền sáng */
+  -webkit-text-fill-color: #5ba6f8 !important;
+}
+
+html:not(.light) .title-ice-blue,
+html:not(.light) .title-ice-blue * {
+  color: #91C9FF !important; /* Xanh băng pastel phát quang trên nền tối */
+  -webkit-text-fill-color: #91C9FF !important;
+  text-shadow: 0 0 16px rgba(145, 201, 255, 0.4);
+}
+/* Huy hiệu tiến trình đọc (Màu xanh biển pastel, nhỏ gọn, không che chữ Full) */
+.badge-reading-progress {
+  background-color: #e0f2fe !important; /* Xanh biển pastel nhẹ nhàng */
+  color: #0369a1 !important; /* Xanh đậm dễ đọc */
+  border: 1px solid #bae6fd !important;
+  box-shadow: 0 1px 3px rgba(3, 105, 161, 0.12) !important;
+}
+
+html.dark .badge-reading-progress {
+  background-color: rgba(12, 42, 71, 0.92) !important;
+  color: #7dd3fc !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* Toàn bộ chữ xám trong Light Mode đổi sang màu đen sắc nét (loại trừ Footer) */
+html.light .text-slate-200:not(button *):not(.absolute *):not(.keep-white):not(footer *):not(.site-footer *),
+html.light .text-slate-300:not(button *):not(.absolute *):not(.keep-white):not(footer *):not(.site-footer *),
+html.light .text-slate-400:not(button *):not(.absolute *):not(.status-keep):not(.badge-full):not(.badge-ongoing):not(footer *):not(.site-footer *),
+html.light .text-slate-500:not(button *):not(.absolute *):not(.status-keep):not(.badge-full):not(.badge-ongoing):not(footer *):not(.site-footer *),
+html.light .text-slate-600:not(button *):not(.absolute *):not(.status-keep):not(.badge-full):not(.badge-ongoing):not(footer *):not(.site-footer *),
+html.light .text-gray-400:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-gray-500:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-gray-600:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-neutral-400:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-neutral-500:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-zinc-400:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light .text-zinc-500:not(button *):not(.absolute *):not(.status-keep):not(footer *):not(.site-footer *),
+html.light p:not(button *):not(.absolute *):not(.status-keep):not(.keep-white):not(footer *):not(.site-footer *),
+html.light span.text-slate-400:not(footer *):not(.site-footer *),
+html.light span.text-slate-500:not(footer *):not(.site-footer *),
+html.light span.text-slate-600:not(footer *):not(.site-footer *) {
+  color: #000000 !important;
+}
+
+/* ==========================================================================
+   QUY CHUẨN FOOTER: DÙ CHẾ ĐỘ BAN NGÀY HAY BAN ĐÊM CHỮ CŨNG LUÔN LÀ MÀU TRẮNG
+   ========================================================================== */
+footer,
+footer *,
+.site-footer,
+.site-footer * {
+  color: #ffffff !important;
+}
+
+footer h4,
+.site-footer h4,
+footer p,
+.site-footer p,
+footer li,
+.site-footer li,
+footer span,
+.site-footer span,
+footer div,
+.site-footer div {
+  color: #ffffff !important;
+}
+
+/* ==========================================================================
+   BẢO TOÀN TUYỆT ĐỐI MÀU TRẠNG THÁI (ĐÚNG THEO YÊU CẦU):
+   - Chữ Full hay Hoàn thành vẫn màu xanh lá
+   - Chữ Đang ra vẫn màu vàng
+   ========================================================================== */
+.status-full,
+.badge-full,
+.badge-completed,
+[data-status="full"],
+[data-status="Hoàn thành"],
+.text-emerald-400,
+.text-emerald-500,
+.text-emerald-600,
+.text-green-400,
+.text-green-500,
+.text-green-600 {
+  color: #10b981 !important; /* Xanh lá */
+}
+
+span.bg-emerald-600,
+span.bg-emerald-500,
+span.bg-green-600,
+span.bg-green-500,
+.bg-emerald-600,
+.bg-emerald-500,
+.bg-green-600,
+.bg-green-500 {
+  background-color: #059669 !important;
+  color: #ffffff !important;
+}
+
+.status-ongoing,
+.badge-ongoing,
+[data-status="ongoing"],
+[data-status="Đang ra"],
+.text-amber-400,
+.text-amber-500,
+.text-amber-600,
+.text-yellow-400,
+.text-yellow-500,
+.text-yellow-600 {
+  color: #f59e0b !important; /* Vàng */
+}
+
+span.bg-amber-400:not(.genre-filter-btn),
+span.bg-amber-500:not(.genre-filter-btn),
+span.bg-yellow-400:not(.genre-filter-btn),
+span.bg-yellow-500:not(.genre-filter-btn),
+.bg-amber-400:not(.genre-filter-btn),
+.bg-amber-500:not(.genre-filter-btn),
+.bg-yellow-400:not(.genre-filter-btn),
+.bg-yellow-500:not(.genre-filter-btn) {
+  background-color: #f59e0b !important;
+  color: #0f172a !important;
+}
+
+/* ==========================================================================
+   3. CHẾ ĐỘ DARK MODE (BAN ĐÊM NỀN ĐEN - TOÀN BỘ CHỮ TRẮNG HOẶC HỒNG, KHÔNG ĐEN HOẶC XÁM)
+   ========================================================================== */
+html.dark {
+  color-scheme: dark;
+}
+
+html.dark body,
+html.dark .min-h-screen {
+  background-color: #07070a !important; /* Đen tuyền chuẩn đêm */
+  color: #ffffff !important;
+}
+
+/* Các khối chứa Card / Header / Modal trong Dark Mode: Nền đen nhung đậm (#0f1118), viền tối */
+html.dark header {
+  background-color: rgba(11, 13, 20, 0.96) !important;
+  border-bottom: 1px solid #1c2032 !important;
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.8) !important;
+}
+
+html.dark header .bg-\[\#0b0f19\],
+html.dark header .bg-slate-100,
+html.dark header .bg-white:not(.genre-filter-btn) {
+  background-color: #151824 !important;
+  border: 1px solid #252a3d !important;
+}
+
+html.dark .bg-white:not(.dark\:bg-white):not([class*="dark:bg-white"]):not(.genre-filter-btn),
+html.dark .bg-slate-50:not(.dark\:bg-white):not([class*="dark:bg-white"]),
+html.dark .bg-slate-100:not(.dark\:bg-white):not([class*="dark:bg-white"]),
+html.dark .bg-\[\#0e1424\],
+html.dark .bg-\[\#090d16\],
+html.dark .bg-\[\#100e1c\],
+html.dark .bg-\[\#13141c\],
+html.dark .bg-\[\#14151c\],
+html.dark .bg-\[\#1a1b24\],
+html.dark .bg-\[\#19152b\],
+html.dark .bg-\[\#181328\],
+html.dark .bg-\[\#161226\],
+html.dark .bg-\[\#1c1a2c\] {
+  background-color: #10121a !important;
+  box-shadow: 0 10px 25px -3px rgba(0, 0, 0, 0.6) !important;
+}
+
+/* Các viền mặc định của khối, ngoại trừ các nút có class viền riêng biệt như dark:border-gray-500 hoặc dark:border-pink-500 */
+html.dark .bg-white:not(.dark\:border-gray-500):not([class*="dark:border-gray-500"]):not(.dark\:border-pink-500):not([class*="dark:border-pink-500"]):not(.genre-filter-btn),
+html.dark .bg-slate-50:not(.dark\:border-gray-500):not([class*="dark:border-gray-500"]):not(.dark\:border-pink-500):not([class*="dark:border-pink-500"]),
+html.dark .border-slate-200:not(.dark\:border-gray-500):not([class*="dark:border-gray-500"]):not(.dark\:border-pink-500):not([class*="dark:border-pink-500"]):not(.genre-filter-btn) {
+  border-color: #1e2233 !important;
+}
+
+html.dark .bg-slate-800,
+html.dark .bg-slate-900 {
+  background-color: #0d0f17 !important;
+}
+
+html.dark input,
+html.dark select,
+html.dark textarea {
+  background-color: #141724 !important;
+  color: #ffffff !important;
+  border-color: #2b3044 !important;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #f472b6 !important; /* Hồng cánh sen nhạt */
+}
+
+/* ==========================================================================
+   ÉP TOÀN BỘ CHỮ SANG MÀU TRẮNG HOẶC HỒNG TRONG CHẾ ĐỘ BAN ĐÊM (TUYỆT ĐỐI KHÔNG CÓ MÀU ĐEN HOẶC XÁM)
+   ========================================================================== */
+html.dark ::selection {
+  background-color: #f43f5e !important;
+  color: #ffffff !important;
+}
+
+html.dark h1:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark h2:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark h3:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark h4:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark h5:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark h6:not(.keep-original):not(.title-ice-blue):not([class*="title-ice-blue"]),
+html.dark label:not(:has(input:checked)):not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark a:not([class*="pink"]):not([class*="rose"]):not([class*="emerald"]):not([class*="amber"]):not([class*="yellow"]):not(.status-keep),
+html.dark .text-black:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark [class*="text-black"]:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .\!text-black:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .novel-card-title,
+html.dark .novel-card-title *,
+html.dark [style*="color: rgb(0, 0, 0)"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark [style*="color:#000000"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark [style*="color: #000000"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark [style*="color: black"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark [style*="color: rgb(15, 23, 42)"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark [style*="color: rgb(30, 41, 59)"]:not(.dark\:text-black):not([class*="dark:text-black"]),
+html.dark .text-slate-900:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-slate-800:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-slate-700:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-slate-600,
+html.dark .text-slate-500,
+html.dark .text-slate-400,
+html.dark .text-slate-300,
+html.dark .text-gray-900:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-gray-800:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-gray-700,
+html.dark .text-gray-600,
+html.dark .text-gray-500,
+html.dark .text-gray-400,
+html.dark .text-neutral-900:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-neutral-800:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-neutral-700,
+html.dark .text-neutral-600,
+html.dark .text-neutral-500,
+html.dark .text-neutral-400,
+html.dark .text-zinc-900:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-zinc-800:not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900),
+html.dark .text-zinc-700,
+html.dark .text-zinc-600,
+html.dark .text-zinc-500,
+html.dark .text-zinc-400 {
+  color: #ffffff !important;
+}
+
+/* Hover chuyển màu hồng sen rạng rỡ */
+html.dark .group:hover .novel-card-title,
+html.dark .group:hover h3:not(.title-ice-blue),
+html.dark .group:hover h4:not(.title-ice-blue) {
+  color: #fb7185 !important;
+}
+
+/* Đoạn văn p và span trong dark mode: Ngoại trừ các nút radio/checkbox, bundle-discount-block và phần tử có dark:text-slate-900 */
+html.dark p:not(.status-keep):not(.badge-full):not(.badge-ongoing):not([data-status]):not([class*="emerald"]):not([class*="green"]):not([class*="amber"]):not([class*="yellow"]):not([class*="pink"]):not([class*="rose"]):not(.dark\:text-black):not(.dark\:text-gray-900):not(:has(input:checked)):not(.bundle-discount-block *):not([class*="dark:text-slate-900"]),
+html.dark span:not(.status-keep):not(.badge-full):not(.badge-ongoing):not([data-status]):not([class*="emerald"]):not([class*="green"]):not([class*="amber"]):not([class*="yellow"]):not([class*="pink"]):not([class*="purple"]):not([class*="rose"]):not(button *):not(.genre-filter-btn *):not(.badge-completed):not(.dark\:text-black):not([class*="dark:text-black"]):not(.dark\:text-gray-900):not([class*="dark:text-gray-900"]):not(.bundle-discount-block *):not([class*="dark:text-slate-900"]) {
+  color: #ffffff !important;
+}
+
+/* ==========================================================================
+   CÁC PHẦN TỬ CÓ CLASS dark:text-black HOẶC dark:text-gray-900
+   ÉP MÀU CHỮ THÀNH MÀU ĐEN ĐỂ ĐẢM BẢO TƯƠNG PHẢN CHỮ ĐEN TRÊN NỀN SÁNG
+   ========================================================================== */
+html.dark .dark\:text-black,
+html.dark .dark\:text-black *,
+html.dark .dark\:text-black span,
+html.dark [class*="dark:text-black"],
+html.dark [class*="dark:text-black"] *,
+html.dark .dark\:text-gray-900,
+html.dark .dark\:text-gray-900 *,
+html.dark .dark\:text-gray-900 span,
+html.dark [class*="dark:text-gray-900"],
+html.dark [class*="dark:text-gray-900"] * {
+  color: #000000 !important;
+}
+
+/* Nền trắng và viền hồng cho trạng thái ĐÃ CHỌN (Checked) trong Dark Mode */
+html.dark .dark\:bg-white,
+html.dark [class*="dark:bg-white"],
+html.dark label:has(input:checked).dark\:bg-white,
+html.dark div:has(input:checked).dark\:bg-white {
+  background-color: #ffffff !important;
+}
+
+html.dark .dark\:border-pink-500,
+html.dark [class*="dark:border-pink-500"],
+html.dark label:has(input:checked).dark\:border-pink-500,
+html.dark div:has(input:checked).dark\:border-pink-500 {
+  border-color: #ec4899 !important;
+}
+
+/* ==========================================================================
+   TRẠNG THÁI CHƯA CHỌN (UNCHECKED) Ở DARK MODE:
+   - Viền xám sáng rõ nét (dark:border-gray-500)
+   - Chữ trắng tinh tương phản cao trên nền tối (dark:text-white)
+   - Nền trong suốt hoặc xám đen (dark:bg-transparent)
+   ========================================================================== */
+html.dark .dark\:border-gray-500,
+html.dark [class*="dark:border-gray-500"],
+html.dark label:not(:has(input:checked)).dark\:border-gray-500,
+html.dark div:not(:has(input:checked)).dark\:border-gray-500,
+html.dark button:not(.bg-pink-600).dark\:border-gray-500 {
+  border-color: #6b7280 !important; /* gray-500 */
+}
+
+html.dark .dark\:bg-transparent,
+html.dark [class*="dark:bg-transparent"],
+html.dark label:not(:has(input:checked)).dark\:bg-transparent,
+html.dark div:not(:has(input:checked)).dark\:bg-transparent,
+html.dark button:not(.bg-pink-600).dark\:bg-transparent {
+  background-color: transparent !important;
+}
+
+html.dark .dark\:text-white,
+html.dark [class*="dark:text-white"],
+html.dark .dark\:text-white *,
+html.dark span.dark\:text-white,
+html.dark label:not(:has(input:checked)) .dark\:text-white,
+html.dark div:not(:has(input:checked)) .dark\:text-white,
+html.dark button:not(.bg-pink-600) .dark\:text-white {
+  color: #ffffff !important; /* Màu trắng tinh */
+}
+
+html.dark .dark\:text-gray-200,
+html.dark [class*="dark:text-gray-200"],
+html.dark .dark\:text-gray-200 * {
+  color: #ffffff !important; /* Trắng tinh cho cả các thành phần tương tự */
+}
+
+/* Các chi tiết điểm xuyết màu hồng trong Dark Mode */
+html.dark .text-pink-500:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-rose-500:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-pink-400:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-rose-400:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-pink-600:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-rose-600:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-pink-700:not(:has(input:checked)):not(.dark\:text-black),
+html.dark .text-rose-700:not(:has(input:checked)):not(.dark\:text-black) {
+  color: #fb7185 !important; /* Hồng ngọc sen */
+}
+
+/* Bảo toàn màu Xanh dương Pastel (#93c5fd / blue-300) cho nút & badge S.Tác bất chấp theme remap --color-blue-300 */
+.genre-filter-btn.text-blue-300,
+.genre-badge.text-blue-300 {
+  color: #60a5fa !important;
+}
+html.dark .genre-filter-btn.text-blue-300,
+html.dark .genre-badge.text-blue-300 {
+  color: #93c5fd !important;
+}
+.genre-filter-btn.border-blue-300 {
+  border-color: #93c5fd !important;
+}
+.genre-filter-btn.bg-blue-300 {
+  background-color: #93c5fd !important;
+  color: #ffffff !important;
+  border-color: #93c5fd !important;
+}
+
+/* CHỈ ÉP CHỮ MÀU ĐEN TRONG CHẾ ĐỘ LIGHT MODE */
+html.light .text-black,
+html.light [class*="text-black"],
+html.light .novel-card-title,
+html.light .novel-card-title *,
+html.light .novel-detail-title,
+html.light .novel-detail-title * {
+  color: #000000 !important;
+}
+
+/* ==========================================================================
+   4. KARAOKE HIGHLIGHT CHO TRÌNH ĐỌC AUDIO TTS (THEO TONE HOA SEN HỒNG)
+   ========================================================================== */
+.tts-karaoke-active {
+  background-color: rgba(244, 63, 94, 0.16);
+  color: #e11d48 !important;
+  border-radius: 0.375rem;
+  padding: 0.125rem 0.375rem;
+  box-shadow: 0 0 0 1px rgba(225, 29, 72, 0.3);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html:not(.light) .tts-karaoke-active {
+  background-color: rgba(244, 63, 94, 0.24);
+  color: #fb7185 !important;
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.4);
+}
+
+.tts-karaoke-chunk {
+  cursor: pointer;
+  border-radius: 0.25rem;
+  transition: background-color 0.15s ease;
+}
+
+.tts-karaoke-chunk:hover:not(.tts-karaoke-active) {
+  background-color: rgba(244, 63, 94, 0.08);
+}
+
+html:not(.light) .tts-karaoke-chunk:hover:not(.tts-karaoke-active) {
+  background-color: rgba(244, 63, 94, 0.12);
+}
+
+/* ==========================================================================
+   5. SỬA LỖI UI/UX MOBILE & DARK MODE (4 YÊU CẦU BẮT BUỘC)
+   ========================================================================== */
+
+/* 1. Khối 'Ưu Đãi Trọn Bộ' trong trang chi tiết: Chữ màu TRẮNG trong Dark Mode */
+html.dark .bundle-discount-block {
+  background: linear-gradient(to right, rgba(30, 27, 75, 0.7), rgba(31, 29, 43, 0.8)) !important;
+  border-color: rgba(244, 114, 182, 0.3) !important;
+}
+html.dark .bundle-discount-block h1,
+html.dark .bundle-discount-block h2,
+html.dark .bundle-discount-block h3,
+html.dark .bundle-discount-block h4,
+html.dark .bundle-discount-block p,
+html.dark .bundle-discount-block div:not(.animate-pulse),
+html.dark .bundle-discount-block .text-slate-900,
+html.dark .bundle-discount-block .text-slate-600,
+html.dark .bundle-discount-block span:not(.animate-pulse):not(.animate-pulse *):not(button *) {
+  color: #ffffff !important;
+}
+html.dark .bundle-discount-block .text-pink-700 {
+  color: #f472b6 !important;
+}
+
+/* Đổi màu tím Đam Mỹ sáng rõ hơn trong Dark Mode */
+html.dark .text-purple-500 {
+  color: #c084fc !important;
+}
+
+/* 2. Menu Admin & Dropdown User/Avatar hover vàng trong Dark Mode: ép chữ sang màu tối để tương phản cao */
+html.dark [class*="hover:bg-yellow-400"]:hover,
+html.dark [class*="hover:bg-yellow-400"]:hover *,
+html.dark [class*="hover:bg-yellow-400"]:hover span,
+html.dark [class*="hover:bg-yellow-400"]:hover svg,
+html.dark [class*="hover:bg-amber-500"]:hover,
+html.dark [class*="hover:bg-amber-500"]:hover *,
+html.dark [class*="hover:bg-amber-500"]:hover span,
+html.dark [class*="hover:bg-amber-500"]:hover svg {
+  color: #0f172a !important;
+  stroke: #0f172a !important;
+}
+
+/* 3. Form 'Thêm truyện mới': Ô nhập liệu và Label trong Dark Mode */
+html.dark input[type="text"],
+html.dark input[type="url"],
+html.dark input[type="datetime-local"],
+html.dark textarea {
+  color: #ffffff;
+}
+
+html.dark input[type="checkbox"]:not(:checked),
+html.dark input[type="radio"]:not(:checked) {
+  border-color: #ffffff !important;
+}
+
+/* ==========================================================================
+   QUY CHUẨN ĐỔI MÀU CHẾ ĐỘ BAN ĐÊM THEO YÊU CẦU:
+   1. Ảnh 1: Chỗ 'Đọc nhiều nhất' chuyển sang chữ đen
+   2. Ảnh 2: Chữ 'ĐỘC GIẢ' đổi thành chữ màu vàng
+   3. Ảnh 3: Trong chi tiết truyện, chữ trắng đổi thành chữ màu đen (giữ nguyên chữ hồng)
+   4. Ảnh 4: Trong danh sách chương & sidebar nhà đăng, chữ trắng đổi thành chữ màu đen (giữ nguyên chữ hồng)
+   5. Ảnh 5: 'Tủ truyện của bạn' và 'Ví của bạn' đổi thành chữ màu đen
+   ========================================================================== */
+
+/* 1. Ảnh 1: Chỗ 'Đọc nhiều nhất' chuyển sang chữ đen */
+html.dark .badge-most-read,
+html.dark .badge-most-read *,
+html.dark [data-badge="most-read"],
+html.dark [data-badge="most-read"] * {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+}
+
+/* 2. Ảnh 2: Chữ 'ĐỘC GIẢ' đổi thành chữ màu vàng */
+html.dark .badge-reader-yellow,
+html.dark .badge-reader-yellow *,
+html.dark [data-role="reader"],
+html.dark [data-role="reader"] *,
+.badge-reader-yellow {
+  color: #f59e0b !important; /* Vàng amber */
+  -webkit-text-fill-color: #f59e0b !important;
+}
+
+/* ==========================================================================
+   CHI TIẾT TRANG TRUYỆN (NOVEL DETAIL) TRONG DARK MODE:
+   CHỮ TRẮNG TINH & SÁNG RÕ TRÊN NỀN ĐEN/TỐI - TUYỆT ĐỐI KHÔNG BỊ CHỮ ĐEN NỀN ĐEN
+   ========================================================================== */
+html.dark #novel-detail-hero {
+  background-color: #0e111a !important;
+  border-color: #1e2436 !important;
+  color: #ffffff !important;
+}
+
+html.dark #novel-detail-hero h1,
+html.dark #novel-detail-hero h2,
+html.dark #novel-detail-hero h3,
+html.dark #novel-detail-hero h4,
+html.dark #novel-detail-hero p,
+html.dark #novel-detail-hero span:not(.badge-full):not([class*="emerald"]):not([class*="amber"]):not([class*="yellow"]),
+html.dark #novel-detail-hero div:not(.status-dot),
+html.dark #novel-detail-hero .novel-detail-title,
+html.dark #novel-detail-hero .novel-detail-title * {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Nền khối 3 card thông số (Lượt đọc, Theo dõi, Hoa) & 2x2 grid (Tình trạng, Cập nhật...) */
+html.dark #novel-detail-hero .grid-cols-3,
+html.dark #novel-detail-hero .grid-cols-2 {
+  background-color: #131724 !important;
+  border-color: #262c3f !important;
+}
+
+/* Nút bấm hành động trong Novel Detail Hero: Đọc tiếp theo, Danh mục, Đề cử, Tặng Xu, Chia sẻ */
+html.dark #novel-detail-hero button:not(.bg-pink-600):not(.bg-gradient-to-r) {
+  background-color: #151926 !important;
+  border-color: #2b334a !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+html.dark #novel-detail-hero button:not(.bg-pink-600):not(.bg-gradient-to-r) * {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Nút Đọc chương đầu (Hồng gradient) luôn giữ chữ trắng */
+html.dark #novel-detail-hero button.bg-gradient-to-r:not([class*="from-yellow"]),
+html.dark #novel-detail-hero button.bg-gradient-to-r:not([class*="from-yellow"]) * {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Nút Nghe Audio vàng: chữ đen slate-900 để dễ đọc trên nền vàng chanh */
+html.dark #novel-detail-hero [class*="from-yellow"],
+html.dark #novel-detail-hero [class*="from-yellow"] * {
+  color: #0f172a !important;
+  -webkit-text-fill-color: #0f172a !important;
+}
+
+/* ==========================================================================
+   DANH SÁCH CHƯƠNG (CHAPTER LIST) TRONG DARK MODE:
+   CHỮ TRẮNG RÕ RÀNG TRÊN NỀN ĐEN
+   ========================================================================== */
+html.dark #danh-sach-chuong {
+  background-color: #0e111a !important;
+  border-color: #1e2436 !important;
+  color: #ffffff !important;
+}
+
+html.dark #danh-sach-chuong h2,
+html.dark #danh-sach-chuong h3,
+html.dark #danh-sach-chuong p,
+html.dark #danh-sach-chuong span:not(.bg-pink-600):not(.badge-full):not([class*="emerald"]):not([class*="amber"]) {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+html.dark #danh-sach-chuong input {
+  background-color: #151926 !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border-color: #2b334a !important;
+}
+
+html.dark #danh-sach-chuong button:not(.bg-pink-600) {
+  background-color: #151926 !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border-color: #2b334a !important;
+}
+
+html.dark #danh-sach-chuong button:not(.bg-pink-600) * {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Dải chọn khoảng chương (1 - 50, 51 - 100...) */
+html.dark #danh-sach-chuong .chapter-range-scrollbar button:not(.bg-pink-600) {
+  background-color: #151926 !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border: 1px solid #2b334a !important;
+}
+
+/* Từng dòng chương truyện trong danh sách: CHỮ TRẮNG SÁNG NỔI BẬT */
+html.dark #danh-sach-chuong .divide-y > div,
+html.dark #danh-sach-chuong .divide-y > div * {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+html.dark #danh-sach-chuong .divide-y > div:hover {
+  background-color: rgba(236, 72, 153, 0.15) !important;
+}
+
+/* Badge VIP / Khóa / Mở trong danh sách chương */
+html.dark #danh-sach-chuong [class*="text-amber"],
+html.dark #danh-sach-chuong [class*="text-amber"] * {
+  color: #fbbf24 !important;
+  -webkit-text-fill-color: #fbbf24 !important;
+}
+html.dark #danh-sach-chuong [class*="text-emerald"],
+html.dark #danh-sach-chuong [class*="text-emerald"] * {
+  color: #34d399 !important;
+  -webkit-text-fill-color: #34d399 !important;
+}
+
+/* ==========================================================================
+   SIDEBAR NHÀ ĐĂNG & BẢNG VÀNG ỦNG HỘ TRONG DARK MODE:
+   ========================================================================== */
+html.dark .novel-sidebar-card {
+  background-color: #0e111a !important;
+  border-color: #1e2436 !important;
+  color: #ffffff !important;
+}
+
+html.dark .novel-sidebar-card h3,
+html.dark .novel-sidebar-card p,
+html.dark .novel-sidebar-card span:not(.text-pink-600):not(.text-rose-600),
+html.dark .novel-sidebar-card div,
+html.dark .novel-sidebar-card button:not(.bg-pink-600):not(.bg-gradient-to-r) {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+html.dark .novel-sidebar-card button:not(.bg-pink-600):not(.bg-gradient-to-r) {
+  background-color: #151926 !important;
+  border-color: #2b334a !important;
+}
+
+/* ==========================================================================
+   CHƯƠNG TRUYỆN (CHAPTER READER) TRONG DARK MODE:
+   CHỮ TRẮNG SẮC NÉT TRÊN NỀN TỐI - TUYỆT ĐỐI KHÔNG BỊ CHỮ ĐEN NỀN ĐEN
+   ========================================================================== */
+html.dark .reader-container,
+html.dark .reader-container article,
+html.dark .reader-container .chapter-paragraph,
+html.dark .reader-container .chapter-sentence,
+html.dark .reader-container .tts-karaoke-chunk:not(.tts-karaoke-active),
+html.dark .reader-container h1,
+html.dark .reader-container h2,
+html.dark .reader-container h3,
+html.dark .reader-container p {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* Thanh điều hướng Reader trên cùng & dưới cùng */
+html.dark .reader-container > div:first-child,
+html.dark .reader-container .fixed.top-0 {
+  background-color: rgba(11, 15, 25, 0.96) !important;
+}
+
+html.dark .reader-container .fixed.top-0 button,
+html.dark .reader-container .fixed.top-0 span:not(.text-blue-600):not(.text-rose-500) {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}
+
+/* 5. Ảnh 5: 'Tủ truyện của bạn' và 'Ví của bạn' đổi thành chữ màu đen */
+html.dark .title-tu-truyen,
+html.dark .title-tu-truyen *,
+html.dark .badge-vi-cua-ban,
+html.dark .badge-vi-cua-ban *,
+html.dark [data-title="tu-truyen"],
+html.dark [data-title="tu-truyen"] * {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+}
+
+/* 6. Giao diện chính Nạp xu (Hình 1) & Xác nhận mua xu (Hình 2): Chữ màu đen và số xu màu hồng đậm */
+html.dark .topup-modal-main,
+html.dark .topup-modal-main h2,
+html.dark .topup-modal-main h3,
+html.dark .topup-modal-main h4,
+html.dark .topup-modal-main p:not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600),
+html.dark .topup-modal-main span:not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600):not(button.bg-gradient-to-r *):not(button.bg-pink-600 *),
+html.dark .topup-modal-main div:not([class*="bg-gradient-"]):not(button *):not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600):not(.w-12):not(.w-14):not(.w-44),
+html.dark .topup-modal-main th,
+html.dark .topup-modal-main td:not(.coin-number-pink):not(:has(.coin-number-pink)),
+html.dark .topup-modal-main td > span:not(.coin-number-pink):not(.text-pink-600):not(.text-rose-600),
+html.dark .topup-modal-main strong:not(.coin-number-pink):not(.text-pink-600):not(.text-rose-600),
+html.dark .topup-card-light,
+html.dark .topup-card-light h4,
+html.dark .topup-card-light h3,
+html.dark .topup-card-light p:not(.coin-number-pink):not(.text-pink-600):not(.text-rose-600),
+html.dark .topup-card-light span:not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600):not(button *),
+html.dark .topup-card-light div:not(button *):not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600),
+html.dark .topup-card-light strong:not(.coin-number-pink):not(.coin-number-pink *):not(.text-pink-600):not(.text-rose-600) {
+  color: #000000 !important;
+  -webkit-text-fill-color: #000000 !important;
+}
+
+/* Số xu và số tiền màu hồng đậm (#e11d48) */
+html.dark .coin-number-pink,
+html.dark .coin-number-pink *,
+html.dark .topup-modal-main .coin-number-pink,
+html.dark .topup-modal-main .coin-number-pink *,
+html.dark .topup-card-light .coin-number-pink,
+html.dark .topup-card-light .coin-number-pink *,
+html.dark span.coin-number-pink,
+html.dark strong.coin-number-pink {
+  color: #e11d48 !important; /* Hồng đậm chuẩn */
+  -webkit-text-fill-color: #e11d48 !important;
+}
+
+
+
+
