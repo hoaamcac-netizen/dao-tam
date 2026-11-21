@@ -123,7 +123,7 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 // =========================================================================
 const MAX_AUDIO_CACHE_ITEMS = 40;
 const MAX_CONCURRENT_TTS = 5;
-const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
+const TTS_SYNTHESIS_TIMEOUT_MS = 30000;
 const TTS_BACKEND_MAX_RETRIES = 2;
 const TTS_BACKEND_RETRY_DELAY_MS = 500;
 
@@ -317,7 +317,7 @@ async function runEdgeTtsSynthesisOnce(
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     timer = setTimeout(() => {
-      finishWithError(new Error('Quá thời gian 20s tổng hợp âm thanh từ Edge TTS'));
+      finishWithError(new Error('Quá thời gian 30s tổng hợp âm thanh từ Edge TTS'));
     }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     tts
@@ -343,7 +343,17 @@ async function runEdgeTtsSynthesisOnce(
           }
         });
 
-        audioStream.on('end', () => {
+        /* DAO_TAM_PARTIAL_CHUNKS_GUARD */
+    audioStream.on('error', () => {
+      if (!settled && chunks.length > 0) {
+        const partialBuf = Buffer.concat(chunks);
+        chunks.length = 0;
+        if (partialBuf.length > 1024) {
+          finishWithSuccess(partialBuf);
+        }
+      }
+    });
+    audioStream.on('end', () => {
           const buf = Buffer.concat(chunks);
           chunks.length = 0;
           if (buf.length > 0) {
