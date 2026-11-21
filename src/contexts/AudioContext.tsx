@@ -1573,7 +1573,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [applyPlaybackRateLock, play, runSequentialPrefetchQueue]);
 
   const togglePlay = useCallback(() => {
-    if (isPlaying) {
+    const audio = audioRef.current;
+    const isActuallyPlaying = Boolean(isPlaying && audio && !audio.paused && !audio.ended);
+    if (isActuallyPlaying) {
       pause();
     } else {
       resume();
