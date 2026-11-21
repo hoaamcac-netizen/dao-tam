@@ -12,7 +12,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use((req, res, next) => { res.header('Access-Control-Allow-Origin', '*'); res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS'); res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization'); if (req.method === 'OPTIONS') return res.sendStatus(204); next(); });
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '50mb' }));
@@ -116,16 +115,19 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 });
 
 // =========================================================================
-// TỐI ƯU EDGE TTS CHO RENDER FREE (0.1 CPU, 512MB RAM)
-// 1. LRU Cache tối đa 40 đoạn để không tràn 512MB RAM
-// 2. Hàng đợi giới hạn tối đa 5 kết nối MsEdgeTTS chạy song song
-// 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry tối đa 2 lần (nghỉ 500ms)
+// TỐI ƯU EDGE TTS CHO VPS CHỊU TẢI ~30 NGƯỜI NGHE CÙNG LÚC
+// 1. LRU Cache tối đa 450 đoạn / 128MB RAM (key: voice + text)
+// 2. Gộp yêu cầu trùng đang xử lý (inFlightTtsRequests) tránh gọi trùng Microsoft
+// 3. Hàng đợi tối đa 5 luồng MsEdgeTTS song song + tạo instance mới mỗi lượt
+// 4. Sanitize SSML + Timeout 14s/lượt + Retry 2 lần (350ms) + tận dụng audio hợp lệ nếu Stream closed
 // =========================================================================
-const MAX_AUDIO_CACHE_ITEMS = 40;
-const MAX_CONCURRENT_TTS = 2;
-const TTS_SYNTHESIS_TIMEOUT_MS = 30000;
+const MAX_AUDIO_CACHE_ITEMS = 450;
+const MAX_AUDIO_CACHE_BYTES = 128 * 1024 * 1024;
+const MAX_CONCURRENT_TTS = 5;
+const TTS_SYNTHESIS_TIMEOUT_MS = 14000;
 const TTS_BACKEND_MAX_RETRIES = 2;
-const TTS_BACKEND_RETRY_DELAY_MS = 1200;
+const TTS_BACKEND_RETRY_DELAY_MS = 350;
+const MIN_SALVAGE_AUDIO_BYTES = 2048;
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -199,6 +201,7 @@ interface QueuedTtsJob {
 
 // In-memory LRU audio cache for synthesized segments (Key: `${voiceCode}:::${cleanText}`)
 const audioCache = new Map<string, Buffer>();
+let audioCacheBytes = 0;
 const inFlightTtsRequests = new Map<string, InFlightTtsEntry>();
 const ttsWaitQueue: QueuedTtsJob[] = [];
 let activeTtsWorkers = 0;
@@ -223,17 +226,32 @@ function pumpTtsQueue() {
 
 function setLruAudioCache(cacheKey: string, fullBuffer: Buffer) {
   if (audioCache.has(cacheKey)) {
+    const prev = audioCache.get(cacheKey);
+    if (prev) audioCacheBytes = Math.max(0, audioCacheBytes - prev.length);
     audioCache.delete(cacheKey);
   }
-  while (audioCache.size >= MAX_AUDIO_CACHE_ITEMS) {
+  while (
+    audioCache.size > 0 &&
+    (audioCache.size >= MAX_AUDIO_CACHE_ITEMS || audioCacheBytes + fullBuffer.length > MAX_AUDIO_CACHE_BYTES)
+  ) {
     const oldestKey = audioCache.keys().next().value;
     if (oldestKey !== undefined) {
+      const oldestBuf = audioCache.get(oldestKey);
+      if (oldestBuf) audioCacheBytes = Math.max(0, audioCacheBytes - oldestBuf.length);
       audioCache.delete(oldestKey);
     } else {
       break;
     }
   }
   audioCache.set(cacheKey, fullBuffer);
+  audioCacheBytes += fullBuffer.length;
+}
+
+function isAudioBufferSubstantial(buf: Buffer | null | undefined, cleanTextLength: number): boolean {
+  if (!buf || buf.length < MIN_SALVAGE_AUDIO_BYTES) return false;
+  // ~48kbps mono MP3: ~300-450 bytes/ký tự tiếng Việt; ngưỡng >= 180 bytes/ký tự bảo đảm audio không bị cụt đầu
+  const minExpectedBytes = Math.max(MIN_SALVAGE_AUDIO_BYTES, Math.min(18000, cleanTextLength * 180));
+  return buf.length >= minExpectedBytes;
 }
 
 async function runEdgeTtsSynthesisOnce(
@@ -247,7 +265,7 @@ async function runEdgeTtsSynthesisOnce(
 
   // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp (tránh dùng lại WebSocket cũ)
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 10000,
+    connectionTimeoutMs: 8000,
     synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
   });
 
@@ -290,11 +308,21 @@ async function runEdgeTtsSynthesisOnce(
     let settled = false;
     const chunks: Buffer[] = [];
 
-    const finishWithError = (err: Error) => {
+    const collectSalvageBuffer = (): Buffer | undefined => {
+      if (chunks.length === 0) return undefined;
+      const buf = Buffer.concat(chunks);
+      chunks.length = 0;
+      return buf.length >= MIN_SALVAGE_AUDIO_BYTES ? buf : undefined;
+    };
+
+    const finishWithError = (err: Error, salvaged?: Buffer) => {
       if (settled) return;
       settled = true;
       abortSignal.removeEventListener('abort', onAbort);
       cleanup();
+      if (salvaged) {
+        (err as any).salvagedBuffer = salvaged;
+      }
       reject(err);
     };
 
@@ -307,6 +335,7 @@ async function runEdgeTtsSynthesisOnce(
     };
 
     const onAbort = () => {
+      chunks.length = 0;
       finishWithError(new Error('Client aborted TTS request'));
     };
 
@@ -317,7 +346,8 @@ async function runEdgeTtsSynthesisOnce(
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     timer = setTimeout(() => {
-      finishWithError(new Error('Quá thời gian 30s tổng hợp âm thanh từ Edge TTS'));
+      const salvaged = collectSalvageBuffer();
+      finishWithError(new Error('Quá thời gian 14s tổng hợp âm thanh từ Edge TTS'), salvaged);
     }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     tts
@@ -343,17 +373,7 @@ async function runEdgeTtsSynthesisOnce(
           }
         });
 
-        /* DAO_TAM_PARTIAL_CHUNKS_GUARD */
-    audioStream.on('error', () => {
-      if (!settled && chunks.length > 0) {
-        const partialBuf = Buffer.concat(chunks);
-        chunks.length = 0;
-        if (partialBuf.length > 1024) {
-          finishWithSuccess(partialBuf);
-        }
-      }
-    });
-    audioStream.on('end', () => {
+        audioStream.on('end', () => {
           const buf = Buffer.concat(chunks);
           chunks.length = 0;
           if (buf.length > 0) {
@@ -363,36 +383,31 @@ async function runEdgeTtsSynthesisOnce(
           }
         });
 
-        /* DAO_TAM_STREAM_ERR_PARTIAL */
-        audioStream.on('error', () => {
-          if (!settled && chunks.length > 0) {
-            const errBuf = Buffer.concat(chunks);
-            chunks.length = 0;
-            if (errBuf.length > 1024) {
-              finishWithSuccess(errBuf);
-            }
-          }
-        });
         audioStream.on('close', () => {
           if (!settled) {
             const buf = Buffer.concat(chunks);
             chunks.length = 0;
-            if (buf.length > 0) {
+            if (isAudioBufferSubstantial(buf, cleanText.length)) {
               finishWithSuccess(buf);
             } else {
-              finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm'));
+              finishWithError(
+                new Error('Luồng âm thanh Edge TTS đã đóng sớm'),
+                buf.length >= MIN_SALVAGE_AUDIO_BYTES ? buf : undefined
+              );
             }
           }
         });
 
         audioStream.on('error', (streamErr: any) => {
-          chunks.length = 0;
+          const salvaged = collectSalvageBuffer();
           finishWithError(
-            streamErr instanceof Error ? streamErr : new Error(String(streamErr))
+            streamErr instanceof Error ? streamErr : new Error(String(streamErr)),
+            salvaged
           );
         });
       })
       .catch((initErr: any) => {
+        chunks.length = 0;
         finishWithError(initErr instanceof Error ? initErr : new Error(String(initErr)));
       });
   });
@@ -402,8 +417,9 @@ async function runEdgeTtsSynthesisWithRetry(
   cleanText: string,
   voiceCode: string,
   abortSignal: AbortSignal
-): Promise<Buffer> {
+): Promise<{ buffer: Buffer; isComplete: boolean }> {
   let lastError: unknown;
+  let bestSalvagedBuffer: Buffer | undefined;
 
   for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
     if (abortSignal.aborted) {
@@ -415,20 +431,34 @@ async function runEdgeTtsSynthesisWithRetry(
     }
 
     try {
-      return await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
-    } catch (err) {
+      const buffer = await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
+      return { buffer, isComplete: true };
+    } catch (err: any) {
       lastError = err;
+      const salvaged: Buffer | undefined = err?.salvagedBuffer;
+      if (salvaged && (!bestSalvagedBuffer || salvaged.length > bestSalvagedBuffer.length)) {
+        bestSalvagedBuffer = salvaged;
+      }
+
       if (abortSignal.aborted) {
         throw err;
       }
       if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
         console.warn(
-          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${(err as any)?.message || err}`
+          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${err?.message || err}`
         );
         continue;
       }
-      throw err;
+      break;
     }
+  }
+
+  // Nếu mọi lần thử lại đều bị ngắt giữa chừng nhưng đã thu đủ phần lớn audio hợp lệ -> tận dụng luôn để không đứt mạch nghe
+  if (bestSalvagedBuffer && isAudioBufferSubstantial(bestSalvagedBuffer, cleanText.length)) {
+    console.warn(
+      `[Edge TTS] Tận dụng audio đã nhận (${bestSalvagedBuffer.length} bytes) cho đoạn ${cleanText.length} ký tự sau khi stream đóng sớm.`
+    );
+    return { buffer: bestSalvagedBuffer, isComplete: false };
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Edge TTS synthesis failed'));
@@ -506,13 +536,15 @@ async function synthesizeEdgeTtsBuffer(
     },
     run: async () => {
       try {
-        const fullBuffer = await runEdgeTtsSynthesisWithRetry(
+        const result = await runEdgeTtsSynthesisWithRetry(
           cleanText,
           voiceCode,
           entryAbortController.signal
         );
-        setLruAudioCache(cacheKey, fullBuffer);
-        resolveEntry(fullBuffer);
+        if (result.isComplete) {
+          setLruAudioCache(cacheKey, result.buffer);
+        }
+        resolveEntry(result.buffer);
       } catch (err) {
         rejectEntry(err);
       } finally {
