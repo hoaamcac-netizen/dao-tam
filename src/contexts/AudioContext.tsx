@@ -20,9 +20,9 @@ import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
 
-const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 450 ký tự
-const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 600 ký tự
-const PREFETCH_LOOKAHEAD_COUNT = 4; // Tải trước theo hàng đợi 4 đoạn kế tiếp (N+1 -> N+4), tối đa 2 luồng khớp backend
+const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 280 ký tự
+const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 380 ký tự
+const PREFETCH_LOOKAHEAD_COUNT = 4; // Tải trước theo hàng đợi 4 đoạn kế tiếp (N+1 -> N+4)
 const PREFETCH_CONCURRENCY = 2;
 const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn 8 đoạn Blob URL trong RAM
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
@@ -867,14 +867,38 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (targets.length === 0) return;
 
-      // Tải trước tuần tự có thứ tự với tối đa 2 luồng song song (N+1, N+2 trước -> N+3, N+4 sau)
-      // để khớp giới hạn 2 luồng của Edge TTS và đảm bảo đoạn N+1 luôn về trước tiên
+      // Ưu tiên tuyệt đối tải xong đoạn N+1 trước tiên để đoạn kế tiếp luôn sẵn sàng 100%,
+      // sau đó mới tải song song tối đa 2 luồng cho N+2..N+4 (tránh tranh chấp CPU trên VPS 1 vCPU)
+      const [firstTarget, ...restTargets] = targets;
+      if (firstTarget && firstTarget.chapterChunkIndex !== undefined) {
+        if (
+          genId !== prefetchGenerationRef.current ||
+          sessionNonce !== playSessionNonceRef.current ||
+          !isAudioModeRef.current ||
+          signal?.aborted
+        ) {
+          return;
+        }
+        try {
+          await fetchChunkBlobUrl(firstTarget, activeVoice, signal);
+        } catch {}
+        if (
+          genId === prefetchGenerationRef.current &&
+          sessionNonce === playSessionNonceRef.current &&
+          isAudioModeRef.current
+        ) {
+          syncBufferedCount(fromQueueIdx, activeVoice);
+        }
+      }
+
+      if (restTargets.length === 0) return;
+
       let nextTargetCursor = 0;
-      const prefetchWorkerCount = Math.min(PREFETCH_CONCURRENCY, targets.length);
+      const prefetchWorkerCount = Math.min(PREFETCH_CONCURRENCY, restTargets.length);
       await Promise.allSettled(
         Array.from({ length: prefetchWorkerCount }, async () => {
-          while (nextTargetCursor < targets.length) {
-            const targetChunk = targets[nextTargetCursor++];
+          while (nextTargetCursor < restTargets.length) {
+            const targetChunk = restTargets[nextTargetCursor++];
             if (
               !targetChunk ||
               genId !== prefetchGenerationRef.current ||
@@ -1159,7 +1183,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         let audioUrl = blobCacheMapRef.current.get(chunkBlobKey);
         if (!audioUrl) {
           setIsLoading(true);
-          const currentChunkPromise = fetchChunkBlobUrl(chunk, currentVoice, abortSignal, (attempt) => {
+          // Tập trung 100% băng thông và CPU cho đoạn hiện tại phát ra tiếng trước, rồi mới prefetch N+1..N+4
+          audioUrl = await fetchChunkBlobUrl(chunk, currentVoice, abortSignal, (attempt) => {
             if (
               sessionNonce === playSessionNonceRef.current &&
               activeChunkTokenRef.current === chunkToken
@@ -1167,9 +1192,6 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               setRetryAttempt(attempt);
             }
           });
-          // Tải trước ngay đoạn N+1..N+4 theo hàng đợi 2 luồng khi đang chờ đoạn hiện tại
-          triggerNextChunkPrefetch();
-          audioUrl = await currentChunkPromise;
         }
 
         if (
@@ -1206,6 +1228,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audio.onplaying = null;
         audio.ontimeupdate = null;
         audio.onloadedmetadata = null;
+        audio.oncanplay = null;
 
         // Không gọi audio.pause() trước khi đổi src để tránh làm rớt Background Media Session khi tắt màn hình
         audio.loop = false;
@@ -1328,6 +1351,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           applyPlaybackRateLock(audio, playbackRateRef.current);
         };
 
+        audio.oncanplay = () => {
+          applyPlaybackRateLock(audio, playbackRateRef.current);
+        };
+
         audio.onplaying = () => {
           clearLocalStallTimer();
           consecutiveChunkErrorsRef.current = 0;
@@ -1386,9 +1413,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           audio.onplaying = null;
           audio.ontimeupdate = null;
           audio.onloadedmetadata = null;
-
-          // Giải phóng RAM của đoạn vừa đọc xong ngay lập tức
-          revokeChunkBlobFromCache(chunkBlobKey);
+          audio.oncanplay = null;
 
           if (!isCurrentChunkStillValid()) {
             return;

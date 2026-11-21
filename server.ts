@@ -287,24 +287,48 @@ function writeDiskCacheAsync(cacheKey: string, buf: Buffer) {
     });
 }
 
+// 4 valid MPEG-1 Layer 3 (128kbps, 44.1kHz, stereo) silent frames (~104ms, 1668 bytes)
+const SILENT_MP3_BUFFER = (() => {
+  const frameSize = 417;
+  const frameCount = 4;
+  const buf = Buffer.alloc(frameSize * frameCount, 0);
+  for (let i = 0; i < frameCount; i++) {
+    const offset = i * frameSize;
+    buf[offset] = 0xff;
+    buf[offset + 1] = 0xfb;
+    buf[offset + 2] = 0x90;
+    buf[offset + 3] = 0x00;
+  }
+  return buf;
+})();
+
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
   return rawText
     // Loại bỏ các ký tự điều khiển ẩn, zero-width, BOM, ký tự lỗi Unicode
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
-    // Xử lý HTML entities trước khi loại bỏ ký tự đặc biệt SSML
+    // Chuyển dấu xuống dòng chưa có dấu kết câu thành dấu chấm để giữ nhịp ngắt nghỉ Việt Nam
+    .replace(/([^\s.,?!:;…])\s*\r?\n+/g, '$1. ')
+    .replace(/[\r\n\t]+/g, ' ')
+    // Giải mã HTML entities cơ bản
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, ' và ')
-    .replace(/&lt;|&gt;/gi, ' ')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    // Thay thế / loại bỏ các ký tự làm hỏng SSML (<, >, &)
-    .replace(/[<>]/g, ' ')
     .replace(/&/g, ' và ')
-    // Chuẩn hóa dấu ngoặc kép, nháy đơn và khoảng trắng
-    .replace(/[“”„‟«»]/g, '"')
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/&lt;|&gt;/gi, ' ')
+    .replace(/&quot;|&#39;|&apos;/gi, ' ')
+    // Chuẩn hóa ba chấm Unicode thành ...
+    .replace(/…+/g, '...')
+    .replace(/[.]{4,}/g, '...')
+    // Chuyển gạch ngang nối giữa câu thành dấu phẩy nhẹ cho giọng đọc tự nhiên
+    .replace(/\s[-–—]+\s/g, ', ')
+    // Giữ nguyên toàn bộ chữ cái Unicode (\p{L}), chữ số (\p{N}), khoảng trắng và dấu câu ngắt nghỉ (. , ? ! : ;)
+    // Thay thế mọi ký tự/ngoặc/emoji lạ (【】《》「」『』—~*#_...) bằng khoảng trắng
+    .replace(/[^\p{L}\p{N}\s.,?!:;]/gu, ' ')
+    // Chuẩn hóa khoảng trắng quanh dấu câu Việt Nam
+    .replace(/\s+([.,?!:;])/g, '$1')
+    .replace(/([,;?!:])(?=[\p{L}\p{N}])/gu, '$1 ')
+    .replace(/(\.{2,})(?=[\p{L}\p{N}])/gu, '$1 ')
+    .replace(/([\p{Ll}])\.([\p{Lu}])/gu, '$1. $2')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 3000);
@@ -378,41 +402,42 @@ function setLruAudioCache(cacheKey: string, fullBuffer: Buffer) {
   audioCache.set(cacheKey, fullBuffer);
 }
 
-function normalizeEdgeTtsRate(rawRate?: string): string {
-  const trimmed = String(rawRate || '').trim();
-  if (/^[+-]\d{1,3}%$/.test(trimmed)) {
-    return trimmed;
-  }
+function normalizeEdgeTtsRate(_rawRate?: string): string {
+  // Frontend tự điều chỉnh tốc độ phát qua HTMLAudioElement.playbackRate, luôn khóa +0% ở CLI để an toàn & tối đa hit cache
   return '+0%';
 }
 
 async function runPythonEdgeTtsOnce(
   cleanText: string,
   voiceCode: string,
-  rate: string,
+  _rate: string,
   abortSignal: AbortSignal
 ): Promise<Buffer> {
   if (abortSignal.aborted) {
     throw new Error('Client aborted TTS request');
   }
 
-  // Đảm bảo argparse của Python edge-tts không hiểu nhầm câu bắt đầu bằng '-' là cờ CLI
-  const safeCliText = cleanText.startsWith('-') ? ` ${cleanText}` : cleanText;
-  const tmpFileName = `daotam-tts-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}.mp3`;
-  const tmpFilePath = path.join(TTS_TMP_DIR, tmpFileName);
+  if (!/[\p{L}\p{N}]/u.test(cleanText)) {
+    return SILENT_MP3_BUFFER;
+  }
+
+  const uniqueId = `${process.pid}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+  const tempTxtPath = path.join(TTS_TMP_DIR, `tts_in_${uniqueId}.txt`);
+  const tmpFilePath = path.join(TTS_TMP_DIR, `tts_out_${uniqueId}.mp3`);
 
   const args = [
     '--voice',
     voiceCode,
-    '--rate',
-    rate,
-    '--text',
-    safeCliText,
+    '--rate=+0%',
+    '--file',
+    tempTxtPath,
     '--write-media',
     tmpFilePath,
   ];
 
   try {
+    await fs.promises.writeFile(tempTxtPath, cleanText, 'utf8');
+
     await new Promise<void>((resolve, reject) => {
       execFile(
         EDGE_TTS_BIN,
@@ -449,7 +474,10 @@ async function runPythonEdgeTtsOnce(
     }
     return audioBuffer;
   } finally {
-    await fs.promises.unlink(tmpFilePath).catch(() => {});
+    await Promise.allSettled([
+      fs.promises.unlink(tempTxtPath).catch(() => {}),
+      fs.promises.unlink(tmpFilePath).catch(() => {}),
+    ]);
   }
 }
 
@@ -630,13 +658,16 @@ async function handleTtsSynthesis(
 
   // Làm sạch văn bản trước khi đưa vào edge-tts CLI
   const cleanText = sanitizeTextForEdgeTts(text);
-  if (!cleanText) {
-    return res.status(400).json({ error: 'Nội dung văn bản (text) không hợp lệ sau khi làm sạch' });
+  // Nếu sau khi lọc không chứa chữ cái hay chữ số nào (chỉ có dấu câu như ..., ---, ***),
+  // trả về ngay đoạn MP3 im lặng ngắn hợp lệ để frontend trượt qua mượt mà, không gọi edge-tts
+  if (!cleanText || !/[\p{L}\p{N}]/u.test(cleanText)) {
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Length', SILENT_MP3_BUFFER.length);
+    res.setHeader('Cache-Control', 'public, max-age=2592000');
+    res.setHeader('X-TTS-Engine', 'silent-skip');
+    return res.end(SILENT_MP3_BUFFER);
   }
-  const cacheKey =
-    safeRate === '+0%'
-      ? `${voiceCode}:::${cleanText}`
-      : `${voiceCode}:::${safeRate}:::${cleanText}`;
+  const cacheKey = `${voiceCode}:::${cleanText}`;
 
   const clientAbortController = new AbortController();
   const onResClose = () => {
