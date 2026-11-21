@@ -17,14 +17,14 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 20000;
+export const TTS_FETCH_TIMEOUT_MS = 22000;
 export const TTS_MAX_RETRIES = 3;
-export const TTS_RETRY_DELAY_MS = 800;
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 70;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 140;
+export const TTS_RETRY_DELAY_MS = 600;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 100;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 150;
 export const DEFAULT_HEAD_CHUNK_COUNT = 1;
-export const DEFAULT_CHUNK_MIN_LENGTH = 250;
-export const DEFAULT_CHUNK_MAX_LENGTH = 400;
+export const DEFAULT_CHUNK_MIN_LENGTH = 450;
+export const DEFAULT_CHUNK_MAX_LENGTH = 600;
 export const MAX_BLOB_CACHE_ENTRIES = 8;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {

@@ -20,9 +20,10 @@ import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
 
-const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 250 ký tự
-const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 400 ký tự
-const PREFETCH_LOOKAHEAD_COUNT = 4; // Tải trước song song 4 đoạn kế tiếp (N+1, N+2, N+3, N+4)
+const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 450 ký tự
+const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 600 ký tự
+const PREFETCH_LOOKAHEAD_COUNT = 4; // Tải trước theo hàng đợi 4 đoạn kế tiếp (N+1 -> N+4), tối đa 2 luồng khớp backend
+const PREFETCH_CONCURRENCY = 2;
 const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn 8 đoạn Blob URL trong RAM
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
 const LISTENING_PROGRESS_STORAGE_KEY = 'daotam_listening_progress';
@@ -866,26 +867,33 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (targets.length === 0) return;
 
-      // Tải trước song song đồng thời cả 4 đoạn (N+1, N+2, N+3, N+4)
+      // Tải trước tuần tự có thứ tự với tối đa 2 luồng song song (N+1, N+2 trước -> N+3, N+4 sau)
+      // để khớp giới hạn 2 luồng của Edge TTS và đảm bảo đoạn N+1 luôn về trước tiên
+      let nextTargetCursor = 0;
+      const prefetchWorkerCount = Math.min(PREFETCH_CONCURRENCY, targets.length);
       await Promise.allSettled(
-        targets.map(async (targetChunk) => {
-          if (
-            genId !== prefetchGenerationRef.current ||
-            sessionNonce !== playSessionNonceRef.current ||
-            !isAudioModeRef.current ||
-            signal?.aborted
-          ) {
-            return;
-          }
-          try {
-            await fetchChunkBlobUrl(targetChunk, activeVoice, signal);
-          } catch {}
-          if (
-            genId === prefetchGenerationRef.current &&
-            sessionNonce === playSessionNonceRef.current &&
-            isAudioModeRef.current
-          ) {
-            syncBufferedCount(fromQueueIdx, activeVoice);
+        Array.from({ length: prefetchWorkerCount }, async () => {
+          while (nextTargetCursor < targets.length) {
+            const targetChunk = targets[nextTargetCursor++];
+            if (
+              !targetChunk ||
+              genId !== prefetchGenerationRef.current ||
+              sessionNonce !== playSessionNonceRef.current ||
+              !isAudioModeRef.current ||
+              signal?.aborted
+            ) {
+              return;
+            }
+            try {
+              await fetchChunkBlobUrl(targetChunk, activeVoice, signal);
+            } catch {}
+            if (
+              genId === prefetchGenerationRef.current &&
+              sessionNonce === playSessionNonceRef.current &&
+              isAudioModeRef.current
+            ) {
+              syncBufferedCount(fromQueueIdx, activeVoice);
+            }
           }
         })
       );
@@ -1159,7 +1167,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               setRetryAttempt(attempt);
             }
           });
-          // Khởi động tải trước song song N+1..N+4 ngay lập tức trong lúc chờ đoạn đầu tiên về
+          // Tải trước ngay đoạn N+1..N+4 theo hàng đợi 2 luồng khi đang chờ đoạn hiện tại
           triggerNextChunkPrefetch();
           audioUrl = await currentChunkPromise;
         }
