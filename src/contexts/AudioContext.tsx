@@ -6,6 +6,7 @@ import {
   DEFAULT_CHUNK_MIN_LENGTH,
   DEFAULT_FIRST_CHUNK_MAX_LENGTH,
   DEFAULT_FIRST_CHUNK_MIN_LENGTH,
+  DEFAULT_HEAD_CHUNK_COUNT,
   MAX_BLOB_CACHE_ENTRIES,
   TTS_FETCH_TIMEOUT_MS,
   TTS_MAX_RETRIES,
@@ -18,12 +19,11 @@ import { backgroundAudioManager } from '../utils/backgroundAudio';
 import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
-import { useAuth } from './AuthContext';
 
-const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 250 ký tự
+const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 280 ký tự
 const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 350 ký tự
-const PREFETCH_LOOKAHEAD_COUNT = 3; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
-const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn cứng tối đa 3 đoạn trong bộ nhớ đệm
+const PREFETCH_LOOKAHEAD_COUNT = 3; // Luôn duy trì bộ đệm nạp trước ít nhất 3 đoạn kế tiếp (Đệm +3)
+const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn tối đa 6 đoạn trong bộ nhớ đệm RAM
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
 const LISTENING_PROGRESS_STORAGE_KEY = 'daotam_listening_progress';
 
@@ -49,9 +49,9 @@ function makeQueuedChunkBlobKey(chunk: QueuedAudioChunk, voice: string): string 
 }
 
 /**
- * Ghép tên chương vào đầu văn bản:
- * - Đoạn đầu tiên (chunk 0) cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
- * - Các đoạn tiếp theo gộp 250 - 350 ký tự theo dấu câu/xuống dòng, đọc mượt ở tốc độ 2x và không bị Edge TTS ngắt giữa chừng.
+ * Ghép tên chương vào đầu văn bản theo progressive chunking:
+ * - 2 đoạn đầu (chunk 0, 1) cắt ngắn 80 - 120 ký tự để máy chủ tạo giọng và phát tiếng trong ~1-3s.
+ * - Các đoạn tiếp theo gộp 280 - 350 ký tự theo dấu câu/xuống dòng, đọc mượt ở tốc độ 1.5x - 2.0x.
  */
 function buildChapterQueuedChunks(
   novelId: string,
@@ -67,7 +67,8 @@ function buildChapterQueuedChunks(
     CHUNK_MIN_LEN,
     CHUNK_MAX_LEN,
     DEFAULT_FIRST_CHUNK_MIN_LENGTH,
-    DEFAULT_FIRST_CHUNK_MAX_LENGTH
+    DEFAULT_FIRST_CHUNK_MAX_LENGTH,
+    DEFAULT_HEAD_CHUNK_COUNT
   );
   const total = parsed?.length || 0;
   return (parsed || []).map((c, idx) => ({
@@ -135,7 +136,6 @@ export interface AudioContextType {
 const AudioContext = createContext<AudioContextType | null>(null);
 
 export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user: authUser } = useAuth();
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [activeNovel, setActiveNovel] = useState<Novel | null>(null);
   const [activeChapter, setActiveChapter] = useState<Chapter | null>(null);
@@ -805,10 +805,27 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     preloadNextChapterRef.current = preloadNextChapter;
   }, [preloadNextChapter]);
 
+  const syncBufferedCount = useCallback((fromQueueIdx: number, activeVoice: string) => {
+    const queue = queueChunksRef.current || [];
+    let readyCount = 0;
+    for (let offset = 1; offset <= PREFETCH_LOOKAHEAD_COUNT; offset++) {
+      const targetChunk = queue[fromQueueIdx + offset];
+      if (!targetChunk) break;
+      if (blobCacheMapRef.current.has(makeQueuedChunkBlobKey(targetChunk, activeVoice))) {
+        readyCount += 1;
+      }
+    }
+    if (bufferedCountRef.current !== readyCount) {
+      bufferedCountRef.current = readyCount;
+      setBufferedCount(readyCount);
+    }
+  }, []);
+
   /**
-   * SINGLE-CHUNK PREFETCH (i + 1):
-   * - Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát,
-   *   giúp Render Free (0.1 CPU) không bị nghẽn và tiết kiệm tối đa RAM điện thoại.
+   * LOOKAHEAD PREFETCH BUFFER (Ít nhất 3 đoạn kế tiếp: i+1, i+2, i+3):
+   * - Duy trì sẵn 3 đoạn tiếp theo trong RAM để chuyển đoạn 0ms ở tốc độ 1.5x - 2.0x.
+   * - Tự động nối trước chương kế tiếp khi còn <= 4 đoạn để nạp sẵn đoạn đầu chương mới khi chạy nền.
+   * - Giải phóng ngay Blob URL của các đoạn đã nghe qua (< i).
    */
   const runSequentialPrefetchQueue = useCallback(
     async (fromQueueIdx: number, activeVoice: string, sessionNonce: number) => {
@@ -818,12 +835,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const genId = ++prefetchGenerationRef.current;
 
-      // Dọn dẹp các đoạn cũ nằm ngoài cửa sổ [i .. i+1]
+      // Dọn dẹp toàn bộ Blob URL các đoạn đã qua (< fromQueueIdx) hoặc ngoài cửa sổ [i .. i+3]
       pruneBlobsOutsideWindow(fromQueueIdx, activeVoice);
 
-      // Chuẩn bị sẵn text chương kế tiếp khi gần cuối chương (chưa tải audio, chỉ tách chunk)
+      // Khi gần cuối chương (còn <= 4 đoạn), nối sẵn chương kế tiếp vào Queue để prefetch đoạn đầu chương mới
       const remainingInQueue = (queueChunksRef.current?.length || 0) - 1 - fromQueueIdx;
-      if (autoNextRef.current && remainingInQueue <= 3) {
+      if (autoNextRef.current && remainingInQueue <= 4) {
         await appendNextChapterToQueueIfNeeded(sessionNonce, signal);
       }
 
@@ -836,35 +853,63 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return;
       }
 
-      const nextTarget = queueChunksRef.current[fromQueueIdx + 1];
-      if (!nextTarget) {
-        if (bufferedCountRef.current !== 0) {
-          bufferedCountRef.current = 0;
-          setBufferedCount(0);
+      syncBufferedCount(fromQueueIdx, activeVoice);
+
+      const queue = queueChunksRef.current || [];
+      const targets: QueuedAudioChunk[] = [];
+      for (let offset = 1; offset <= PREFETCH_LOOKAHEAD_COUNT; offset++) {
+        const candidate = queue[fromQueueIdx + offset];
+        if (candidate && !blobCacheMapRef.current.has(makeQueuedChunkBlobKey(candidate, activeVoice))) {
+          targets.push(candidate);
         }
-        return;
       }
 
+      if (targets.length === 0) return;
+
+      // Ưu tiên nạp ngay i+1 trước nếu đang thiếu, sau đó nạp song song tối đa 2 đoạn i+2, i+3
+      const firstTarget = targets[0];
       try {
-        await fetchChunkBlobUrl(nextTarget, activeVoice, signal);
+        await fetchChunkBlobUrl(firstTarget, activeVoice, signal);
       } catch {}
 
       if (
-        genId === prefetchGenerationRef.current &&
-        sessionNonce === playSessionNonceRef.current &&
-        isAudioModeRef.current
+        genId !== prefetchGenerationRef.current ||
+        sessionNonce !== playSessionNonceRef.current ||
+        !isAudioModeRef.current ||
+        signal?.aborted
       ) {
-        const isNextReady = blobCacheMapRef.current.has(
-          makeQueuedChunkBlobKey(nextTarget, activeVoice)
-        );
-        const ready = isNextReady ? 1 : 0;
-        if (bufferedCountRef.current !== ready) {
-          bufferedCountRef.current = ready;
-          setBufferedCount(ready);
+        return;
+      }
+      syncBufferedCount(fromQueueIdx, activeVoice);
+
+      const remainingTargets = targets.slice(1);
+      for (let i = 0; i < remainingTargets.length; i += 2) {
+        if (
+          genId !== prefetchGenerationRef.current ||
+          sessionNonce !== playSessionNonceRef.current ||
+          !isAudioModeRef.current ||
+          signal?.aborted
+        ) {
+          return;
         }
+        const batch = remainingTargets.slice(i, i + 2);
+        await Promise.all(
+          batch.map(async (targetChunk) => {
+            try {
+              await fetchChunkBlobUrl(targetChunk, activeVoice, signal);
+            } catch {}
+            if (
+              genId === prefetchGenerationRef.current &&
+              sessionNonce === playSessionNonceRef.current &&
+              isAudioModeRef.current
+            ) {
+              syncBufferedCount(fromQueueIdx, activeVoice);
+            }
+          })
+        );
       }
     },
-    [appendNextChapterToQueueIfNeeded, fetchChunkBlobUrl, pruneBlobsOutsideWindow]
+    [appendNextChapterToQueueIfNeeded, fetchChunkBlobUrl, pruneBlobsOutsideWindow, syncBufferedCount]
   );
 
   const stopSingleAudioElement = useCallback(
@@ -1077,8 +1122,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const curNovel = activeNovelRef.current;
 
-      // Chuẩn bị sẵn text chương kế tiếp khi gần cuối chương (chỉ đọc text, không prefetch quá 1 chunk audio)
-      if (autoNextRef.current && (curQueue?.length || 0) - 1 - queueIndex <= 3) {
+      // Chuẩn bị sẵn text chương kế tiếp khi còn <= 4 đoạn để prefetch luôn đoạn đầu chương sau
+      if (autoNextRef.current && (curQueue?.length || 0) - 1 - queueIndex <= 4) {
         appendNextChapterToQueueIfNeeded(sessionNonce, abortSignal).catch(() => {});
       }
 
@@ -1109,17 +1154,20 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return;
         }
 
-        // 2. Giải phóng Blob URL của đoạn trước nếu nhảy cóc / tua đoạn, và giữ DUY NHẤT 1 thẻ <audio> cố định
+        // 2. Giải phóng Blob URL của đoạn trước nếu đã nghe qua hoặc nhảy cóc, giữ DUY NHẤT 1 thẻ <audio> cố định
         const prevActiveKey = activeBlobKeyRef.current;
         activeBlobKeyRef.current = chunkBlobKey;
         activeBlobUrlRef.current = audioUrl;
         if (prevActiveKey && prevActiveKey !== chunkBlobKey) {
-          const nextChunk = curQueue[queueIndex + 1];
-          const nextKey = nextChunk ? makeQueuedChunkBlobKey(nextChunk, currentVoice) : null;
-          if (prevActiveKey !== nextKey) {
+          const isUpcomingLookahead = [1, 2, 3].some((offset) => {
+            const c = curQueue[queueIndex + offset];
+            return c ? makeQueuedChunkBlobKey(c, currentVoice) === prevActiveKey : false;
+          });
+          if (!isUpcomingLookahead) {
             revokeChunkBlobFromCache(prevActiveKey);
           }
         }
+        syncBufferedCount(queueIndex, currentVoice);
 
         audio.onended = null;
         audio.onerror = null;
@@ -1431,6 +1479,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       revokeChunkBlobFromCache,
       runSequentialPrefetchQueue,
       saveListeningProgressLocal,
+      syncBufferedCount,
       syncSilentChapterTransition,
       updateProgressBarDomNow,
     ]
@@ -1642,15 +1691,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       userExplicitAction = false,
       options?: { isAutoAdvance?: boolean }
     ) => {
-      if (!authUser || authUser.isLoggedIn === false || authUser.id === 'guest') {
-      const msg = 'Vui lòng đăng nhập tài khoản để nghe audio truyện.';
-      setAudioError(msg);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('daotam:audio-auth-required', { detail: { message: msg } }));
-      }
-      return;
-    }
-    const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
+      const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
       if (
         !userExplicitAction &&
         !options?.isAutoAdvance &&
