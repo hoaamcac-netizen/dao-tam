@@ -8,10 +8,11 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
 // In-memory cache for synthesized speech segments (LRU buffer cache, max 40 items)
 const audioBufferCache = new Map<string, Buffer>();
-const MAX_CACHE_ITEMS = 40;
-const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
+const MAX_CACHE_ITEMS = 450;
+const TTS_SYNTHESIS_TIMEOUT_MS = 14000;
 const TTS_BACKEND_MAX_RETRIES = 2;
-const TTS_BACKEND_RETRY_DELAY_MS = 500;
+const TTS_BACKEND_RETRY_DELAY_MS = 350;
+const MIN_SALVAGE_AUDIO_BYTES = 2048;
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -50,9 +51,15 @@ function isRetryableEdgeTtsError(err: unknown): boolean {
   );
 }
 
+function isAudioBufferSubstantial(buf: Buffer | null | undefined, cleanTextLength: number): boolean {
+  if (!buf || buf.length < MIN_SALVAGE_AUDIO_BYTES) return false;
+  const minExpectedBytes = Math.max(MIN_SALVAGE_AUDIO_BYTES, Math.min(18000, cleanTextLength * 180));
+  return buf.length >= minExpectedBytes;
+}
+
 async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buffer> {
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 10000,
+    connectionTimeoutMs: 8000,
     synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
   });
 
@@ -91,10 +98,18 @@ async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buf
     let settled = false;
     const chunks: Buffer[] = [];
 
-    const finishWithError = (err: Error) => {
+    const collectSalvage = (): Buffer | undefined => {
+      if (chunks.length === 0) return undefined;
+      const buf = Buffer.concat(chunks);
+      chunks.length = 0;
+      return buf.length >= MIN_SALVAGE_AUDIO_BYTES ? buf : undefined;
+    };
+
+    const finishWithError = (err: Error, salvaged?: Buffer) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (salvaged) (err as any).salvagedBuffer = salvaged;
       reject(err);
     };
 
@@ -106,7 +121,10 @@ async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buf
     };
 
     timeout = setTimeout(() => {
-      finishWithError(new Error('Quá thời gian 20s kết nối tới máy chủ Microsoft Edge TTS.'));
+      finishWithError(
+        new Error('Quá thời gian 14s kết nối tới máy chủ Microsoft Edge TTS.'),
+        collectSalvage()
+      );
     }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     tts
@@ -141,20 +159,24 @@ async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buf
           if (!settled) {
             const fullBuffer = Buffer.concat(chunks);
             chunks.length = 0;
-            if (fullBuffer.length > 0) {
+            if (isAudioBufferSubstantial(fullBuffer, cleanText.length)) {
               finishWithSuccess(fullBuffer);
             } else {
-              finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm.'));
+              finishWithError(
+                new Error('Luồng âm thanh Edge TTS đã đóng sớm.'),
+                fullBuffer.length >= MIN_SALVAGE_AUDIO_BYTES ? fullBuffer : undefined
+              );
             }
           }
         });
 
         audioStream.on('error', (err: any) => {
-          chunks.length = 0;
-          finishWithError(err instanceof Error ? err : new Error(String(err)));
+          const salvaged = collectSalvage();
+          finishWithError(err instanceof Error ? err : new Error(String(err)), salvaged);
         });
       })
       .catch((err: any) => {
+        chunks.length = 0;
         finishWithError(err instanceof Error ? err : new Error(String(err)));
       });
   });
@@ -207,6 +229,8 @@ export default async function handler(req: any, res: any) {
 
   try {
     let fullBuffer: Buffer | null = null;
+    let isComplete = true;
+    let bestSalvaged: Buffer | undefined;
     let lastErr: unknown;
 
     for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
@@ -216,28 +240,39 @@ export default async function handler(req: any, res: any) {
       try {
         fullBuffer = await synthesizeOnce(cleanText, voiceCode);
         break;
-      } catch (err) {
+      } catch (err: any) {
         lastErr = err;
+        const salvaged: Buffer | undefined = err?.salvagedBuffer;
+        if (salvaged && (!bestSalvaged || salvaged.length > bestSalvaged.length)) {
+          bestSalvaged = salvaged;
+        }
         if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
           continue;
         }
-        throw err;
+        break;
       }
     }
 
     if (!fullBuffer) {
-      throw lastErr instanceof Error ? lastErr : new Error('Không thể tổng hợp giọng đọc.');
+      if (bestSalvaged && isAudioBufferSubstantial(bestSalvaged, cleanText.length)) {
+        fullBuffer = bestSalvaged;
+        isComplete = false;
+      } else {
+        throw lastErr instanceof Error ? lastErr : new Error('Không thể tổng hợp giọng đọc.');
+      }
     }
 
-    if (audioBufferCache.has(cacheKey)) {
-      audioBufferCache.delete(cacheKey);
+    if (isComplete) {
+      if (audioBufferCache.has(cacheKey)) {
+        audioBufferCache.delete(cacheKey);
+      }
+      while (audioBufferCache.size >= MAX_CACHE_ITEMS) {
+        const oldestKey = audioBufferCache.keys().next().value;
+        if (oldestKey !== undefined) audioBufferCache.delete(oldestKey);
+        else break;
+      }
+      audioBufferCache.set(cacheKey, fullBuffer);
     }
-    while (audioBufferCache.size >= MAX_CACHE_ITEMS) {
-      const oldestKey = audioBufferCache.keys().next().value;
-      if (oldestKey !== undefined) audioBufferCache.delete(oldestKey);
-      else break;
-    }
-    audioBufferCache.set(cacheKey, fullBuffer);
 
     if (!res.headersSent) {
       res.setHeader('Content-Type', 'audio/mpeg');
