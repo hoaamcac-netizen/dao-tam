@@ -122,10 +122,10 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 // 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry tối đa 2 lần (nghỉ 500ms)
 // =========================================================================
 const MAX_AUDIO_CACHE_ITEMS = 40;
-const MAX_CONCURRENT_TTS = 5;
+const MAX_CONCURRENT_TTS = 2;
 const TTS_SYNTHESIS_TIMEOUT_MS = 30000;
 const TTS_BACKEND_MAX_RETRIES = 2;
-const TTS_BACKEND_RETRY_DELAY_MS = 500;
+const TTS_BACKEND_RETRY_DELAY_MS = 1200;
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -363,6 +363,16 @@ async function runEdgeTtsSynthesisOnce(
           }
         });
 
+        /* DAO_TAM_STREAM_ERR_PARTIAL */
+        audioStream.on('error', () => {
+          if (!settled && chunks.length > 0) {
+            const errBuf = Buffer.concat(chunks);
+            chunks.length = 0;
+            if (errBuf.length > 1024) {
+              finishWithSuccess(errBuf);
+            }
+          }
+        });
         audioStream.on('close', () => {
           if (!settled) {
             const buf = Buffer.concat(chunks);
