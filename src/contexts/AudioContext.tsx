@@ -18,10 +18,11 @@ import { backgroundAudioManager } from '../utils/backgroundAudio';
 import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
+import { useAuth } from './AuthContext';
 
 const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 250 ký tự
 const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 350 ký tự
-const PREFETCH_LOOKAHEAD_COUNT = 1; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
+const PREFETCH_LOOKAHEAD_COUNT = 3; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
 const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn cứng tối đa 3 đoạn trong bộ nhớ đệm
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
 const LISTENING_PROGRESS_STORAGE_KEY = 'daotam_listening_progress';
@@ -134,6 +135,7 @@ export interface AudioContextType {
 const AudioContext = createContext<AudioContextType | null>(null);
 
 export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user: authUser } = useAuth();
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [activeNovel, setActiveNovel] = useState<Novel | null>(null);
   const [activeChapter, setActiveChapter] = useState<Chapter | null>(null);
@@ -1640,7 +1642,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       userExplicitAction = false,
       options?: { isAutoAdvance?: boolean }
     ) => {
-      const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
+      if (!authUser || authUser.isLoggedIn === false || authUser.id === 'guest') {
+      setAudioError('Vui lòng đăng nhập tài khoản để nghe audio truyện.');
+      return;
+    }
+    const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
       if (
         !userExplicitAction &&
         !options?.isAutoAdvance &&
