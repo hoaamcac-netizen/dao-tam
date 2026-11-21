@@ -823,7 +823,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       // Chuẩn bị sẵn text chương kế tiếp khi gần cuối chương (chưa tải audio, chỉ tách chunk)
       const remainingInQueue = (queueChunksRef.current?.length || 0) - 1 - fromQueueIdx;
-      if (autoNextRef.current && remainingInQueue <= 2) {
+      if (autoNextRef.current && remainingInQueue <= 3) {
         await appendNextChapterToQueueIfNeeded(sessionNonce, signal);
       }
 
@@ -1078,7 +1078,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const curNovel = activeNovelRef.current;
 
       // Chuẩn bị sẵn text chương kế tiếp khi gần cuối chương (chỉ đọc text, không prefetch quá 1 chunk audio)
-      if (autoNextRef.current && (curQueue?.length || 0) - 1 - queueIndex <= 2) {
+      if (autoNextRef.current && (curQueue?.length || 0) - 1 - queueIndex <= 3) {
         appendNextChapterToQueueIfNeeded(sessionNonce, abortSignal).catch(() => {});
       }
 
