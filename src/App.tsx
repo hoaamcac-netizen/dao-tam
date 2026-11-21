@@ -156,6 +156,15 @@ import {
 } from './services/antiCrawlerRateLimiter';
 
 function DaoTamApp() {
+  const [guestAudioNotice, setGuestAudioNotice] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    const onAuthRequired = (e: Event) => {
+      const customEvent = e as CustomEvent<{ message?: string }>;
+      setGuestAudioNotice(customEvent.detail?.message || 'Vui lòng đăng nhập tài khoản để nghe audio truyện.');
+    };
+    window.addEventListener('daotam:audio-auth-required', onAuthRequired);
+    return () => window.removeEventListener('daotam:audio-auth-required', onAuthRequired);
+  }, []);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
       const saved = safeGetItem('daotam_theme');
@@ -4362,7 +4371,12 @@ function DaoTamApp() {
       <PWAInstallPrompt />
 
       {/* THANH NỔI AUDIO MICROSOFT EDGE TTS (CHUẨN HÌNH 1, HỖ TRỢ NGHE KHI TẮT MÀN HÌNH & MEDIA SESSION LOCKSCREEN) */}
-      {audioError && (<div data-testid="audio-login-toast" className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 max-w-md w-[92%] bg-amber-50 border border-amber-300 text-amber-950 px-4 py-3 rounded-xl shadow-lg flex items-center justify-between gap-3"><span className="text-sm font-medium">{audioError}</span><button type="button" onClick={clearAudioError} className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-amber-200 hover:bg-amber-300 cursor-pointer shrink-0">Đóng</button></div>)}
+      {guestAudioNotice && (
+        <div data-testid="audio-login-toast" style={{ position: 'fixed', bottom: '84px', left: '50%', transform: 'translateX(-50%)', zIndex: 99999, maxWidth: '440px', width: '92%' }} className="bg-amber-50 border-2 border-amber-400 text-amber-950 px-4 py-3 rounded-xl shadow-2xl flex items-center justify-between gap-3">
+          <span className="text-sm font-semibold">{guestAudioNotice}</span>
+          <button type="button" onClick={() => setGuestAudioNotice(null)} className="text-xs font-bold px-3 py-1 rounded-lg bg-amber-300 hover:bg-amber-400 text-amber-950 cursor-pointer shrink-0">Đóng</button>
+        </div>
+      )}
       <EdgeTTSFloatingAudioBar
         onOpenReader={(novel, chapter) => {
           handleSelectChapter(novel, chapter, false);

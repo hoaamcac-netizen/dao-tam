@@ -1643,7 +1643,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       options?: { isAutoAdvance?: boolean }
     ) => {
       if (!authUser || authUser.isLoggedIn === false || authUser.id === 'guest') {
-      setAudioError('Vui lòng đăng nhập tài khoản để nghe audio truyện.');
+      const msg = 'Vui lòng đăng nhập tài khoản để nghe audio truyện.';
+      setAudioError(msg);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('daotam:audio-auth-required', { detail: { message: msg } }));
+      }
       return;
     }
     const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
