@@ -1,5 +1,6 @@
 import { Chapter, VoiceOption, Novel } from '../types';
 import { checkIsAdmin } from '../firebase/config';
+import { buildTtsEndpoint } from './ttsApi';
 
 /**
  * QUY TẮC THIẾT LẬP VIP TỰ ĐỘNG:
@@ -134,7 +135,7 @@ let dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
 
 export async function fetchAvailableEdgeVoices(): Promise<VoiceOption[]> {
   try {
-    const res = await fetch('/api/tts/voices');
+    const res = await fetch(buildTtsEndpoint('/api/tts/voices'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (data.success && Array.isArray(data.voices) && (data.voices?.length || 0) > 0) {
@@ -167,7 +168,8 @@ export function getLoadedEdgeVoices(): VoiceOption[] {
  */
 export function getEdgeTtsAudioUrl(text: string, voiceId: string): string {
   const normalizedVoice = normalizeEdgeVoiceId(voiceId);
-  return `/api/tts?text=${encodeURIComponent(text.trim())}&voice=${encodeURIComponent(normalizedVoice)}`;
+  const endpoint = buildTtsEndpoint('/api/tts');
+  return `${endpoint}?text=${encodeURIComponent(text.trim())}&voice=${encodeURIComponent(normalizedVoice)}`;
 }
 
 /**

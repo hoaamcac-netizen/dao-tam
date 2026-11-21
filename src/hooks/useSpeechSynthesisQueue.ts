@@ -6,7 +6,7 @@ import { getMatchingBrowserVoice } from '../utils/rulesAndVoices';
  * Kích thước cửa sổ đệm (Sliding Window Buffer Size) cho Web Speech API.
  * Luôn giữ sẵn 5 câu (utterance) trong hàng đợi speechSynthesis để không bị khựng khi nghe tốc độ 2.0x - 3.0x.
  */
-export const BUFFER_SIZE = 3;
+export const BUFFER_SIZE = 5;
 
 export interface UseSpeechSynthesisQueueOptions {
   text: string;
@@ -154,12 +154,10 @@ export function useSpeechSynthesisQueue({
       utterancePoolRef.current.delete(index);
       setBufferedCount(utterancePoolRef.current.size);
 
-      for (let offset = 1; offset <= BUFFER_SIZE; offset++) {
-  const nextBufferIndex = index + offset;
-  if (nextBufferIndex < (list?.length || 0)) {
-    enqueueChunk(nextBufferIndex, sessionId);
-  }
-}
+      const nextBufferIndex = index + BUFFER_SIZE;
+      if (nextBufferIndex < (list?.length || 0)) {
+        enqueueChunk(nextBufferIndex, sessionId);
+      }
 
       // Kiểm tra nếu đã phát hết câu cuối cùng trong chương
       if (index === (list?.length || 0) - 1 || utterancePoolRef.current.size === 0) {
@@ -187,12 +185,10 @@ export function useSpeechSynthesisQueue({
       utterancePoolRef.current.delete(index);
       setBufferedCount(utterancePoolRef.current.size);
 
-      for (let offset = 1; offset <= BUFFER_SIZE; offset++) {
-  const nextBufferIndex = index + offset;
-  if (nextBufferIndex < (list?.length || 0)) {
-    enqueueChunk(nextBufferIndex, sessionId);
-  }
-}
+      const nextBufferIndex = index + BUFFER_SIZE;
+      if (nextBufferIndex < (list?.length || 0)) {
+        enqueueChunk(nextBufferIndex, sessionId);
+      }
 
       if (index === (list?.length || 0) - 1 || utterancePoolRef.current.size === 0) {
         isStoppedRef.current = true;

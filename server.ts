@@ -1,8 +1,9 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
+import crypto from 'crypto';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+import { Communicate as TravisCommunicate } from '@travisvn/edge-tts';
 
 import fs from 'fs';
 import { initializeApp as initServerFirebase, getApps as getServerApps, getApp as getServerApp } from 'firebase/app';
@@ -16,6 +17,22 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// CORS cho Cloudflare Pages (https://truyen-doc-va-nghe-dao-tam.pages.dev) & custom domain
+const ALLOWED_CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+  const reqOrigin = req.headers.origin;
+  const allowOrigin =
+    ALLOWED_CORS_ORIGIN === '*' ? reqOrigin || '*' : ALLOWED_CORS_ORIGIN;
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Vary', 'Origin');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 
 // Khởi tạo Firestore trên Server kết nối trực tiếp đến database chính thức
 const appletConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'firebase-applet-config.json'), 'utf8'));
@@ -115,19 +132,116 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 });
 
 // =========================================================================
-// TỐI ƯU EDGE TTS CHO VPS CHỊU TẢI ~30 NGƯỜI NGHE CÙNG LÚC
-// 1. LRU Cache tối đa 450 đoạn / 128MB RAM (key: voice + text)
-// 2. Gộp yêu cầu trùng đang xử lý (inFlightTtsRequests) tránh gọi trùng Microsoft
-// 3. Hàng đợi tối đa 5 luồng MsEdgeTTS song song + tạo instance mới mỗi lượt
-// 4. Sanitize SSML + Timeout 14s/lượt + Retry 2 lần (350ms) + tận dụng audio hợp lệ nếu Stream closed
+// TỐI ƯU EDGE TTS CHO CLOUDFLY VPS (1 vCPU, 1GB RAM, 20GB SSD) & CLOUDFLARE
+// 1. RAM LRU Cache 80 đoạn hot (~8MB RAM) + SSD Disk Cache (tối đa ~3GB trên 20GB SSD)
+// 2. Hàng đợi giới hạn tối đa 6 kết nối song song (~40 người nghe mượt)
+// 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry 2 lần + Fallback @travisvn/edge-tts
 // =========================================================================
-const MAX_AUDIO_CACHE_ITEMS = 450;
-const MAX_AUDIO_CACHE_BYTES = 128 * 1024 * 1024;
-const MAX_CONCURRENT_TTS = 5;
-const TTS_SYNTHESIS_TIMEOUT_MS = 14000;
+const MAX_AUDIO_CACHE_ITEMS = 80;
+const MAX_CONCURRENT_TTS = 6;
+const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
 const TTS_BACKEND_MAX_RETRIES = 2;
-const TTS_BACKEND_RETRY_DELAY_MS = 350;
-const MIN_SALVAGE_AUDIO_BYTES = 2048;
+const TTS_BACKEND_RETRY_DELAY_MS = 500;
+const TTS_DISK_CACHE_DIR =
+  process.env.TTS_DISK_CACHE_DIR || path.resolve(__dirname, '.tts-cache');
+const MAX_DISK_CACHE_BYTES =
+  Math.max(128, Number(process.env.TTS_DISK_CACHE_MAX_MB) || 3072) * 1024 * 1024;
+
+let diskCacheReady = false;
+let diskCacheWriteCounter = 0;
+let isPruningDiskCache = false;
+let estimatedDiskFiles = 0;
+let estimatedDiskBytes = 0;
+
+function ensureDiskCacheDir() {
+  if (diskCacheReady) return;
+  try {
+    fs.mkdirSync(TTS_DISK_CACHE_DIR, { recursive: true });
+    diskCacheReady = true;
+  } catch (err) {
+    console.warn('[TTS DiskCache] Không thể tạo thư mục cache:', err);
+  }
+}
+
+function getDiskCachePath(cacheKey: string): string {
+  const hash = crypto.createHash('sha256').update(cacheKey).digest('hex');
+  return path.join(TTS_DISK_CACHE_DIR, `${hash}.mp3`);
+}
+
+async function readDiskCache(cacheKey: string): Promise<Buffer | null> {
+  if (!diskCacheReady) return null;
+  const filePath = getDiskCachePath(cacheKey);
+  try {
+    const buf = await fs.promises.readFile(filePath);
+    if (buf && buf.length > 100) {
+      // Cập nhật mtime nhẹ để giữ file hot lâu hơn khi dọn cache LRU trên SSD
+      const now = new Date();
+      fs.promises.utimes(filePath, now, now).catch(() => {});
+      return buf;
+    }
+  } catch {}
+  return null;
+}
+
+async function pruneDiskCacheIfNeeded() {
+  if (!diskCacheReady || isPruningDiskCache) return;
+  isPruningDiskCache = true;
+  try {
+    const entries = await fs.promises.readdir(TTS_DISK_CACHE_DIR, { withFileTypes: true });
+    const files: Array<{ filePath: string; size: number; mtimeMs: number }> = [];
+    let totalBytes = 0;
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.mp3')) continue;
+      const filePath = path.join(TTS_DISK_CACHE_DIR, entry.name);
+      try {
+        const st = await fs.promises.stat(filePath);
+        totalBytes += st.size;
+        files.push({ filePath, size: st.size, mtimeMs: st.mtimeMs });
+      } catch {}
+    }
+
+    estimatedDiskFiles = files.length;
+    estimatedDiskBytes = totalBytes;
+
+    if (totalBytes <= MAX_DISK_CACHE_BYTES) return;
+
+    const targetBytes = Math.floor(MAX_DISK_CACHE_BYTES * 0.85);
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const file of files) {
+      if (totalBytes <= targetBytes) break;
+      try {
+        await fs.promises.unlink(file.filePath);
+        totalBytes -= file.size;
+        estimatedDiskFiles = Math.max(0, estimatedDiskFiles - 1);
+      } catch {}
+    }
+    estimatedDiskBytes = totalBytes;
+  } catch {
+  } finally {
+    isPruningDiskCache = false;
+  }
+}
+
+function writeDiskCacheAsync(cacheKey: string, buf: Buffer) {
+  if (!diskCacheReady || !buf || buf.length < 100) return;
+  const filePath = getDiskCachePath(cacheKey);
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.promises
+    .writeFile(tmpPath, buf)
+    .then(() => fs.promises.rename(tmpPath, filePath))
+    .then(() => {
+      estimatedDiskFiles += 1;
+      estimatedDiskBytes += buf.length;
+      diskCacheWriteCounter += 1;
+      if (diskCacheWriteCounter % 50 === 0 || estimatedDiskBytes > MAX_DISK_CACHE_BYTES) {
+        pruneDiskCacheIfNeeded().catch(() => {});
+      }
+    })
+    .catch(() => {
+      fs.promises.unlink(tmpPath).catch(() => {});
+    });
+}
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -201,7 +315,6 @@ interface QueuedTtsJob {
 
 // In-memory LRU audio cache for synthesized segments (Key: `${voiceCode}:::${cleanText}`)
 const audioCache = new Map<string, Buffer>();
-let audioCacheBytes = 0;
 const inFlightTtsRequests = new Map<string, InFlightTtsEntry>();
 const ttsWaitQueue: QueuedTtsJob[] = [];
 let activeTtsWorkers = 0;
@@ -226,32 +339,17 @@ function pumpTtsQueue() {
 
 function setLruAudioCache(cacheKey: string, fullBuffer: Buffer) {
   if (audioCache.has(cacheKey)) {
-    const prev = audioCache.get(cacheKey);
-    if (prev) audioCacheBytes = Math.max(0, audioCacheBytes - prev.length);
     audioCache.delete(cacheKey);
   }
-  while (
-    audioCache.size > 0 &&
-    (audioCache.size >= MAX_AUDIO_CACHE_ITEMS || audioCacheBytes + fullBuffer.length > MAX_AUDIO_CACHE_BYTES)
-  ) {
+  while (audioCache.size >= MAX_AUDIO_CACHE_ITEMS) {
     const oldestKey = audioCache.keys().next().value;
     if (oldestKey !== undefined) {
-      const oldestBuf = audioCache.get(oldestKey);
-      if (oldestBuf) audioCacheBytes = Math.max(0, audioCacheBytes - oldestBuf.length);
       audioCache.delete(oldestKey);
     } else {
       break;
     }
   }
   audioCache.set(cacheKey, fullBuffer);
-  audioCacheBytes += fullBuffer.length;
-}
-
-function isAudioBufferSubstantial(buf: Buffer | null | undefined, cleanTextLength: number): boolean {
-  if (!buf || buf.length < MIN_SALVAGE_AUDIO_BYTES) return false;
-  // ~48kbps mono MP3: ~300-450 bytes/ký tự tiếng Việt; ngưỡng >= 180 bytes/ký tự bảo đảm audio không bị cụt đầu
-  const minExpectedBytes = Math.max(MIN_SALVAGE_AUDIO_BYTES, Math.min(18000, cleanTextLength * 180));
-  return buf.length >= minExpectedBytes;
 }
 
 async function runEdgeTtsSynthesisOnce(
@@ -265,7 +363,7 @@ async function runEdgeTtsSynthesisOnce(
 
   // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp (tránh dùng lại WebSocket cũ)
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 8000,
+    connectionTimeoutMs: 10000,
     synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
   });
 
@@ -308,21 +406,11 @@ async function runEdgeTtsSynthesisOnce(
     let settled = false;
     const chunks: Buffer[] = [];
 
-    const collectSalvageBuffer = (): Buffer | undefined => {
-      if (chunks.length === 0) return undefined;
-      const buf = Buffer.concat(chunks);
-      chunks.length = 0;
-      return buf.length >= MIN_SALVAGE_AUDIO_BYTES ? buf : undefined;
-    };
-
-    const finishWithError = (err: Error, salvaged?: Buffer) => {
+    const finishWithError = (err: Error) => {
       if (settled) return;
       settled = true;
       abortSignal.removeEventListener('abort', onAbort);
       cleanup();
-      if (salvaged) {
-        (err as any).salvagedBuffer = salvaged;
-      }
       reject(err);
     };
 
@@ -335,7 +423,6 @@ async function runEdgeTtsSynthesisOnce(
     };
 
     const onAbort = () => {
-      chunks.length = 0;
       finishWithError(new Error('Client aborted TTS request'));
     };
 
@@ -346,8 +433,7 @@ async function runEdgeTtsSynthesisOnce(
     abortSignal.addEventListener('abort', onAbort, { once: true });
 
     timer = setTimeout(() => {
-      const salvaged = collectSalvageBuffer();
-      finishWithError(new Error('Quá thời gian 14s tổng hợp âm thanh từ Edge TTS'), salvaged);
+      finishWithError(new Error('Quá thời gian 20s tổng hợp âm thanh từ Edge TTS'));
     }, TTS_SYNTHESIS_TIMEOUT_MS);
 
     tts
@@ -387,39 +473,88 @@ async function runEdgeTtsSynthesisOnce(
           if (!settled) {
             const buf = Buffer.concat(chunks);
             chunks.length = 0;
-            if (isAudioBufferSubstantial(buf, cleanText.length)) {
+            if (buf.length > 0) {
               finishWithSuccess(buf);
             } else {
-              finishWithError(
-                new Error('Luồng âm thanh Edge TTS đã đóng sớm'),
-                buf.length >= MIN_SALVAGE_AUDIO_BYTES ? buf : undefined
-              );
+              finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm'));
             }
           }
         });
 
         audioStream.on('error', (streamErr: any) => {
-          const salvaged = collectSalvageBuffer();
+          chunks.length = 0;
           finishWithError(
-            streamErr instanceof Error ? streamErr : new Error(String(streamErr)),
-            salvaged
+            streamErr instanceof Error ? streamErr : new Error(String(streamErr))
           );
         });
       })
       .catch((initErr: any) => {
-        chunks.length = 0;
         finishWithError(initErr instanceof Error ? initErr : new Error(String(initErr)));
       });
   });
+}
+
+async function runTravisEdgeTtsFallback(
+  cleanText: string,
+  voiceCode: string,
+  abortSignal: AbortSignal
+): Promise<Buffer> {
+  if (abortSignal.aborted) {
+    throw new Error('Client aborted TTS request');
+  }
+
+  const FALLBACK_TIMEOUT_MS = 12000;
+  const communicate = new TravisCommunicate(cleanText, {
+    voice: voiceCode,
+    connectionTimeout: 8000,
+  });
+
+  const chunks: Buffer[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const synthesisPromise = (async () => {
+    for await (const chunk of communicate.stream()) {
+      if (abortSignal.aborted) {
+        throw new Error('Client aborted TTS request');
+      }
+      if (chunk.type === 'audio' && chunk.data && chunk.data.length > 0) {
+        chunks.push(Buffer.from(chunk.data));
+      }
+    }
+    const buf = Buffer.concat(chunks);
+    chunks.length = 0;
+    if (buf.length < 100) {
+      throw new Error('Fallback Edge TTS returned empty audio');
+    }
+    return buf;
+  })();
+
+  const timeoutPromise = new Promise<Buffer>((_, reject) => {
+    const onAbort = () => reject(new Error('Client aborted TTS request'));
+    abortSignal.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => {
+      abortSignal.removeEventListener('abort', onAbort);
+      reject(new Error('Quá thời gian 12s với engine dự phòng Edge TTS'));
+    }, FALLBACK_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([synthesisPromise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    chunks.length = 0;
+  }
 }
 
 async function runEdgeTtsSynthesisWithRetry(
   cleanText: string,
   voiceCode: string,
   abortSignal: AbortSignal
-): Promise<{ buffer: Buffer; isComplete: boolean }> {
+): Promise<Buffer> {
   let lastError: unknown;
-  let bestSalvagedBuffer: Buffer | undefined;
 
   for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
     if (abortSignal.aborted) {
@@ -431,21 +566,15 @@ async function runEdgeTtsSynthesisWithRetry(
     }
 
     try {
-      const buffer = await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
-      return { buffer, isComplete: true };
-    } catch (err: any) {
+      return await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
+    } catch (err) {
       lastError = err;
-      const salvaged: Buffer | undefined = err?.salvagedBuffer;
-      if (salvaged && (!bestSalvagedBuffer || salvaged.length > bestSalvagedBuffer.length)) {
-        bestSalvagedBuffer = salvaged;
-      }
-
       if (abortSignal.aborted) {
         throw err;
       }
       if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
         console.warn(
-          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${err?.message || err}`
+          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${(err as any)?.message || err}`
         );
         continue;
       }
@@ -453,12 +582,14 @@ async function runEdgeTtsSynthesisWithRetry(
     }
   }
 
-  // Nếu mọi lần thử lại đều bị ngắt giữa chừng nhưng đã thu đủ phần lớn audio hợp lệ -> tận dụng luôn để không đứt mạch nghe
-  if (bestSalvagedBuffer && isAudioBufferSubstantial(bestSalvagedBuffer, cleanText.length)) {
-    console.warn(
-      `[Edge TTS] Tận dụng audio đã nhận (${bestSalvagedBuffer.length} bytes) cho đoạn ${cleanText.length} ký tự sau khi stream đóng sớm.`
-    );
-    return { buffer: bestSalvagedBuffer, isComplete: false };
+  // Fallback tự động sang @travisvn/edge-tts nếu msedge-tts gặp lỗi kết nối liên tiếp
+  if (!abortSignal.aborted) {
+    try {
+      console.warn(`[Edge TTS] Chuyển sang engine dự phòng cho đoạn (${voiceCode})`);
+      return await runTravisEdgeTtsFallback(cleanText, voiceCode, abortSignal);
+    } catch (fallbackErr) {
+      lastError = lastError || fallbackErr;
+    }
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Edge TTS synthesis failed'));
@@ -476,6 +607,13 @@ async function synthesizeEdgeTtsBuffer(
     audioCache.delete(cacheKey);
     audioCache.set(cacheKey, cached);
     return cached;
+  }
+
+  // Kiểm tra SSD Disk Cache trước khi vào hàng đợi WebSocket (phục vụ < 5ms, 0 tải CPU)
+  const diskCached = await readDiskCache(cacheKey);
+  if (diskCached) {
+    setLruAudioCache(cacheKey, diskCached);
+    return diskCached;
   }
 
   if (clientSignal?.aborted) {
@@ -536,15 +674,14 @@ async function synthesizeEdgeTtsBuffer(
     },
     run: async () => {
       try {
-        const result = await runEdgeTtsSynthesisWithRetry(
+        const fullBuffer = await runEdgeTtsSynthesisWithRetry(
           cleanText,
           voiceCode,
           entryAbortController.signal
         );
-        if (result.isComplete) {
-          setLruAudioCache(cacheKey, result.buffer);
-        }
-        resolveEntry(result.buffer);
+        setLruAudioCache(cacheKey, fullBuffer);
+        writeDiskCacheAsync(cacheKey, fullBuffer);
+        resolveEntry(fullBuffer);
       } catch (err) {
         rejectEntry(err);
       } finally {
@@ -616,7 +753,7 @@ async function handleTtsSynthesis(
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', fullBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
       res.end(fullBuffer);
     }
   } catch (err: any) {
@@ -661,6 +798,21 @@ app.post('/api/tts', async (req: Request, res: Response) => {
   const text = req.body?.text || '';
   const voice = req.body?.voice || '';
   await handleTtsSynthesis(text, voice, res);
+});
+
+/**
+ * GET /api/tts/health
+ */
+app.get('/api/tts/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    ramCacheItems: audioCache.size,
+    diskCacheFiles: estimatedDiskFiles,
+    diskCacheMb: Number((estimatedDiskBytes / (1024 * 1024)).toFixed(1)),
+    activeWorkers: activeTtsWorkers,
+    queueLength: ttsWaitQueue.length,
+    uptimeSec: Math.round(process.uptime()),
+  });
 });
 
 // =========================================================================
@@ -1032,24 +1184,31 @@ app.post('/api/batch-chapters', async (req: Request, res: Response) => {
 
 // Mount Vite or serve static build
 async function startServer() {
+  ensureDiskCacheDir();
+  pruneDiskCacheIfNeeded().catch(() => {});
+
   // Pre-scan voices on boot
   scanVietnameseVoices().catch(() => {});
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
+  } else if (process.env.TTS_ONLY_MODE !== 'true') {
+    const distDir = path.resolve(__dirname, 'dist');
+    if (fs.existsSync(path.join(distDir, 'index.html'))) {
+      app.use(express.static(distDir));
+      app.get('*', (_req: Request, res: Response) => {
+        res.sendFile(path.join(distDir, 'index.html'));
+      });
+    }
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Đạo Tâm Server] Running on http://0.0.0.0:${PORT}`);
+    console.log(`[Đạo Tâm Server] Running on http://0.0.0.0:${PORT} (SSD Cache: ${TTS_DISK_CACHE_DIR})`);
   });
 }
 
