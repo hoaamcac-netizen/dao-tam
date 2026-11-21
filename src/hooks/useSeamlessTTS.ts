@@ -6,6 +6,7 @@ import {
   seamlessAudioCache,
 } from '../utils/audioChunker';
 import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
+import { backgroundAudioManager } from '../utils/backgroundAudio';
 
 export interface UseSeamlessTTSOptions {
   content: string;
@@ -42,8 +43,8 @@ export interface UseSeamlessTTSReturn {
   setPlaybackRate: (rate: number) => void;
 }
 
-const PREFETCH_LOOKAHEAD = 3; // Luôn nạp trước ít nhất 3 đoạn kế tiếp (Đệm +3)
-const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 6
+const PREFETCH_LOOKAHEAD = 4; // Tải trước song song 4 đoạn kế tiếp (N+1, N+2, N+3, N+4)
+const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 8
 const STALL_WATCHDOG_MS = 12000;
 
 export function useSeamlessTTS({
@@ -365,8 +366,29 @@ export function useSeamlessTTS({
     revokeAllBlobs();
   }, [clearStallWatchdogs, revokeAllBlobs, updateProgressBarDomNow]);
 
+  const unlockAudioElementFromGesture = useCallback((allowPrimeIdleAudio = true) => {
+    backgroundAudioManager.unlockFromUserGesture();
+    const audio = audioElementRef.current;
+    if (!audio || !allowPrimeIdleAudio) return;
+    const currentSrc = audio.getAttribute('src') || '';
+    const isRealBlobLoaded = currentSrc.startsWith('blob:') && !audio.ended && !audio.error;
+    if (!isRealBlobLoaded && audio.paused) {
+      try {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.loop = true;
+        audio.muted = false;
+        audio.src = backgroundAudioManager.getSilentWavUrl();
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {});
+        }
+      } catch {}
+    }
+  }, []);
+
   /**
-   * Duy trì bộ đệm nạp trước 3 đoạn kế tiếp (i+1 .. i+3) và giải phóng ngay các đoạn đã nghe qua
+   * Duy trì bộ đệm tải trước song song 4 đoạn kế tiếp (N+1 .. N+4) và giải phóng ngay các đoạn đã nghe qua
    */
   const runSequentialPrefetchQueue = useCallback(
     async (fromIndex: number, activeVoice: string, sessionNonce: number) => {
@@ -374,7 +396,7 @@ export function useSeamlessTTS({
       const genId = ++prefetchGenerationRef.current;
       const signal = prefetchAbortRef.current?.signal;
 
-      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 3]
+      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 4]
       for (const idx of Array.from(blobMapRef.current.keys())) {
         if (idx < fromIndex || idx > fromIndex + PREFETCH_LOOKAHEAD) {
           revokeChunkIndex(idx, activeVoice, curChunks[idx]?.text);
@@ -389,48 +411,43 @@ export function useSeamlessTTS({
         }
       }
 
-      for (let i = 0; i < targets.length; i += 2) {
-        if (
-          genId !== prefetchGenerationRef.current ||
-          sessionNonce !== sessionNonceRef.current ||
-          !isPlaybackActiveRef.current ||
-          signal?.aborted
-        ) {
-          return;
-        }
-
-        const batch = targets.slice(i, i + 2);
-        await Promise.all(
-          batch.map(async (targetIdx) => {
-            if (blobMapRef.current.has(targetIdx)) return;
-            try {
-              const url = await seamlessAudioCache.fetchAndCache(
-                activeVoice,
-                curChunks[targetIdx].text,
-                undefined,
-                signal,
-                curChunks[fromIndex]?.text
-              );
-              if (
-                genId !== prefetchGenerationRef.current ||
-                sessionNonce !== sessionNonceRef.current ||
-                !isPlaybackActiveRef.current ||
-                signal?.aborted
-              ) {
-                safeRevokeUrl(url);
-                return;
-              }
-              setBlobWithHardLimit(targetIdx, url, fromIndex);
-            } catch {}
-          })
-        );
-
-        if (genId === prefetchGenerationRef.current && sessionNonce === sessionNonceRef.current) {
-          setBufferedIndices(
-            Array.from(blobMapRef.current.keys()).sort((a, b) => a - b)
-          );
-        }
-      }
+      await Promise.allSettled(
+        targets.map(async (targetIdx) => {
+          if (
+            genId !== prefetchGenerationRef.current ||
+            sessionNonce !== sessionNonceRef.current ||
+            !isPlaybackActiveRef.current ||
+            signal?.aborted
+          ) {
+            return;
+          }
+          if (blobMapRef.current.has(targetIdx)) return;
+          try {
+            const url = await seamlessAudioCache.fetchAndCache(
+              activeVoice,
+              curChunks[targetIdx].text,
+              undefined,
+              signal,
+              curChunks[fromIndex]?.text
+            );
+            if (
+              genId !== prefetchGenerationRef.current ||
+              sessionNonce !== sessionNonceRef.current ||
+              !isPlaybackActiveRef.current ||
+              signal?.aborted
+            ) {
+              safeRevokeUrl(url);
+              return;
+            }
+            setBlobWithHardLimit(targetIdx, url, fromIndex);
+          } catch {}
+          if (genId === prefetchGenerationRef.current && sessionNonce === sessionNonceRef.current) {
+            setBufferedIndices(
+              Array.from(blobMapRef.current.keys()).sort((a, b) => a - b)
+            );
+          }
+        })
+      );
     },
     [revokeChunkIndex, safeRevokeUrl, setBlobWithHardLimit]
   );
@@ -485,6 +502,21 @@ export function useSeamlessTTS({
       onChunkChangeRef.current?.(index, chunk);
 
       try {
+        let hasTriggeredPrefetch = false;
+        const triggerPrefetch = () => {
+          if (hasTriggeredPrefetch) return;
+          if (
+            sessionNonce !== sessionNonceRef.current ||
+            activeChunkTokenRef.current !== chunkToken ||
+            !isPlaybackActiveRef.current ||
+            abortSignal.aborted
+          ) {
+            return;
+          }
+          hasTriggeredPrefetch = true;
+          runSequentialPrefetchQueue(index, currentVoice, sessionNonce).catch(() => {});
+        };
+
         let audioUrl =
           blobMapRef.current.get(index) ||
           seamlessAudioCache.get(currentVoice, chunk.text) ||
@@ -492,7 +524,7 @@ export function useSeamlessTTS({
 
         if (!audioUrl) {
           setIsLoading(true);
-          audioUrl = await seamlessAudioCache.fetchAndCache(
+          const currentPromise = seamlessAudioCache.fetchAndCache(
             currentVoice,
             chunk.text,
             (attempt) => {
@@ -506,6 +538,8 @@ export function useSeamlessTTS({
             abortSignal,
             chunk.text
           );
+          triggerPrefetch();
+          audioUrl = await currentPromise;
           setBlobWithHardLimit(index, audioUrl, index);
         }
 
@@ -532,11 +566,14 @@ export function useSeamlessTTS({
         audio.onloadedmetadata = null;
 
         // Giữ nguyên 1 phần tử <audio> cố định và chỉ thay src (không pause giữa chừng để giữ lockscreen focus)
+        audio.loop = false;
+        audio.muted = false;
         audio.src = audioUrl;
         applyPlaybackRateLock(audio, playbackRateRef.current);
 
         let stallRecoveryStage = 0;
         let isRecovering = false;
+        let isChunkTransitioned = false;
         lastMediaTimeRef.current = 0;
         lastMediaAdvanceAtRef.current = Date.now();
 
@@ -610,30 +647,22 @@ export function useSeamlessTTS({
             setIsLoading(false);
             setRetryAttempt(0);
             consecutiveChunkErrorsRef.current += 1;
-            if (consecutiveChunkErrorsRef.current < 2 && index + 1 < (chunksRef.current?.length || 0)) {
-              playChunkRef.current(index + 1);
-            } else {
-              setIsPlaying(false);
-              isPlaybackActiveRef.current = false;
-              const errMsg = `Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`;
-              setError(errMsg);
-              onErrorRef.current?.(new Error(errMsg));
-            }
+            setIsPlaying(false);
+            isPlaybackActiveRef.current = false;
+            const errMsg = `Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`;
+            setError(errMsg);
+            onErrorRef.current?.(new Error(errMsg));
           } catch (recoverErr: any) {
             if (recoverErr?.name === 'AbortError' || !isCurrentChunkValid()) return;
             revokeChunkIndex(index, currentVoice, chunk.text);
             setIsLoading(false);
             setRetryAttempt(0);
             consecutiveChunkErrorsRef.current += 1;
-            if (consecutiveChunkErrorsRef.current < 2 && index + 1 < (chunksRef.current?.length || 0)) {
-              playChunkRef.current(index + 1);
-            } else {
-              setIsPlaying(false);
-              isPlaybackActiveRef.current = false;
-              const errMsg = `Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`;
-              setError(errMsg);
-              onErrorRef.current?.(new Error(errMsg));
-            }
+            setIsPlaying(false);
+            isPlaybackActiveRef.current = false;
+            const errMsg = `Không thể phát đoạn ${index + 1}. Nhấn Phát để thử lại.`;
+            setError(errMsg);
+            onErrorRef.current?.(new Error(errMsg));
           } finally {
             isRecovering = false;
           }
@@ -689,6 +718,8 @@ export function useSeamlessTTS({
 
         // MEMORY LEAK PROTECTION: Giải phóng ngay Blob URL của đoạn vừa đọc xong
         audio.onended = () => {
+          if (isChunkTransitioned) return;
+          isChunkTransitioned = true;
           clearStallWatchdogs();
           audio.onended = null;
           audio.onerror = null;
@@ -723,8 +754,8 @@ export function useSeamlessTTS({
           isPlaybackActiveRef.current
         ) {
           setIsPlaying(true);
-          // Chỉ prefetch đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
-          runSequentialPrefetchQueue(index, currentVoice, sessionNonce).catch(() => {});
+          // Prefetch song song 4 đoạn kế tiếp (N+1..N+4) ngay khi đoạn hiện tại bắt đầu phát
+          triggerPrefetch();
         }
       } catch (err: any) {
         if (err?.name === 'AbortError') return;
@@ -796,6 +827,7 @@ export function useSeamlessTTS({
   }, [content, chunks?.length, autoPlay, revokeAllBlobs, stop]);
 
   const play = useCallback(async (startIndex?: number) => {
+    unlockAudioElementFromGesture(startIndex !== undefined || currentIndexRef.current < 0);
     isPlaybackActiveRef.current = true;
     setError(null);
     if (!prefetchAbortRef.current || prefetchAbortRef.current.signal.aborted) {
@@ -808,7 +840,7 @@ export function useSeamlessTTS({
         ? currentIndexRef.current
         : 0;
     await playChunkRef.current(targetIndex);
-  }, []);
+  }, [unlockAudioElementFromGesture]);
 
   const pause = useCallback(() => {
     isPlaybackActiveRef.current = false;
@@ -822,6 +854,7 @@ export function useSeamlessTTS({
   }, [clearStallWatchdogs]);
 
   const resume = useCallback(async () => {
+    unlockAudioElementFromGesture(currentIndexRef.current < 0);
     setError(null);
     if (currentIndexRef.current < 0) {
       await play(0);
@@ -842,7 +875,7 @@ export function useSeamlessTTS({
     } else {
       await play(currentIndexRef.current);
     }
-  }, [applyPlaybackRateLock, play]);
+  }, [applyPlaybackRateLock, play, unlockAudioElementFromGesture]);
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -854,10 +887,11 @@ export function useSeamlessTTS({
 
   const seekToChunk = useCallback(async (index: number) => {
     if (index < 0 || index >= (chunksRef.current?.length || 0)) return;
+    unlockAudioElementFromGesture(true);
     isPlaybackActiveRef.current = true;
     setError(null);
     await playChunkRef.current(index);
-  }, []);
+  }, [unlockAudioElementFromGesture]);
 
   const skipNext = useCallback(async () => {
     const nextIdx = currentIndexRef.current + 1;

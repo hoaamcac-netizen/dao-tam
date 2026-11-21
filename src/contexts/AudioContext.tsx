@@ -20,10 +20,10 @@ import { normalizeEdgeVoiceId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
 
-const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 280 ký tự
-const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 350 ký tự
-const PREFETCH_LOOKAHEAD_COUNT = 3; // Luôn duy trì bộ đệm nạp trước ít nhất 3 đoạn kế tiếp (Đệm +3)
-const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn tối đa 6 đoạn trong bộ nhớ đệm RAM
+const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH; // 250 ký tự
+const CHUNK_MAX_LEN = DEFAULT_CHUNK_MAX_LENGTH; // 400 ký tự
+const PREFETCH_LOOKAHEAD_COUNT = 4; // Tải trước song song 4 đoạn kế tiếp (N+1, N+2, N+3, N+4)
+const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // Giới hạn 8 đoạn Blob URL trong RAM
 const STALL_WATCHDOG_MS = 12000; // Watchdog kiểm tra đứng hình thực sự (không false-positive khi tắt màn hình)
 const LISTENING_PROGRESS_STORAGE_KEY = 'daotam_listening_progress';
 
@@ -822,8 +822,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   /**
-   * LOOKAHEAD PREFETCH BUFFER (Ít nhất 3 đoạn kế tiếp: i+1, i+2, i+3):
-   * - Duy trì sẵn 3 đoạn tiếp theo trong RAM để chuyển đoạn 0ms ở tốc độ 1.5x - 2.0x.
+   * LOOKAHEAD PREFETCH BUFFER (Song song 4 đoạn kế tiếp: N+1, N+2, N+3, N+4):
+   * - Duy trì sẵn 4 đoạn tiếp theo trong RAM dưới dạng Blob URL để chuyển đoạn 0ms kể cả ở tốc độ 2x.
    * - Tự động nối trước chương kế tiếp khi còn <= 4 đoạn để nạp sẵn đoạn đầu chương mới khi chạy nền.
    * - Giải phóng ngay Blob URL của các đoạn đã nghe qua (< i).
    */
@@ -835,12 +835,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const genId = ++prefetchGenerationRef.current;
 
-      // Dọn dẹp toàn bộ Blob URL các đoạn đã qua (< fromQueueIdx) hoặc ngoài cửa sổ [i .. i+3]
+      // Dọn dẹp toàn bộ Blob URL các đoạn đã qua (< fromQueueIdx) hoặc ngoài cửa sổ [i .. i+4]
       pruneBlobsOutsideWindow(fromQueueIdx, activeVoice);
 
       // Khi gần cuối chương (còn <= 4 đoạn), nối sẵn chương kế tiếp vào Queue để prefetch đoạn đầu chương mới
       const remainingInQueue = (queueChunksRef.current?.length || 0) - 1 - fromQueueIdx;
-      if (autoNextRef.current && remainingInQueue <= 4) {
+      if (autoNextRef.current && remainingInQueue <= PREFETCH_LOOKAHEAD_COUNT) {
         await appendNextChapterToQueueIfNeeded(sessionNonce, signal);
       }
 
@@ -866,51 +866,54 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (targets.length === 0) return;
 
-      // Ưu tiên nạp ngay i+1 trước nếu đang thiếu, sau đó nạp song song tối đa 2 đoạn i+2, i+3
-      const firstTarget = targets[0];
-      try {
-        await fetchChunkBlobUrl(firstTarget, activeVoice, signal);
-      } catch {}
-
-      if (
-        genId !== prefetchGenerationRef.current ||
-        sessionNonce !== playSessionNonceRef.current ||
-        !isAudioModeRef.current ||
-        signal?.aborted
-      ) {
-        return;
-      }
-      syncBufferedCount(fromQueueIdx, activeVoice);
-
-      const remainingTargets = targets.slice(1);
-      for (let i = 0; i < remainingTargets.length; i += 2) {
-        if (
-          genId !== prefetchGenerationRef.current ||
-          sessionNonce !== playSessionNonceRef.current ||
-          !isAudioModeRef.current ||
-          signal?.aborted
-        ) {
-          return;
-        }
-        const batch = remainingTargets.slice(i, i + 2);
-        await Promise.all(
-          batch.map(async (targetChunk) => {
-            try {
-              await fetchChunkBlobUrl(targetChunk, activeVoice, signal);
-            } catch {}
-            if (
-              genId === prefetchGenerationRef.current &&
-              sessionNonce === playSessionNonceRef.current &&
-              isAudioModeRef.current
-            ) {
-              syncBufferedCount(fromQueueIdx, activeVoice);
-            }
-          })
-        );
-      }
+      // Tải trước song song đồng thời cả 4 đoạn (N+1, N+2, N+3, N+4)
+      await Promise.allSettled(
+        targets.map(async (targetChunk) => {
+          if (
+            genId !== prefetchGenerationRef.current ||
+            sessionNonce !== playSessionNonceRef.current ||
+            !isAudioModeRef.current ||
+            signal?.aborted
+          ) {
+            return;
+          }
+          try {
+            await fetchChunkBlobUrl(targetChunk, activeVoice, signal);
+          } catch {}
+          if (
+            genId === prefetchGenerationRef.current &&
+            sessionNonce === playSessionNonceRef.current &&
+            isAudioModeRef.current
+          ) {
+            syncBufferedCount(fromQueueIdx, activeVoice);
+          }
+        })
+      );
     },
     [appendNextChapterToQueueIfNeeded, fetchChunkBlobUrl, pruneBlobsOutsideWindow, syncBufferedCount]
   );
+
+  const unlockSingleAudioFromGesture = useCallback((allowPrimeIdleAudio = true) => {
+    backgroundAudioManager.unlockFromUserGesture();
+    const audio = audioRef.current;
+    if (!audio || !allowPrimeIdleAudio) return;
+
+    const currentSrc = audio.getAttribute('src') || '';
+    const isRealBlobLoaded = currentSrc.startsWith('blob:') && Boolean(activeBlobKeyRef.current) && !audio.ended && !audio.error;
+    if (!isRealBlobLoaded && audio.paused) {
+      try {
+        audio.onended = null;
+        audio.onerror = null;
+        audio.loop = true;
+        audio.muted = false;
+        audio.src = backgroundAudioManager.getSilentWavUrl();
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {});
+        }
+      } catch {}
+    }
+  }, []);
 
   const stopSingleAudioElement = useCallback(
     (clearSource: boolean) => {
@@ -1128,11 +1131,27 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       try {
-        // 1. Kiểm tra trong Map Cache; nếu chưa có thì tải với timeout 20s + tối đa 3 lần retry (mỗi lần nghỉ 2s)
+        // 1. Kiểm tra trong Map Cache; nếu chưa có thì tải đoạn hiện tại (timeout 20s + retry nhanh tối đa 3 lần)
+        let hasTriggeredPrefetch = false;
+        const triggerNextChunkPrefetch = () => {
+          if (hasTriggeredPrefetch) return;
+          if (
+            sessionNonce !== playSessionNonceRef.current ||
+            activeChunkTokenRef.current !== chunkToken ||
+            !isPlaybackActiveRef.current ||
+            !isAudioModeRef.current ||
+            abortSignal.aborted
+          ) {
+            return;
+          }
+          hasTriggeredPrefetch = true;
+          runSequentialPrefetchQueue(queueIndex, currentVoice, sessionNonce).catch(() => {});
+        };
+
         let audioUrl = blobCacheMapRef.current.get(chunkBlobKey);
         if (!audioUrl) {
           setIsLoading(true);
-          audioUrl = await fetchChunkBlobUrl(chunk, currentVoice, abortSignal, (attempt) => {
+          const currentChunkPromise = fetchChunkBlobUrl(chunk, currentVoice, abortSignal, (attempt) => {
             if (
               sessionNonce === playSessionNonceRef.current &&
               activeChunkTokenRef.current === chunkToken
@@ -1140,6 +1159,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               setRetryAttempt(attempt);
             }
           });
+          // Khởi động tải trước song song N+1..N+4 ngay lập tức trong lúc chờ đoạn đầu tiên về
+          triggerNextChunkPrefetch();
+          audioUrl = await currentChunkPromise;
         }
 
         if (
@@ -1154,12 +1176,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return;
         }
 
-        // 2. Giải phóng Blob URL của đoạn trước nếu đã nghe qua hoặc nhảy cóc, giữ DUY NHẤT 1 thẻ <audio> cố định
+        // 2. Giải phóng Blob URL của đoạn trước nếu đã nghe qua, giữ nguyên 1 thẻ <audio> cố định
         const prevActiveKey = activeBlobKeyRef.current;
         activeBlobKeyRef.current = chunkBlobKey;
         activeBlobUrlRef.current = audioUrl;
         if (prevActiveKey && prevActiveKey !== chunkBlobKey) {
-          const isUpcomingLookahead = [1, 2, 3].some((offset) => {
+          const isUpcomingLookahead = [1, 2, 3, 4].some((offset) => {
             const c = curQueue[queueIndex + offset];
             return c ? makeQueuedChunkBlobKey(c, currentVoice) === prevActiveKey : false;
           });
@@ -1178,6 +1200,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audio.onloadedmetadata = null;
 
         // Không gọi audio.pause() trước khi đổi src để tránh làm rớt Background Media Session khi tắt màn hình
+        audio.loop = false;
+        audio.muted = false;
         audio.src = audioUrl;
         applyPlaybackRateLock(audio, playbackRateRef.current);
 
@@ -1186,15 +1210,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         let stallRecoveryStage = 0; // 0: chưa recover, 1: đã thử .load()+.play(), 2: đã re-fetch
         let isRecovering = false;
-        let hasTriggeredPrefetch = false;
+        let isChunkTransitioned = false;
         lastMediaTimeRef.current = 0;
         lastMediaAdvanceAtRef.current = Date.now();
-
-        const triggerNextChunkPrefetch = () => {
-          if (hasTriggeredPrefetch) return;
-          hasTriggeredPrefetch = true;
-          runSequentialPrefetchQueue(queueIndex, currentVoice, sessionNonce).catch(() => {});
-        };
 
         const isCurrentChunkStillValid = () =>
           sessionNonce === playSessionNonceRef.current &&
@@ -1257,43 +1275,29 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               return;
             }
 
-            // Nếu đã thử reload và tải lại đoạn này mà vẫn lỗi -> tăng đếm lỗi liên tiếp, tránh lặp vô hạn qua toàn chương
+            // Tuyệt đối không tự ý nhảy cóc đoạn hiện tại để không bị mất chữ/mất câu; dừng ở đúng đoạn lỗi để thử lại
             consecutiveChunkErrorsRef.current += 1;
             revokeChunkBlobFromCache(chunkBlobKey);
             setIsLoading(false);
             setRetryAttempt(0);
-            if (
-              consecutiveChunkErrorsRef.current < 2 &&
-              queueIndex + 1 < (queueChunksRef.current?.length || 0)
-            ) {
-              playChunkRef.current(queueIndex + 1);
-            } else {
-              setIsPlaying(false);
-              isPlaybackActiveRef.current = false;
-              backgroundAudioManager.pauseBackgroundPlayback();
-              setAudioError(
-                `Kết nối bị gián đoạn tại đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại.`
-              );
-            }
+            setIsPlaying(false);
+            isPlaybackActiveRef.current = false;
+            backgroundAudioManager.pauseBackgroundPlayback();
+            setAudioError(
+              `Kết nối bị gián đoạn tại đoạn ${chunk.chapterChunkIndex + 1} sau nhiều lần thử lại. Nhấn Phát để tiếp tục.`
+            );
           } catch (recoverErr: any) {
             if (recoverErr?.name === 'AbortError' || !isCurrentChunkStillValid()) return;
             consecutiveChunkErrorsRef.current += 1;
             revokeChunkBlobFromCache(chunkBlobKey);
             setIsLoading(false);
             setRetryAttempt(0);
-            if (
-              consecutiveChunkErrorsRef.current < 2 &&
-              queueIndex + 1 < (queueChunksRef.current?.length || 0)
-            ) {
-              playChunkRef.current(queueIndex + 1);
-            } else {
-              setIsPlaying(false);
-              isPlaybackActiveRef.current = false;
-              backgroundAudioManager.pauseBackgroundPlayback();
-              setAudioError(
-                `Không thể khôi phục phát tại đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại.`
-              );
-            }
+            setIsPlaying(false);
+            isPlaybackActiveRef.current = false;
+            backgroundAudioManager.pauseBackgroundPlayback();
+            setAudioError(
+              `Không thể khôi phục phát tại đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại.`
+            );
           } finally {
             isRecovering = false;
           }
@@ -1364,6 +1368,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         // MEMORY LEAK PROTECTION:
         // Ngay khi đoạn hiện tại phát xong (onEnded), BẮT BUỘC revokeObjectURL & xóa khỏi Map ngay lập tức
         audio.onended = () => {
+          if (isChunkTransitioned) return;
+          isChunkTransitioned = true;
           clearStallWatchdogs();
           audio.onended = null;
           audio.onerror = null;
@@ -1504,6 +1510,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const play = useCallback(
     async (startIndex?: number) => {
+      unlockSingleAudioFromGesture(startIndex !== undefined || activeQueueIndexRef.current < 0);
       setAudioError(null);
       isAudioModeRef.current = true;
       setIsAudioMode(true);
@@ -1521,7 +1528,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : 0;
       await playChunkRef.current(targetQueueIdx);
     },
-    [resolveQueueIndexForChapterChunk]
+    [resolveQueueIndexForChapterChunk, unlockSingleAudioFromGesture]
   );
 
   const pause = useCallback(() => {
@@ -1540,6 +1547,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [clearStallWatchdogs, saveListeningProgressLocal]);
 
   const resume = useCallback(async () => {
+    unlockSingleAudioFromGesture(activeQueueIndexRef.current < 0);
     setAudioError(null);
     isAudioModeRef.current = true;
     setIsAudioMode(true);
@@ -1559,6 +1567,29 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         applyPlaybackRateLock(audio, playbackRateRef.current);
         lastMediaAdvanceAtRef.current = Date.now();
         setIsPlaying(true);
+        const curNovel = activeNovelRef.current;
+        const curChap = activeChapterRef.current;
+        if (curNovel && curChap) {
+          backgroundAudioManager.startBackgroundPlayback({
+            title: `${curNovel.title} - ${curChap.title}`,
+            artist: `Tác giả: ${curNovel.author} • Giọng: ${
+              voiceIdRef.current.includes('NamMinh') ? 'Nam Minh (Nam)' : 'Hoài My (Nữ)'
+            }`,
+            coverImage: curNovel.coverImage,
+            onPlay: () => {
+              resumeRef.current();
+            },
+            onPause: () => {
+              pauseRef.current();
+            },
+            onNext: () => {
+              skipNextRef.current();
+            },
+            onPrev: () => {
+              skipPrevRef.current();
+            },
+          });
+        }
         runSequentialPrefetchQueue(
           activeQueueIndexRef.current,
           voiceIdRef.current,
@@ -1570,7 +1601,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } else {
       await playChunkRef.current(activeQueueIndexRef.current);
     }
-  }, [applyPlaybackRateLock, play, runSequentialPrefetchQueue]);
+  }, [applyPlaybackRateLock, play, runSequentialPrefetchQueue, unlockSingleAudioFromGesture]);
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -1583,6 +1614,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const seekToChunk = useCallback(
     async (index: number) => {
       if (index < 0 || index >= (chunksRef.current?.length || 0)) return;
+      unlockSingleAudioFromGesture(true);
       setAudioError(null);
       isAudioModeRef.current = true;
       setIsAudioMode(true);
@@ -1594,10 +1626,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const targetQueueIdx = resolveQueueIndexForChapterChunk(index);
       await playChunkRef.current(targetQueueIdx);
     },
-    [resolveQueueIndexForChapterChunk]
+    [resolveQueueIndexForChapterChunk, unlockSingleAudioFromGesture]
   );
 
   const handleSkipNext = useCallback(async () => {
+    unlockSingleAudioFromGesture(true);
     const nextQueueIdx = activeQueueIndexRef.current + 1;
     if (nextQueueIdx < (queueChunksRef.current?.length || 0)) {
       setAudioError(null);
@@ -1609,9 +1642,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } else if (autoNextRef.current) {
       await playNextChapterRef.current();
     }
-  }, []);
+  }, [unlockSingleAudioFromGesture]);
 
   const handleSkipPrev = useCallback(async () => {
+    unlockSingleAudioFromGesture(true);
     const prevQueueIdx = Math.max(0, activeQueueIndexRef.current - 1);
     setAudioError(null);
     isAudioModeRef.current = true;
@@ -1619,7 +1653,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     isPlaybackActiveRef.current = true;
     isAdvancingChapterRef.current = false;
     await playChunkRef.current(prevQueueIdx);
-  }, []);
+  }, [unlockSingleAudioFromGesture]);
 
   useEffect(() => {
     skipNextRef.current = handleSkipNext;
@@ -1732,6 +1766,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!prefetchAbortRef.current || prefetchAbortRef.current.signal.aborted) {
           prefetchAbortRef.current = new AbortController();
         }
+        if (willActivateAudio && !isAutoAdvance) {
+          // Mở khóa đồng bộ duy nhất 1 thẻ <audio> ngay trong sự kiện bấm của người dùng
+          unlockSingleAudioFromGesture(true);
+        }
       }
 
       setAudioError(null);
@@ -1823,7 +1861,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
     },
-    [pause, resetPrefetchAbortController, revokeAllBlobUrls, setIsBarVisible, stopSingleAudioElement]
+    [pause, resetPrefetchAbortController, revokeAllBlobUrls, setIsBarVisible, stopSingleAudioElement, unlockSingleAudioFromGesture]
   );
 
   const handlePlayNextChapter = useCallback(async () => {

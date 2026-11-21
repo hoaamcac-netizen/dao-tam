@@ -2,12 +2,22 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import dns from 'dns';
+import http from 'http';
+import https from 'https';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 import { Communicate as TravisCommunicate } from '@travisvn/edge-tts';
 
 import fs from 'fs';
 import { initializeApp as initServerFirebase, getApps as getServerApps, getApp as getServerApp } from 'firebase/app';
 import { getFirestore as getServerFirestore, doc as serverDoc, getDoc as getServerDoc, setDoc as serverSetDoc, updateDoc as serverUpdateDoc, writeBatch as serverWriteBatch } from 'firebase/firestore';
+
+// Ưu tiên IPv4 cho toàn bộ DNS & WebSocket outbound trên VPS để tránh treo/khựng do IPv6 timeout
+dns.setDefaultResultOrder('ipv4first');
+const ipv4HttpAgent = new http.Agent({ keepAlive: true, family: 4, maxSockets: 32 });
+const ipv4HttpsAgent = new https.Agent({ keepAlive: true, family: 4, maxSockets: 32 });
+http.globalAgent = ipv4HttpAgent;
+https.globalAgent = ipv4HttpsAgent;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,7 +62,10 @@ async function scanVietnameseVoices() {
     return cachedViVoices;
   }
 
-  const tts = new MsEdgeTTS({ connectionTimeoutMs: 10000 });
+  const tts = new MsEdgeTTS({
+    connectionTimeoutMs: 10000,
+    agent: ipv4HttpsAgent,
+  });
   try {
     const allVoices = await tts.getVoices();
     const viList = allVoices.filter((v: any) => v.Locale && v.Locale.toLowerCase().startsWith('vi'));
@@ -138,7 +151,7 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 // 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry 2 lần + Fallback @travisvn/edge-tts
 // =========================================================================
 const MAX_AUDIO_CACHE_ITEMS = 80;
-const MAX_CONCURRENT_TTS = 6;
+const MAX_CONCURRENT_TTS = Math.max(3, Math.min(8, Number(process.env.TTS_MAX_CONCURRENCY) || 5));
 const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
 const TTS_BACKEND_MAX_RETRIES = 2;
 const TTS_BACKEND_RETRY_DELAY_MS = 500;
@@ -361,10 +374,11 @@ async function runEdgeTtsSynthesisOnce(
     throw new Error('Client aborted TTS request');
   }
 
-  // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp (tránh dùng lại WebSocket cũ)
+  // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp + ép agent IPv4 chống treo mạng VPS
   const tts = new MsEdgeTTS({
     connectionTimeoutMs: 10000,
     synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+    agent: ipv4HttpsAgent,
   });
 
   let audioStream: any = null;

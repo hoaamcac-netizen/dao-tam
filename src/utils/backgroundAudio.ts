@@ -88,6 +88,37 @@ class BackgroundAudioManager {
   }
 
   /**
+   * Lấy Blob URL WAV im lặng để mở khóa đồng bộ thẻ <audio> chính trong tích tắc bấm nút Play
+   */
+  public getSilentWavUrl(): string {
+    if (!this.silentBlobUrl) {
+      this.silentBlobUrl = this.createSilentWavBlobUrl();
+    }
+    return this.silentBlobUrl;
+  }
+
+  /**
+   * Kích hoạt đồng bộ AudioContext & Silent Keep-Alive Audio ngay trong event click của người dùng
+   * (bắt buộc trên iOS Safari / Android Chrome để không bị mất session khi tắt màn hình)
+   */
+  public unlockFromUserGesture() {
+    this.initSilentAudio();
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      try {
+        this.audioCtx.resume().catch(() => {});
+      } catch {}
+    }
+    if (this.silentAudio && this.silentAudio.paused) {
+      try {
+        const playPromise = this.silentAudio.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(() => {});
+        }
+      } catch {}
+    }
+  }
+
+  /**
    * Bắt đầu phiên phát âm thanh nền và đăng ký Lockscreen Controls
    */
   public async startBackgroundPlayback(options: BackgroundMediaOptions) {

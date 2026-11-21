@@ -371,7 +371,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
       await audioContext.play(startIndex);
     } else {
-      await audioContext.playChapter(novel, chapter, true, safeChapters);
+      await audioContext.playChapter(novel, chapter, true, safeChapters, true);
       if (startIndex && startIndex > 0) {
         await audioContext.seekToChunk(startIndex);
       }
@@ -388,7 +388,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
       audioContext.togglePlay();
     } else {
-      audioContext.playChapter(novel, chapter, true, safeChapters);
+      audioContext.playChapter(novel, chapter, true, safeChapters, true);
     }
   }, [isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
 
@@ -400,7 +400,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
       await audioContext.seekToChunk(index);
     } else {
-      await audioContext.playChapter(novel, chapter, true, safeChapters);
+      await audioContext.playChapter(novel, chapter, true, safeChapters, true);
       await audioContext.seekToChunk(index);
     }
   }, [isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);

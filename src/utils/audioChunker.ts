@@ -19,13 +19,13 @@ export interface AudioChunk {
 
 export const TTS_FETCH_TIMEOUT_MS = 20000;
 export const TTS_MAX_RETRIES = 3;
-export const TTS_RETRY_DELAY_MS = 2000;
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 80;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 150;
-export const DEFAULT_HEAD_CHUNK_COUNT = 2;
+export const TTS_RETRY_DELAY_MS = 800;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 70;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 140;
+export const DEFAULT_HEAD_CHUNK_COUNT = 1;
 export const DEFAULT_CHUNK_MIN_LENGTH = 250;
-export const DEFAULT_CHUNK_MAX_LENGTH = 350;
-export const MAX_BLOB_CACHE_ENTRIES = 6;
+export const DEFAULT_CHUNK_MAX_LENGTH = 400;
+export const MAX_BLOB_CACHE_ENTRIES = 8;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
@@ -156,7 +156,7 @@ export function cleanTextForTTS(raw: string): string {
   if (!raw) return '';
   return raw
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<\/?(?:p|div|span|br|hr|h[1-6]|strong|em|b|i|u|s|a|ul|ol|li|blockquote|pre|code|table|tr|td|th|thead|tbody|img|script|style|font|center|section|article|header|footer|nav|figure|figcaption)\b[^>]*>/gi, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, ' và ')
     .replace(/&quot;/gi, '"')
@@ -194,8 +194,8 @@ export function chunkChapterContent(
   const activeHeadChunkCount = Math.max(1, headChunkCount);
   const nextMinLen = Math.max(150, idealMinLength);
   const nextMaxLen = Math.max(nextMinLen + 50, idealMaxLength);
-  const headMinLen = Math.max(60, firstMinLength);
-  const headMaxLen = Math.max(headMinLen + 40, firstMaxLength);
+  const headMinLen = Math.max(50, firstMinLength);
+  const headMaxLen = Math.max(headMinLen + 20, firstMaxLength);
 
   const rawParagraphs = content
     .split(/\r?\n+/)
@@ -278,7 +278,7 @@ export function chunkChapterContent(
   for (let pIndex = 0; pIndex < rawParagraphs.length; pIndex++) {
     const paraText = rawParagraphs[pIndex];
     const sentences = paraText
-      .split(/(?<=[.?!…;])\s+|(?<=[”"'])\s+/)
+      .split(/(?<=[.?!…;]["”'’)\]]*)\s+/)
       .map((s) => s.trim())
       .filter(Boolean);
 
@@ -288,15 +288,17 @@ export function chunkChapterContent(
       const { minLen, maxLen } = getActiveLimits();
       const rawSeparator = isFirstSentenceInPara ? '\n' : ' ';
 
-      // Nếu câu hiện tại vượt quá maxLen (ví dụ > 250 ở đoạn đầu hoặc > 600 ở các đoạn sau)
-      // Hoặc đoạn đầu mới chỉ có tiêu đề ngắn (< 120 ký tự) nhưng câu tiếp theo vượt quá 250 ký tự:
-      // Tách theo ranh giới mệnh đề (dấu phẩy, hai chấm, gạch ngang) hoặc ranh giới từ (không bao giờ cắt ngang từ)
+      // Nếu câu hiện tại vượt quá maxLen hoặc đoạn đầu tiên (chunk 0) cần ghép thêm vừa đủ 120-150 ký tự
+      // để phát ngay trong 3-5 giây đầu -> tách theo mệnh đề hoặc từ (không bao giờ cắt ngang từ hay mất chữ)
       const needsSubSplit =
         sentence.length > maxLen ||
-        (chunks.length < activeHeadChunkCount && accumulator.length > 0 && accumulator.length < 80 && accumulator.length + 1 + sentence.length > maxLen);
+        (chunks.length < activeHeadChunkCount &&
+          accumulator.length > 0 &&
+          accumulator.length < headMinLen &&
+          accumulator.length + 1 + sentence.length > maxLen);
 
       if (needsSubSplit) {
-        if (accumulator && (accumulator.length >= 80 || chunks.length >= activeHeadChunkCount)) {
+        if (accumulator && (accumulator.length >= headMinLen || chunks.length >= activeHeadChunkCount)) {
           flushAccumulator();
         }
 
@@ -311,7 +313,13 @@ export function chunkChapterContent(
           const sep = firstClause ? rawSeparator : ' ';
           firstClause = false;
 
-          if (clause.length > curMax) {
+          const headNeedsWordSplit =
+            chunks.length < activeHeadChunkCount &&
+            accumulator.length > 0 &&
+            accumulator.length < headMinLen &&
+            accumulator.length + 1 + clause.length > curMax;
+
+          if (clause.length > curMax || headNeedsWordSplit) {
             const words = clause.split(/\s+/).filter(Boolean);
             for (const word of words) {
               const wordLimit = getActiveLimits().maxLen;
@@ -757,12 +765,16 @@ export class AudioStreamer {
       this.audioElement.playbackRate = this.playbackRate;
       this.isPlaying = true;
 
-      // Chỉ prefetch đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
-      const nextTarget = this.chunks[index + 1];
-      if (nextTarget && !signal.aborted) {
-        seamlessAudioCache
-          .fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text)
-          .catch(() => {});
+      // Prefetch song song 4 đoạn kế tiếp (index + 1 .. index + 4) ngay khi đoạn hiện tại bắt đầu phát
+      if (!signal.aborted) {
+        const prefetchTargets = [1, 2, 3, 4]
+          .map((offset) => this.chunks[index + offset])
+          .filter((c): c is AudioChunk => Boolean(c));
+        Promise.allSettled(
+          prefetchTargets.map((target) =>
+            seamlessAudioCache.fetchAndCache(this.voiceId, target.text, undefined, signal, chunk.text)
+          )
+        ).catch(() => {});
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
