@@ -1,6 +1,6 @@
 export async function onRequest(context) {
   const url = new URL(context.request.url);
-  const targetUrl = "https://dao-tam-audio.onrender.com" + url.pathname + url.search;
+  const targetUrl = "https://commander-carter-keen-organisms.trycloudflare.com" + url.pathname + url.search;
 
   const headers = new Headers(context.request.headers);
   headers.delete("host");
