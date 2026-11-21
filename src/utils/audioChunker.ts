@@ -19,10 +19,10 @@ export const TTS_FETCH_TIMEOUT_MS = 25000;
 export const TTS_MAX_RETRIES = 3;
 export const TTS_RETRY_DELAY_MS = 1500;
 export const DEFAULT_HEAD_CHUNK_COUNT = 1;
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 200;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 300;
-export const DEFAULT_CHUNK_MIN_LENGTH = 550;
-export const DEFAULT_CHUNK_MAX_LENGTH = 750;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 120;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 180;
+export const DEFAULT_CHUNK_MIN_LENGTH = 280;
+export const DEFAULT_CHUNK_MAX_LENGTH = 380;
 export const MAX_BLOB_CACHE_ENTRIES = 10;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
