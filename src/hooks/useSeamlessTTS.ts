@@ -42,8 +42,8 @@ export interface UseSeamlessTTSReturn {
   setPlaybackRate: (rate: number) => void;
 }
 
-const PREFETCH_LOOKAHEAD = 1; // Chỉ tải trước đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
-const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 3
+const PREFETCH_LOOKAHEAD = 3; // Luôn nạp trước ít nhất 3 đoạn kế tiếp (Đệm +3)
+const HARD_MAX_BLOB_CACHE = MAX_BLOB_CACHE_ENTRIES; // 6
 const STALL_WATCHDOG_MS = 12000;
 
 export function useSeamlessTTS({
@@ -218,7 +218,7 @@ export function useSeamlessTTS({
     applyPlaybackRateLock(audioElementRef.current, playbackRate);
   }, [playbackRate, applyPlaybackRateLock]);
 
-  // Đoạn đầu 150-250 ký tự khởi động nhanh, các đoạn sau 250-350 ký tự
+  // Progressive chunking: 2 đoạn đầu 80-120 ký tự, các đoạn sau 280-350 ký tự
   const chunks = useMemo(() => {
     return chunkChapterContent(content);
   }, [content]);
@@ -366,7 +366,7 @@ export function useSeamlessTTS({
   }, [clearStallWatchdogs, revokeAllBlobs, updateProgressBarDomNow]);
 
   /**
-   * Chỉ tải trước (prefetch) đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
+   * Duy trì bộ đệm nạp trước 3 đoạn kế tiếp (i+1 .. i+3) và giải phóng ngay các đoạn đã nghe qua
    */
   const runSequentialPrefetchQueue = useCallback(
     async (fromIndex: number, activeVoice: string, sessionNonce: number) => {
@@ -374,15 +374,22 @@ export function useSeamlessTTS({
       const genId = ++prefetchGenerationRef.current;
       const signal = prefetchAbortRef.current?.signal;
 
-      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 1]
+      // Dọn các đoạn nằm ngoài cửa sổ [fromIndex .. fromIndex + 3]
       for (const idx of Array.from(blobMapRef.current.keys())) {
         if (idx < fromIndex || idx > fromIndex + PREFETCH_LOOKAHEAD) {
           revokeChunkIndex(idx, activeVoice, curChunks[idx]?.text);
         }
       }
 
-      const targetIdx = fromIndex + 1;
-      if (targetIdx >= 0 && targetIdx < (curChunks?.length || 0)) {
+      const targets: number[] = [];
+      for (let offset = 1; offset <= PREFETCH_LOOKAHEAD; offset++) {
+        const targetIdx = fromIndex + offset;
+        if (targetIdx >= 0 && targetIdx < (curChunks?.length || 0)) {
+          targets.push(targetIdx);
+        }
+      }
+
+      for (let i = 0; i < targets.length; i += 2) {
         if (
           genId !== prefetchGenerationRef.current ||
           sessionNonce !== sessionNonceRef.current ||
@@ -392,33 +399,37 @@ export function useSeamlessTTS({
           return;
         }
 
-        if (!blobMapRef.current.has(targetIdx)) {
-          try {
-            const url = await seamlessAudioCache.fetchAndCache(
-              activeVoice,
-              curChunks[targetIdx].text,
-              undefined,
-              signal,
-              curChunks[fromIndex]?.text
-            );
-            if (
-              genId !== prefetchGenerationRef.current ||
-              sessionNonce !== sessionNonceRef.current ||
-              !isPlaybackActiveRef.current ||
-              signal?.aborted
-            ) {
-              safeRevokeUrl(url);
-              return;
-            }
-            setBlobWithHardLimit(targetIdx, url, fromIndex);
-          } catch {}
-        }
-      }
-
-      if (genId === prefetchGenerationRef.current && sessionNonce === sessionNonceRef.current) {
-        setBufferedIndices(
-          Array.from(blobMapRef.current.keys()).sort((a, b) => a - b)
+        const batch = targets.slice(i, i + 2);
+        await Promise.all(
+          batch.map(async (targetIdx) => {
+            if (blobMapRef.current.has(targetIdx)) return;
+            try {
+              const url = await seamlessAudioCache.fetchAndCache(
+                activeVoice,
+                curChunks[targetIdx].text,
+                undefined,
+                signal,
+                curChunks[fromIndex]?.text
+              );
+              if (
+                genId !== prefetchGenerationRef.current ||
+                sessionNonce !== sessionNonceRef.current ||
+                !isPlaybackActiveRef.current ||
+                signal?.aborted
+              ) {
+                safeRevokeUrl(url);
+                return;
+              }
+              setBlobWithHardLimit(targetIdx, url, fromIndex);
+            } catch {}
+          })
         );
+
+        if (genId === prefetchGenerationRef.current && sessionNonce === sessionNonceRef.current) {
+          setBufferedIndices(
+            Array.from(blobMapRef.current.keys()).sort((a, b) => a - b)
+          );
+        }
       }
     },
     [revokeChunkIndex, safeRevokeUrl, setBlobWithHardLimit]
