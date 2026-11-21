@@ -1551,7 +1551,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
     const audio = audioRef.current;
-    if (audio && audio.src && !audio.ended && !audio.error) {
+    if (audio && audio.src && !audio.ended && !audio.error && audio.readyState >= 2) {
       isPlaybackActiveRef.current = true;
       try {
         applyPlaybackRateLock(audio, playbackRateRef.current);
