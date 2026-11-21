@@ -90,8 +90,9 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
     }, timeoutMs);
 
     try {
-      const response = await fetch((window.location.hostname==='localhost'||window.location.hostname==='127.0.0.1')?'/api/tts':'[https://commander-carter-keen-organisms.trycloudflare.com/api/tts](https://commander-carter-keen-organisms.trycloudflare.com/api/tts)', {
-        method: 'POST',
+      const ttsUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? '/api/tts' : 'https://commander-carter-keen-organisms.trycloudflare.com/api/tts';
+        const response = await fetch(ttsUrl, {
+          method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
