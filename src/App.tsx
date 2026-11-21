@@ -4362,6 +4362,7 @@ function DaoTamApp() {
       <PWAInstallPrompt />
 
       {/* THANH NỔI AUDIO MICROSOFT EDGE TTS (CHUẨN HÌNH 1, HỖ TRỢ NGHE KHI TẮT MÀN HÌNH & MEDIA SESSION LOCKSCREEN) */}
+      {audioError && (<div data-testid="audio-login-toast" className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 max-w-md w-[92%] bg-amber-50 border border-amber-300 text-amber-950 px-4 py-3 rounded-xl shadow-lg flex items-center justify-between gap-3"><span className="text-sm font-medium">{audioError}</span><button type="button" onClick={clearAudioError} className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-amber-200 hover:bg-amber-300 cursor-pointer shrink-0">Đóng</button></div>)}
       <EdgeTTSFloatingAudioBar
         onOpenReader={(novel, chapter) => {
           handleSelectChapter(novel, chapter, false);
