@@ -15,14 +15,15 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 20000;
+export const TTS_FETCH_TIMEOUT_MS = 25000;
 export const TTS_MAX_RETRIES = 3;
-export const TTS_RETRY_DELAY_MS = 2000;
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 150;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 160;
-export const DEFAULT_CHUNK_MIN_LENGTH = 250;
+export const TTS_RETRY_DELAY_MS = 1500;
+export const DEFAULT_HEAD_CHUNK_COUNT = 2;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 80;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 120;
+export const DEFAULT_CHUNK_MIN_LENGTH = 280;
 export const DEFAULT_CHUNK_MAX_LENGTH = 350;
-export const MAX_BLOB_CACHE_ENTRIES = 3;
+export const MAX_BLOB_CACHE_ENTRIES = 6;
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
@@ -90,9 +91,8 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
     }, timeoutMs);
 
     try {
-      const ttsUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? '/api/tts' : 'https://commander-carter-keen-organisms.trycloudflare.com/api/tts';
-        const response = await fetch(ttsUrl, {
-          method: 'POST',
+      const response = await fetch('/api/tts', {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -160,24 +160,26 @@ export function cleanTextForTTS(raw: string): string {
 }
 
 /**
- * Thuật toán Chunking tối ưu khởi động nhanh & tổng hợp Edge TTS ổn định ở tốc độ x2:
- * - Đoạn đầu tiên (chunk 0): cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
- * - Các đoạn tiếp theo (chunk >= 1): gộp câu thành 250 - 350 ký tự theo ranh giới dấu câu / xuống dòng,
- *   tuyệt đối không cắt ngang từ, vừa đọc mượt 8 - 10s ở tốc độ x2 vừa tránh ngắt kết nối WebSocket.
+ * Thuật toán Progressive Chunking tối ưu phát nhanh trong ~3 giây & đọc mượt 1.5x - 2.0x:
+ * - 2 đoạn đầu tiên (chunk 0, 1): cắt ngắn 80 - 120 ký tự để tổng hợp và phát tiếng gần như ngay lập tức.
+ * - Các đoạn tiếp theo (chunk >= 2): gộp câu thành 280 - 350 ký tự theo ranh giới dấu câu / xuống dòng,
+ *   tuyệt đối không cắt ngang từ, vừa đọc liền mạch vừa tổng hợp ổn định trên Edge TTS.
  */
 export function chunkChapterContent(
   content: string,
   idealMinLength: number = DEFAULT_CHUNK_MIN_LENGTH,
   idealMaxLength: number = DEFAULT_CHUNK_MAX_LENGTH,
   firstMinLength: number = DEFAULT_FIRST_CHUNK_MIN_LENGTH,
-  firstMaxLength: number = DEFAULT_FIRST_CHUNK_MAX_LENGTH
+  firstMaxLength: number = DEFAULT_FIRST_CHUNK_MAX_LENGTH,
+  headChunkCount: number = DEFAULT_HEAD_CHUNK_COUNT
 ): AudioChunk[] {
   if (!content || !content.trim()) return [];
 
+  const headCount = Math.max(1, headChunkCount);
   const nextMinLen = Math.max(150, idealMinLength);
   const nextMaxLen = Math.max(nextMinLen + 50, idealMaxLength);
-  const headMinLen = Math.max(100, firstMinLength);
-  const headMaxLen = Math.max(headMinLen + 50, firstMaxLength);
+  const headMinLen = Math.max(50, firstMinLength);
+  const headMaxLen = Math.max(headMinLen + 20, firstMaxLength);
 
   const rawParagraphs = content
     .split(/\r?\n+/)
@@ -196,7 +198,7 @@ export function chunkChapterContent(
   let accParaIndex = 0;
 
   const getActiveLimits = () => {
-    if (chunks.length === 0) {
+    if (chunks.length < headCount) {
       return { minLen: headMinLen, maxLen: headMaxLen };
     }
     return { minLen: nextMinLen, maxLen: nextMaxLen };
@@ -275,10 +277,13 @@ export function chunkChapterContent(
       // Tách theo ranh giới mệnh đề (dấu phẩy, hai chấm, gạch ngang) hoặc ranh giới từ (không bao giờ cắt ngang từ)
       const needsSubSplit =
         sentence.length > maxLen ||
-        (chunks.length === 0 && accumulator.length > 0 && accumulator.length < 120 && accumulator.length + 1 + sentence.length > maxLen);
+        (chunks.length < headCount &&
+          accumulator.length > 0 &&
+          accumulator.length < minLen &&
+          accumulator.length + 1 + sentence.length > maxLen);
 
       if (needsSubSplit) {
-        if (accumulator && (accumulator.length >= 120 || chunks.length > 0)) {
+        if (accumulator && (accumulator.length >= minLen || chunks.length >= headCount)) {
           flushAccumulator();
         }
 
@@ -739,12 +744,30 @@ export class AudioStreamer {
       this.audioElement.playbackRate = this.playbackRate;
       this.isPlaying = true;
 
-      // Chỉ prefetch đúng 1 đoạn kế tiếp ngay khi đoạn hiện tại bắt đầu phát
-      const nextTarget = this.chunks[index + 1];
-      if (nextTarget && !signal.aborted) {
-        seamlessAudioCache
-          .fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text)
-          .catch(() => {});
+      // Nạp trước ít nhất 3 đoạn kế tiếp (index+1 .. index+3) và giải phóng các đoạn đã nghe qua
+      for (let pastIdx = 0; pastIdx < index; pastIdx++) {
+        const pastChunk = this.chunks[pastIdx];
+        if (pastChunk && pastChunk.text !== chunk.text) {
+          seamlessAudioCache.revokeEntry(this.voiceId, pastChunk.text);
+        }
+      }
+      const prefetchTargets = [index + 1, index + 2, index + 3]
+        .filter((idx) => idx < this.chunks.length)
+        .map((idx) => this.chunks[idx]);
+      if (prefetchTargets.length > 0 && !signal.aborted) {
+        void (async () => {
+          for (let i = 0; i < prefetchTargets.length; i += 2) {
+            if (signal.aborted) return;
+            const batch = prefetchTargets.slice(i, i + 2);
+            await Promise.all(
+              batch.map((t) =>
+                seamlessAudioCache
+                  .fetchAndCache(this.voiceId, t.text, undefined, signal, chunk.text)
+                  .catch(() => {})
+              )
+            );
+          }
+        })();
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
