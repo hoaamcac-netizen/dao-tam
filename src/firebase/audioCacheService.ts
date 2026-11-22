@@ -7,6 +7,7 @@ import {
 } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
 import { auth, db, storage } from './config';
+import { fetchTtsAudioBlobWithWatchdog } from '../utils/audioChunker';
 
 export type ChapterAudioCacheMap = Record<string, Record<string, string>>;
 
@@ -500,23 +501,20 @@ export async function resolveAndCacheChunkAudio(
       }
     }
 
-    const endpoint = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim().replace(/\/+$/, '');
-    const ttsBase = !endpoint
-      ? '/api/tts'
-      : endpoint.endsWith('/api/tts') || endpoint.endsWith('/.netlify/functions/tts')
-      ? endpoint
-      : `${endpoint}/api/tts`;
-    const ttsUrl = `${ttsBase}?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(voiceId)}`;
-    const audioBlob = await fetchAudioBlobWithRetry(
-      ttsUrl,
-      TTS_MAX_RETRIES,
+    const fetchedBlob = await fetchTtsAudioBlobWithWatchdog({
+      text: cleanText,
+      voiceId,
+      signal,
       onRetryAttempt,
-      signal
-    );
+    });
     if (signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
-    const localBlobUrl = URL.createObjectURL(audioBlob);
+    if (!fetchedBlob) {
+      throw new Error('Đoạn văn bản không có nội dung phát âm thanh');
+    }
+    const localBlobUrl = URL.createObjectURL(fetchedBlob);
+    const audioBlob = fetchedBlob;
     setRamBlobWithLimit(chunkKey, localBlobUrl);
 
     const safeNovelId = sanitizeKeySegment(novelId);

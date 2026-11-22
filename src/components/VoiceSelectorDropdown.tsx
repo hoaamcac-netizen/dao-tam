@@ -70,8 +70,8 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
 
   const menuPositionClasses =
     direction === 'up'
-      ? 'bottom-full left-0 right-0 sm:left-0 sm:right-auto sm:w-72 mb-2'
-      : 'top-full right-0 w-[min(18rem,calc(100vw-1rem))] mt-2';
+      ? 'absolute bottom-full left-0 right-0 max-w-[calc(100vw-24px)] sm:left-0 sm:right-auto sm:w-72 mb-2'
+      : 'fixed left-3 right-3 top-[54px] max-w-[calc(100vw-24px)] mx-auto sm:mx-0 sm:absolute sm:top-full sm:right-0 sm:left-auto sm:w-72 sm:mt-2';
 
   return (
     <div ref={containerRef} className={`relative ${variant === 'floatingBar' ? 'w-full' : ''}`}>
@@ -110,7 +110,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
         <div
           role="listbox"
           aria-label="Chọn giọng đọc"
-          className={`absolute ${menuPositionClasses} z-50 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-1.5 space-y-1 animate-in fade-in zoom-in-95 duration-150`}
+          className={`${menuPositionClasses} z-50 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-2 space-y-1 animate-in fade-in zoom-in-95 duration-150`}
         >
           {(VOICE_SELECTOR_OPTIONS || []).map((opt) => {
             const isSelected = opt.id === normalizedSelected;
@@ -132,8 +132,8 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
                 }`}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-bold leading-snug truncate">{opt.label}</div>
-                  <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight mt-0.5">
+                  <div className="text-xs font-bold leading-snug break-words">{opt.label}</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-tight mt-0.5 break-words">
                     {opt.subtitle}
                   </div>
                 </div>

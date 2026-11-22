@@ -1607,8 +1607,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setIsPlaying(false);
             isPlaybackActiveRef.current = false;
             backgroundAudioManager.pauseBackgroundPlayback();
+            setIsMinimized(false);
             setAudioError(
-              `Kết nối bị gián đoạn tại đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại đúng đoạn này.`
+              `Tất cả máy chủ giọng đọc đều gián đoạn tại đoạn ${chunk.chapterChunkIndex + 1}. Bạn có thể thử lại hoặc chuyển sang giọng dự phòng.`
             );
           } catch (recoverErr: any) {
             if (recoverErr?.name === 'AbortError' || !isCurrentChunkStillValid()) return;
@@ -1618,8 +1619,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setIsPlaying(false);
             isPlaybackActiveRef.current = false;
             backgroundAudioManager.pauseBackgroundPlayback();
+            setIsMinimized(false);
             setAudioError(
-              `Không thể phát đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại đúng đoạn này.`
+              `Không thể kết nối máy chủ giọng đọc tại đoạn ${chunk.chapterChunkIndex + 1}. Bạn có thể thử lại hoặc chuyển sang giọng dự phòng.`
             );
           } finally {
             isRecovering = false;
@@ -1799,8 +1801,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setIsPlaying(false);
           isPlaybackActiveRef.current = false;
           backgroundAudioManager.pauseBackgroundPlayback();
+          setIsMinimized(false);
           setAudioError(
-            `Kết nối giọng đọc bị gián đoạn tại đoạn ${chunk.chapterChunkIndex + 1} sau 3 lần thử. Nhấn Phát để tiếp tục.`
+            `Không thể kết nối các máy chủ giọng đọc tại đoạn ${chunk.chapterChunkIndex + 1}. Nhấn Phát để thử lại hoặc chuyển sang giọng dự phòng.`
           );
         }
       }

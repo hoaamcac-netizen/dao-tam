@@ -178,10 +178,10 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 <button
                   type="button"
                   onClick={() => setVoiceId(DEVICE_FALLBACK_VOICE_ID)}
-                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-[11px] shadow-xs transition-colors cursor-pointer"
+                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-[11px] shadow-xs transition-colors cursor-pointer"
                 >
-                  <Smartphone className="w-3 h-3 shrink-0" />
-                  <span>Chuyển sang giọng dự phòng</span>
+                  <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                  <span>Chuyển sang Dự phòng (Giọng máy)</span>
                 </button>
               )}
             </div>
@@ -189,7 +189,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
 
           {retryAttempt > 0 && isLoading && (
             <div className="text-[11px] font-semibold text-pink-600 dark:text-pink-400 text-center">
-              Đang kết nối lại giọng đọc (lần {retryAttempt}/3)...
+              Đang thử máy chủ giọng đọc dự phòng (lần {retryAttempt})...
             </div>
           )}
 
