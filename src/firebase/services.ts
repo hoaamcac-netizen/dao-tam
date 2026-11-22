@@ -25,8 +25,6 @@ import {
 } from 'firebase/firestore';
 import { 
   signInWithPopup, 
-  signInWithRedirect,
-  getRedirectResult,
   signOut as firebaseSignOut, 
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -204,44 +202,22 @@ export function isIOSDevice(): boolean {
 }
 
 /**
- * Đăng nhập bằng tài khoản Google (Firebase Auth)
- * - Trên thiết bị iOS (hoặc khi trình duyệt chặn popup auth/popup-blocked), tự động chuyển sang signInWithRedirect
- *   để người dùng iPhone Safari đăng nhập bình thường không cần tắt chặn Popup trong Cài đặt.
+ * Đăng nhập bằng tài khoản Google (Firebase Auth) qua signInWithPopup
  */
-export async function loginWithGoogle(): Promise<FirebaseUser | null> {
-  const inIframe = typeof window !== 'undefined' && window.self !== window.top;
-  if (isIOSDevice() && !inIframe) {
-    await signInWithRedirect(auth, googleProvider);
-    return null;
-  }
-
+export async function loginWithGoogle(): Promise<FirebaseUser> {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
-    if (error?.code === 'auth/popup-blocked') {
-      await signInWithRedirect(auth, googleProvider);
-      return null;
-    }
-    if (error?.code !== 'auth/unauthorized-domain' && error?.code !== 'auth/popup-closed-by-user') {
+    if (
+      error?.code !== 'auth/unauthorized-domain' &&
+      error?.code !== 'auth/popup-closed-by-user' &&
+      error?.code !== 'auth/popup-blocked' &&
+      error?.code !== 'auth/cancelled-popup-request'
+    ) {
       console.warn('Google Sign-in status:', error?.message || error);
     }
     throw error;
-  }
-}
-
-/**
- * Xử lý kết quả trả về sau khi Google chuyển hướng (signInWithRedirect) quay lại trang
- */
-export async function consumeGoogleRedirectResult(): Promise<FirebaseUser | null> {
-  try {
-    const result = await getRedirectResult(auth);
-    return result?.user || null;
-  } catch (error: any) {
-    if (error?.code !== 'auth/no-auth-event' && error?.code !== 'auth/popup-closed-by-user') {
-      console.warn('Google Redirect Result status:', error?.code || error?.message || error);
-    }
-    return null;
   }
 }
 

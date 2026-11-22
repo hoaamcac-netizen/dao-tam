@@ -4,7 +4,6 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { auth, db, checkIsAdmin } from '../firebase/config';
 import {
   syncUserProfile,
-  consumeGoogleRedirectResult,
   extractXuBalances,
   extractPurchasedChaptersMap,
   extractPurchasedChaptersList,
@@ -204,12 +203,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     let unsubscribeUserDoc: (() => void) | null = null;
 
-    // Đọc sẵn kết quả chuyển hướng Google (signInWithRedirect) trên iOS / Safari khi quay lại trang
-    const redirectResultPromise = Promise.race([
-      consumeGoogleRedirectResult(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
-    ]);
-
     const cleanupUserListener = () => {
       if (unsubscribeUserDoc) {
         unsubscribeUserDoc();
@@ -224,12 +217,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Ngắt listener doc user cũ trước khi chuyển tài khoản hoặc đăng xuất
       cleanupUserListener();
 
-      let effectiveFbUser = fbUser;
-      if (!effectiveFbUser) {
-        const redirectUser = await redirectResultPromise;
-        if (!isActive) return;
-        effectiveFbUser = redirectUser || auth.currentUser;
-      }
+      const effectiveFbUser = fbUser || auth.currentUser;
 
       if (!effectiveFbUser) {
         setUser(null);
