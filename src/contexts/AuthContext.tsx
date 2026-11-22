@@ -4,6 +4,7 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { auth, db, checkIsAdmin } from '../firebase/config';
 import {
   syncUserProfile,
+  consumeGoogleRedirectResult,
   extractXuBalances,
   extractPurchasedChaptersMap,
   extractPurchasedChaptersList,
@@ -203,6 +204,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     let unsubscribeUserDoc: (() => void) | null = null;
 
+    // Đọc sẵn kết quả chuyển hướng Google (signInWithRedirect) trên iOS / Safari khi quay lại trang
+    const redirectResultPromise = Promise.race([
+      consumeGoogleRedirectResult(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+    ]);
+
     const cleanupUserListener = () => {
       if (unsubscribeUserDoc) {
         unsubscribeUserDoc();
@@ -217,17 +224,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // Ngắt listener doc user cũ trước khi chuyển tài khoản hoặc đăng xuất
       cleanupUserListener();
 
-      if (!fbUser) {
+      let effectiveFbUser = fbUser;
+      if (!effectiveFbUser) {
+        const redirectUser = await redirectResultPromise;
+        if (!isActive) return;
+        effectiveFbUser = redirectUser || auth.currentUser;
+      }
+
+      if (!effectiveFbUser) {
         setUser(null);
         setLoading(false);
         return;
       }
 
       try {
-        let profile = await syncUserProfile(fbUser);
+        let profile = await syncUserProfile(effectiveFbUser);
         if (!isActive) return;
 
-        profile = await applyLegacyRecoveryIfZeroBalance(fbUser, profile);
+        profile = await applyLegacyRecoveryIfZeroBalance(effectiveFbUser, profile);
         if (!isActive) return;
 
         const isAdmin = checkIsAdmin(profile.email);
@@ -235,14 +249,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         if (!profile.isBanned) {
           clearLocalBanFlags();
-          fbUser.getIdToken(true).catch(() => {});
+          effectiveFbUser.getIdToken(true).catch(() => {});
         }
 
         // BẮT BUỘC đẩy dữ liệu vào Global State để Header và toàn bộ UI re-render ngay lập tức
         setUser(profile);
 
         // Giữ DUY NHẤT 1 onSnapshot trên đúng 1 document user hiện tại để cập nhật số dư Xu / thông báo thời gian thực
-        const targetUserDocId = profile.id || fbUser.uid;
+        const targetUserDocId = profile.id || effectiveFbUser.uid;
         unsubscribeUserDoc = onSnapshot(
           doc(db, 'users', targetUserDocId),
           (snap) => {
@@ -255,7 +269,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               liveData.status === 'banned' ||
               liveData.status === 'Bị khóa'
             );
-            const liveEmail = String(liveData.email || fbUser.email || profile.email || '');
+            const liveEmail = String(liveData.email || effectiveFbUser?.email || profile.email || '');
             const liveIsAdmin = checkIsAdmin(liveEmail);
             const liveRole = liveIsAdmin
               ? 'admin'

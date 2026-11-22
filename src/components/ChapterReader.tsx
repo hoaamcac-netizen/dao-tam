@@ -13,6 +13,7 @@ import { safeSetItem, safeGetItem } from '../utils/safeStorage';
 import { FONT_FAMILY_OPTIONS, resolveReaderFontCss } from '../hooks/useReaderSettings';
 import { AudioChunk, chunkChapterContent } from '../utils/audioChunker';
 import { CommentsSection } from './CommentsSection';
+import { VoiceSelectorDropdown } from './VoiceSelectorDropdown';
 import { checkIsAdmin } from '../firebase/config';
 import { 
   recordChapterAccessAndCheckRateLimit, 
@@ -554,12 +555,18 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   // Background Audio & Lock Screen Media Session được quản lý tập trung tại AudioContext.tsx
 
   const handleChangeVoice = (newVoiceId: string) => {
+    const normalized = normalizeEdgeVoiceId(newVoiceId);
     setReaderSettings((prev) => {
-      const updated = { ...prev, selectedVoiceId: newVoiceId };
+      const updated = { ...prev, selectedVoiceId: normalized };
       safeSetItem('daotam_reader_settings', JSON.stringify(updated));
       return updated;
     });
-    setVoiceId(newVoiceId);
+    setVoiceId(normalized);
+    if (!isCurrentChapterAudio && isChapterUnlocked && (audioContext.isBarVisible || isAudioActive)) {
+      setIsAudioActive(true);
+      safeSetItem('daotam_audio_active', 'true');
+      audioContext.playChapter(novel, chapter, true, safeChapters, true).catch(() => {});
+    }
   };
 
   // ==============================================================================
@@ -883,35 +890,13 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
           {/* Action buttons */}
           <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
-            {/* Voice Switcher (Hoài My - Nữ & Nam Minh - Nam) */}
-            <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg shadow-xs">
-              <button
-                type="button"
-                onClick={() => handleChangeVoice('vi-VN-HoaiMyNeural')}
-                className={`px-1.5 sm:px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${
-                  normalizeEdgeVoiceId(readerSettings.selectedVoiceId) === 'vi-VN-HoaiMyNeural'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-                title="Giọng Nữ: Hoài My (Microsoft Edge Neural)"
-              >
-                <span>👩</span>
-                <span className="hidden sm:inline">Hoài My</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleChangeVoice('vi-VN-NamMinhNeural')}
-                className={`px-1.5 sm:px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${
-                  normalizeEdgeVoiceId(readerSettings.selectedVoiceId) === 'vi-VN-NamMinhNeural'
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-                title="Giọng Nam: Nam Minh (Microsoft Edge Neural)"
-              >
-                <span>👨</span>
-                <span className="hidden sm:inline">Nam Minh</span>
-              </button>
-            </div>
+            {/* Voice Selector Dropdown (Nam Minh / Hoài My / Dự phòng giọng máy) */}
+            <VoiceSelectorDropdown
+              selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
+              onSelectVoice={handleChangeVoice}
+              direction="down"
+              variant="readerHeader"
+            />
 
             {/* Play/Pause Button */}
             <button

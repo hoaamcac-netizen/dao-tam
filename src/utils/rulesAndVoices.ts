@@ -116,11 +116,63 @@ export const EDGE_TTS_VOICES: VoiceOption[] = [
 // Alias for existing references
 export const VOICE_OPTIONS: VoiceOption[] = EDGE_TTS_VOICES;
 
+export const DEVICE_FALLBACK_VOICE_ID = 'device-fallback';
+
+export interface VoiceSelectorOption {
+  id: string;
+  label: string;
+  shortLabel: string;
+  subtitle: string;
+}
+
+export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
+  {
+    id: 'vi-VN-NamMinhNeural',
+    label: 'Nam Minh',
+    shortLabel: 'Nam Minh',
+    subtitle: 'Giọng chính - Nam',
+  },
+  {
+    id: 'vi-VN-HoaiMyNeural',
+    label: 'Hoài My',
+    shortLabel: 'Hoài My',
+    subtitle: 'Giọng chính - Nữ',
+  },
+  {
+    id: DEVICE_FALLBACK_VOICE_ID,
+    label: 'Dự phòng (Giọng máy)',
+    shortLabel: 'Giọng máy',
+    subtitle: 'Giọng thiết bị vi-VN, không tốn băng thông',
+  },
+];
+
+export function isDeviceFallbackVoice(voiceId?: string | null): boolean {
+  if (!voiceId) return false;
+  const lower = voiceId.trim().toLowerCase();
+  return (
+    lower === DEVICE_FALLBACK_VOICE_ID ||
+    lower === 'browser-speech' ||
+    lower === 'device' ||
+    lower === 'speechsynthesis'
+  );
+}
+
+export function getVoiceDisplayMeta(voiceId?: string | null): VoiceSelectorOption {
+  const normalized = normalizeEdgeVoiceId(voiceId || undefined);
+  return (
+    VOICE_SELECTOR_OPTIONS.find((opt) => opt.id === normalized) ||
+    VOICE_SELECTOR_OPTIONS[1]
+  );
+}
+
 /**
- * Chuẩn hóa mã giọng Edge TTS từ bất kỳ ID cũ nào
+ * Chuẩn hóa mã giọng Edge TTS hoặc giữ nguyên giọng dự phòng của thiết bị
  */
 export function normalizeEdgeVoiceId(voiceId?: string): string {
   if (!voiceId) return 'vi-VN-HoaiMyNeural';
+  if (isDeviceFallbackVoice(voiceId)) {
+    return DEVICE_FALLBACK_VOICE_ID;
+  }
   const lower = voiceId.toLowerCase();
   if (lower.includes('namminh') || lower === 'nam-minh' || lower.includes('minh-quan')) {
     return 'vi-VN-NamMinhNeural';
@@ -182,7 +234,7 @@ export function getEdgeTtsAudioUrl(text: string, voiceId: string): string {
 }
 
 /**
- * Tìm kiếm giọng đọc trong Web Speech API nếu offline
+ * Tìm kiếm giọng đọc tiếng Việt tốt nhất trong Web Speech API của thiết bị
  */
 let cachedVoices: SpeechSynthesisVoice[] = [];
 
@@ -195,28 +247,53 @@ if (typeof window !== 'undefined' && window.speechSynthesis) {
 
 export function getMatchingBrowserVoice(voiceId: string): SpeechSynthesisVoice | null {
   if (typeof window === 'undefined' || !window.speechSynthesis) return null;
-  const voices = (cachedVoices?.length || 0) > 0 ? cachedVoices : (window.speechSynthesis.getVoices() || []);
+  const freshVoices = window.speechSynthesis.getVoices() || [];
+  const voices = freshVoices.length > 0 ? freshVoices : cachedVoices;
   if ((voices?.length || 0) === 0) return null;
+  if (freshVoices.length > 0) cachedVoices = freshVoices;
 
   const targetId = normalizeEdgeVoiceId(voiceId);
+  const isFallbackMode = targetId === DEVICE_FALLBACK_VOICE_ID;
   const isMale = targetId === 'vi-VN-NamMinhNeural';
 
-  // Tìm giọng Microsoft NamMinh hoặc HoaiMy trong trình duyệt
-  const matched = voices.find((v) => {
-    const name = v.name.toLowerCase();
-    const isVi = v.lang.startsWith('vi') || v.lang.includes('VN');
-    if (!isVi) return false;
-    if (isMale) {
-      return name.includes('namminh') || name.includes('nam minh') || name.includes('male') || name.includes('nam');
-    }
-    return name.includes('hoaimy') || name.includes('hoài my') || name.includes('female');
+  const viVoices = voices.filter((v) => {
+    const lang = (v.lang || '').toLowerCase();
+    const name = (v.name || '').toLowerCase();
+    return lang.startsWith('vi') || lang.includes('vn') || name.includes('vietnam') || name.includes('tiếng việt');
   });
 
-  if (matched) return matched;
+  if (viVoices.length === 0) return null;
 
-  // Fallback to any Vietnamese voice
-  const viVoice = voices.find((v) => v.lang.startsWith('vi') || v.lang.includes('VN'));
-  return viVoice || null;
+  const scoreVoice = (v: SpeechSynthesisVoice): number => {
+    const lang = (v.lang || '').toLowerCase();
+    const name = (v.name || '').toLowerCase();
+    let score = 0;
+
+    if (lang === 'vi-vn' || lang === 'vi_vn') score += 50;
+    else if (lang.startsWith('vi')) score += 30;
+
+    if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 35;
+    if (name.includes('google')) score += 25;
+    if (name.includes('microsoft')) score += 20;
+    if (name.includes('linh') || name.includes('hoaimy') || name.includes('hoài my') || name.includes('namminh') || name.includes('nam minh') || name.includes('an')) {
+      score += 20;
+    }
+
+    if (!isFallbackMode) {
+      if (isMale && (name.includes('namminh') || name.includes('nam minh') || name.includes('male') || name.includes('nam') || name.includes('an'))) {
+        score += 40;
+      } else if (!isMale && (name.includes('hoaimy') || name.includes('hoài my') || name.includes('female') || name.includes('linh') || name.includes('mai'))) {
+        score += 40;
+      }
+    }
+
+    if (v.localService) score += 10;
+    if (v.default) score += 5;
+
+    return score;
+  };
+
+  return [...viVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a))[0] || null;
 }
 
 let activeAudioSample: HTMLAudioElement | null = null;

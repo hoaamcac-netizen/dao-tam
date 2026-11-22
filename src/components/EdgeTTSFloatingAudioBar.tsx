@@ -1,5 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAudio } from '../contexts/AudioContext';
+import { VoiceSelectorDropdown } from './VoiceSelectorDropdown';
+import {
+  DEVICE_FALLBACK_VOICE_ID,
+  getVoiceDisplayMeta,
+  isDeviceFallbackVoice,
+} from '../utils/rulesAndVoices';
 import {
   Headphones,
   Play,
@@ -12,6 +18,7 @@ import {
   Repeat,
   ChevronDown,
   AlertCircle,
+  Smartphone,
 } from 'lucide-react';
 
 interface EdgeTTSFloatingAudioBarProps {
@@ -70,7 +77,8 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
     return null;
   }
 
-  const isNamMinh = voiceId.includes('NamMinh');
+  const activeVoiceMeta = getVoiceDisplayMeta(voiceId);
+  const isFallbackVoice = isDeviceFallbackVoice(voiceId);
   const speeds = [0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
 
   if (isMinimized) {
@@ -94,7 +102,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 Chương {activeChapter.number}
               </div>
               <div className="text-[10px] text-slate-400 truncate">
-                {isNamMinh ? 'Nam Minh' : 'Hoài My'} • Câu {currentChunkIndex + 1}/{totalChunks}
+                {activeVoiceMeta.shortLabel} • Câu {currentChunkIndex + 1}/{totalChunks}
               </div>
             </div>
           </div>
@@ -138,8 +146,8 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
 
   return (
     <div className="fixed bottom-2 left-2 right-2 sm:bottom-4 sm:left-auto sm:right-6 sm:w-[400px] z-50 animate-in slide-in-from-bottom-4 duration-300">
-      <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl sm:rounded-3xl border border-pink-200/90 dark:border-pink-900/60 shadow-[0_10px_30px_-8px_rgba(236,72,153,0.3)] overflow-hidden text-slate-800 dark:text-slate-100 transition-all">
-        <div className="h-1 bg-pink-100 dark:bg-slate-800 w-full overflow-hidden">
+      <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl sm:rounded-3xl border border-pink-200/90 dark:border-pink-900/60 shadow-[0_10px_30px_-8px_rgba(236,72,153,0.3)] text-slate-800 dark:text-slate-100 transition-all">
+        <div className="h-1 bg-pink-100 dark:bg-slate-800 w-full rounded-t-2xl sm:rounded-t-3xl overflow-hidden">
           <div
             ref={registerProgressBarRef}
             className="h-full w-0 bg-gradient-to-r from-pink-500 to-rose-500"
@@ -150,20 +158,32 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
           {audioError && (
             <div
               role="alert"
-              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-[11px] font-medium"
+              className="flex flex-col gap-1.5 px-2.5 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-[11px] font-medium"
             >
-              <span className="flex items-center gap-1.5 truncate">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{audioError}</span>
-              </span>
-              <button
-                type="button"
-                onClick={clearAudioError}
-                aria-label="Đóng thông báo lỗi"
-                className="text-rose-500 hover:text-rose-700 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-start justify-between gap-2">
+                <span className="flex items-start gap-1.5 min-w-0 leading-snug">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span className="break-words">{audioError}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={clearAudioError}
+                  aria-label="Đóng thông báo lỗi"
+                  className="text-rose-500 hover:text-rose-700 cursor-pointer shrink-0 p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {!isFallbackVoice && (
+                <button
+                  type="button"
+                  onClick={() => setVoiceId(DEVICE_FALLBACK_VOICE_ID)}
+                  className="self-start inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-[11px] shadow-xs transition-colors cursor-pointer"
+                >
+                  <Smartphone className="w-3 h-3 shrink-0" />
+                  <span>Chuyển sang giọng dự phòng</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -255,35 +275,12 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
             </button>
           </div>
 
-          <div className="flex items-center justify-center gap-1.5 sm:gap-2">
-            <button
-              type="button"
-              onClick={() => setVoiceId('vi-VN-HoaiMyNeural')}
-              className={`flex-1 py-1 sm:py-1.5 px-2.5 sm:px-3 rounded-lg sm:rounded-xl text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-                !isNamMinh
-                  ? 'bg-gradient-to-r from-pink-600 to-rose-500 text-white shadow-sm shadow-pink-500/25'
-                  : 'bg-pink-50/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-pink-100 dark:hover:bg-slate-700 border border-pink-100 dark:border-slate-700'
-              }`}
-              title="Giọng Nữ: Hoài My (Microsoft Edge Neural)"
-            >
-              <span>🌸</span>
-              <span>Hoài My</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setVoiceId('vi-VN-NamMinhNeural')}
-              className={`flex-1 py-1 sm:py-1.5 px-2.5 sm:px-3 rounded-lg sm:rounded-xl text-[11px] sm:text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
-                isNamMinh
-                  ? 'bg-gradient-to-r from-pink-600 to-rose-500 text-white shadow-sm shadow-pink-500/25'
-                  : 'bg-pink-50/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-pink-100 dark:hover:bg-slate-700 border border-pink-100 dark:border-slate-700'
-              }`}
-              title="Giọng Nam: Nam Minh (Microsoft Edge Neural)"
-            >
-              <span>⚔️</span>
-              <span>Nam Minh</span>
-            </button>
-          </div>
+          <VoiceSelectorDropdown
+            selectedVoiceId={voiceId}
+            onSelectVoice={setVoiceId}
+            direction="up"
+            variant="floatingBar"
+          />
 
           <div className="flex items-center justify-between gap-2 pt-1 border-t border-pink-100/70 dark:border-slate-800 text-[11px] sm:text-xs">
             <div className="relative" ref={speedMenuRef}>

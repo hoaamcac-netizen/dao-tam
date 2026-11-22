@@ -25,6 +25,8 @@ import {
 } from 'firebase/firestore';
 import { 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   signOut as firebaseSignOut, 
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -187,18 +189,59 @@ export function sanitizeFirestoreData<T>(value: T): T {
   return sanitized as T;
 }
 
+export function detectInAppBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /FBAN|FBAV|FB_IAB|Messenger|Zalo|Line|TikTok|BytedanceWebview|musical_ly/i.test(ua);
+}
+
+export function isIOSDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isClassicIOS = /iPhone|iPad|iPod/i.test(ua);
+  const isIPadOS = navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1;
+  return isClassicIOS || isIPadOS;
+}
+
 /**
- * Đăng nhập bằng tài khoản Google (Firebase Auth popup)
+ * Đăng nhập bằng tài khoản Google (Firebase Auth)
+ * - Trên thiết bị iOS (hoặc khi trình duyệt chặn popup auth/popup-blocked), tự động chuyển sang signInWithRedirect
+ *   để người dùng iPhone Safari đăng nhập bình thường không cần tắt chặn Popup trong Cài đặt.
  */
-export async function loginWithGoogle(): Promise<FirebaseUser> {
+export async function loginWithGoogle(): Promise<FirebaseUser | null> {
+  const inIframe = typeof window !== 'undefined' && window.self !== window.top;
+  if (isIOSDevice() && !inIframe) {
+    await signInWithRedirect(auth, googleProvider);
+    return null;
+  }
+
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
+    if (error?.code === 'auth/popup-blocked') {
+      await signInWithRedirect(auth, googleProvider);
+      return null;
+    }
     if (error?.code !== 'auth/unauthorized-domain' && error?.code !== 'auth/popup-closed-by-user') {
       console.warn('Google Sign-in status:', error?.message || error);
     }
     throw error;
+  }
+}
+
+/**
+ * Xử lý kết quả trả về sau khi Google chuyển hướng (signInWithRedirect) quay lại trang
+ */
+export async function consumeGoogleRedirectResult(): Promise<FirebaseUser | null> {
+  try {
+    const result = await getRedirectResult(auth);
+    return result?.user || null;
+  } catch (error: any) {
+    if (error?.code !== 'auth/no-auth-event' && error?.code !== 'auth/popup-closed-by-user') {
+      console.warn('Google Redirect Result status:', error?.code || error?.message || error);
+    }
+    return null;
   }
 }
 

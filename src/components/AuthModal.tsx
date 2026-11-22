@@ -3,9 +3,10 @@ import { UserProfile } from '../types';
 import { DaoTamLogo } from './DaoTamLogo';
 import { 
   loginWithGoogle, 
-  syncUserProfile, 
+  syncUserProfile,
+  detectInAppBrowser,
 } from '../firebase/services';
-import { X, RotateCw, AlertCircle, ShieldAlert } from 'lucide-react';
+import { X, RotateCw, AlertCircle, ShieldAlert, ExternalLink, Copy, Check } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -20,34 +21,55 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onSuccessLogin,
 }) => {
   const [isLoading, setIsLoading] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isPopupBlocked, setIsPopupBlocked] = useState(false);
   const [isOriginMismatch, setIsOriginMismatch] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const isInAppBrowser = detectInAppBrowser();
 
   useEffect(() => {
     if (!isOpen) return;
     setErrorMsg(null);
     setIsPopupBlocked(false);
     setIsOriginMismatch(false);
+    setIsRedirecting(false);
+    setCopiedUrl(false);
   }, [isOpen]);
 
   if (!isOpen) return null;
 
   const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : 'https://dao-tam-doc-truyen.vercel.app';
+    typeof window !== 'undefined' ? window.location.origin : 'https://truyen-doc-va-nghe-dao-tam.pages.dev';
   const currentHostname =
-    typeof window !== 'undefined' ? window.location.hostname : 'dao-tam-doc-truyen.vercel.app';
+    typeof window !== 'undefined' ? window.location.hostname : 'truyen-doc-va-nghe-dao-tam.pages.dev';
 
-  // Sử dụng Firebase Auth signInWithPopup làm luồng chính (tránh lỗi 400 origin_mismatch của GSI Token Client)
+  const handleCopyCurrentUrl = async () => {
+    if (typeof window === 'undefined' || !navigator?.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopiedUrl(true);
+      setTimeout(() => setCopiedUrl(false), 2500);
+    } catch {}
+  };
+
+  // Sử dụng Firebase Auth: tự động dùng signInWithRedirect trên iOS Safari hoặc khi bị chặn popup
   const handleGoogleSignIn = async () => {
     setIsLoading(true);
+    setIsRedirecting(false);
     setErrorMsg(null);
     setIsPopupBlocked(false);
     setIsOriginMismatch(false);
 
     try {
       const fbUser = await loginWithGoogle();
-      if (fbUser && fbUser.email) {
+      if (!fbUser) {
+        // Đã kích hoạt chuyển hướng signInWithRedirect sang trang đăng nhập Google
+        setIsRedirecting(true);
+        return;
+      }
+      if (fbUser.email) {
         const profile = await syncUserProfile(fbUser);
         onSuccessLogin(profile);
         onClose();
@@ -83,7 +105,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       if (code === 'auth/popup-blocked') {
         setIsPopupBlocked(true);
-        setErrorMsg('Trình duyệt đang chặn cửa sổ bật lên (Popup) của Google.');
+        setErrorMsg('Trình duyệt trên thiết bị đang chặn cửa sổ bật lên (Popup) của Google.');
         setIsLoading(false);
         return;
       }
@@ -111,7 +133,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <X className="w-5 h-5" />
         </button>
 
-        <div className="p-7 sm:p-8 space-y-6 flex flex-col items-center text-center">
+        <div className="p-6 sm:p-8 space-y-5 flex flex-col items-center text-center">
           {/* Logo & Tiêu đề */}
           <div className="flex flex-col items-center space-y-2">
             <DaoTamLogo size="md" />
@@ -122,6 +144,38 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               Xác thực an toàn bằng tài khoản Google của bạn
             </p>
           </div>
+
+          {/* Cảnh báo trình duyệt nhúng Messenger / Zalo / Facebook / TikTok */}
+          {isInAppBrowser && (
+            <div
+              role="alert"
+              className="w-full p-3.5 rounded-2xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/50 text-amber-950 dark:text-amber-100 text-xs text-left leading-relaxed space-y-2.5"
+            >
+              <div className="flex items-start gap-2.5">
+                <ExternalLink className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                <p className="font-semibold">
+                  Trình duyệt Messenger/Zalo chặn đăng nhập Google. Vui lòng bấm dấu 3 chấm (...) góc trên bên phải &rarr; chọn Mở bằng Safari hoặc Chrome.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyCurrentUrl}
+                className="w-full py-2 px-3 rounded-xl bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 dark:hover:bg-amber-900 text-amber-900 dark:text-amber-100 font-bold text-[11px] flex items-center justify-center gap-1.5 transition cursor-pointer"
+              >
+                {copiedUrl ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span>Đã sao chép link trang web</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Sao chép link để dán vào Safari / Chrome</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
 
           {/* Thông báo nếu có lỗi hoặc bị chặn popup / thiếu domain */}
           {errorMsg && (
@@ -142,7 +196,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <span className="font-medium">{errorMsg}</span>
                   {isPopupBlocked && !isOriginMismatch && (
                     <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
-                      Hướng dẫn: Nhìn lên thanh địa chỉ trình duyệt, chọn <b>&quot;Luôn cho phép cửa sổ bật lên&quot;</b> và bấm lại nút đăng nhập.
+                      Trên điện thoại: Hãy mở trang bằng <b>Safari</b> hoặc <b>Chrome</b>, hoặc cho phép cửa sổ bật lên trong cài đặt trình duyệt rồi bấm đăng nhập lại.
                     </p>
                   )}
                 </div>
@@ -176,13 +230,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <button
             type="button"
             onClick={handleGoogleSignIn}
-            disabled={isLoading}
+            disabled={isLoading || isRedirecting}
             className="w-full py-3.5 px-4 rounded-2xl bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 hover:border-rose-500 dark:hover:border-rose-500 shadow-md hover:shadow-lg transition-all duration-200 cursor-pointer flex items-center justify-center gap-3 text-sm font-bold text-slate-800 dark:text-slate-100 group disabled:opacity-60"
           >
-            {isLoading ? (
+            {isLoading || isRedirecting ? (
               <span className="flex items-center gap-2 text-rose-500">
                 <RotateCw className="w-4 h-4 animate-spin" />
-                Đang kết nối tài khoản Google...
+                {isRedirecting ? 'Đang chuyển sang trang đăng nhập Google...' : 'Đang kết nối tài khoản Google...'}
               </span>
             ) : (
               <>
@@ -206,3 +260,4 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     </div>
   );
 };
+
