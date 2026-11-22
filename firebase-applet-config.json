@@ -1,12 +1,12 @@
 {
-  "projectId": "tenacious-aspect-0v4kj",
-  "appId": "1:735623945258:web:4f4ec6685dd852ba693753",
-  "apiKey": "AIzaSyAR3hI9bQgAeJ2eGj5PChnQqrl8G_hXqZk",
-  "authDomain": "tenacious-aspect-0v4kj.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-otm59-500d4f74-8dc5-4006-bb6c-e40dd973b930",
-  "storageBucket": "tenacious-aspect-0v4kj.firebasestorage.app",
-  "messagingSenderId": "735623945258",
+  "projectId": "gen-lang-client-0217695270",
+  "appId": "1:633298820080:web:84e068eb255f114c7edb35",
+  "apiKey": "AIzaSyAhs_Z7CSuSZMt_Enacf0tiTrdyByT97SI",
+  "authDomain": "gen-lang-client-0217695270.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-otm60-521cbf65-7e54-4dd2-9915-654211042fe3",
+  "storageBucket": "gen-lang-client-0217695270.firebasestorage.app",
+  "messagingSenderId": "633298820080",
   "measurementId": "",
-  "oAuthClientId": "735623945258-8cgorsi1i4n2tbra3412urhihe3vqrt5.apps.googleusercontent.com",
+  "oAuthClientId": "633298820080-vrqeuj09d8m7npqgl2t37n9vf621i2re.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

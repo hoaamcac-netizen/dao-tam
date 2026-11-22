@@ -1,21 +1,12 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto';
-import dns from 'dns';
-import http from 'http';
-import https from 'https';
-import { execFile } from 'child_process';
+import { createServer as createViteServer } from 'vite';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+
 import fs from 'fs';
 import { initializeApp as initServerFirebase, getApps as getServerApps, getApp as getServerApp } from 'firebase/app';
 import { getFirestore as getServerFirestore, doc as serverDoc, getDoc as getServerDoc, setDoc as serverSetDoc, updateDoc as serverUpdateDoc, writeBatch as serverWriteBatch } from 'firebase/firestore';
-
-// Ưu tiên IPv4 cho kết nối mạng outbound trên VPS
-dns.setDefaultResultOrder('ipv4first');
-const ipv4HttpAgent = new http.Agent({ keepAlive: true, family: 4, maxSockets: 32 });
-const ipv4HttpsAgent = new https.Agent({ keepAlive: true, family: 4, maxSockets: 32 });
-http.globalAgent = ipv4HttpAgent;
-https.globalAgent = ipv4HttpsAgent;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,22 +17,6 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// CORS cho Cloudflare Pages (https://truyen-doc-va-nghe-dao-tam.pages.dev) & custom domain
-const ALLOWED_CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
-app.use('/api', (req: Request, res: Response, next: NextFunction) => {
-  const reqOrigin = req.headers.origin;
-  const allowOrigin =
-    ALLOWED_CORS_ORIGIN === '*' ? reqOrigin || '*' : ALLOWED_CORS_ORIGIN;
-  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Vary', 'Origin');
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  next();
-});
-
 // Khởi tạo Firestore trên Server kết nối trực tiếp đến database chính thức
 const appletConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'firebase-applet-config.json'), 'utf8'));
 const serverFirebaseApp = !getServerApps().length ? initServerFirebase(appletConfig, 'serverFirestoreApp') : getServerApp('serverFirestoreApp');
@@ -51,55 +26,8 @@ const serverDb = getServerFirestore(serverFirebaseApp, appletConfig.firestoreDat
 let cachedViVoices: any[] = [];
 let lastVoiceFetch = 0;
 
-const DEFAULT_VI_VOICES = [
-  {
-    id: 'vi-VN-HoaiMyNeural',
-    shortName: 'vi-VN-HoaiMyNeural',
-    name: 'Hoài My',
-    tag: 'Nữ • Edge Neural Tự Nhiên',
-    gender: 'female',
-    locale: 'vi-VN',
-    description: 'Giọng đọc nữ Microsoft Edge Neural tự nhiên, chuẩn bản ngữ tiếng Việt.',
-    sampleText: 'Chào bạn, mình là Hoài My. Đây là giọng đọc Edge TTS truyền cảm tự nhiên của Microsoft.',
-  },
-  {
-    id: 'vi-VN-NamMinhNeural',
-    shortName: 'vi-VN-NamMinhNeural',
-    name: 'Nam Minh',
-    tag: 'Nam • Edge Neural Tự Nhiên',
-    gender: 'male',
-    locale: 'vi-VN',
-    description: 'Giọng đọc nam Microsoft Edge Neural trầm ấm, đĩnh đạc, chuẩn bản ngữ tiếng Việt.',
-    sampleText: 'Tôi là Nam Minh. Mời quý độc giả cùng thưởng thức câu chuyện qua giọng đọc Edge TTS chân thực.',
-  },
-];
-
-function resolveEdgeTtsBinary(): string {
-  const configured = (process.env.EDGE_TTS_BIN || '').trim();
-  if (configured) return configured;
-
-  const candidates = [
-    '/usr/local/bin/edge-tts',
-    '/usr/bin/edge-tts',
-    '/root/.local/bin/edge-tts',
-  ];
-  if (process.env.HOME) {
-    candidates.push(path.join(process.env.HOME, '.local', 'bin', 'edge-tts'));
-  }
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    } catch {}
-  }
-  return 'edge-tts';
-}
-
-const EDGE_TTS_BIN = resolveEdgeTtsBinary();
-
 /**
- * Scan & retrieve verified Vietnamese voices from Python edge-tts CLI
+ * Scan & retrieve verified Vietnamese voices from Microsoft Edge TTS
  */
 async function scanVietnameseVoices() {
   const now = Date.now();
@@ -107,63 +35,75 @@ async function scanVietnameseVoices() {
     return cachedViVoices;
   }
 
+  const tts = new MsEdgeTTS({ connectionTimeoutMs: 10000 });
   try {
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        EDGE_TTS_BIN,
-        ['--list-voices'],
-        { timeout: 8000, maxBuffer: 1024 * 1024 },
-        (err, out) => {
-          if (err) return reject(err);
-          resolve(out || '');
-        }
-      );
-    });
+    const allVoices = await tts.getVoices();
+    const viList = allVoices.filter((v: any) => v.Locale && v.Locale.toLowerCase().startsWith('vi'));
+    
+    if (viList.length > 0) {
+      cachedViVoices = viList.map((v: any) => {
+        const isMale = v.Gender && v.Gender.toLowerCase() === 'male';
+        const isHoaiMy = v.ShortName.includes('HoaiMy') || v.FriendlyName.includes('HoaiMy');
+        const isNamMinh = v.ShortName.includes('NamMinh') || v.FriendlyName.includes('NamMinh');
 
-    const parsed: any[] = [];
-    for (const line of stdout.split(/\r?\n/)) {
-      const match = /^(vi-[A-Z]{2}-([A-Za-z0-9]+)Neural)\b/.exec(line.trim());
-      if (!match) continue;
-      const shortName = match[1];
-      const lowerLine = line.toLowerCase();
-      const isMale = lowerLine.includes('male') && !lowerLine.includes('female');
-      const isHoaiMy = shortName.includes('HoaiMy');
-      const isNamMinh = shortName.includes('NamMinh');
-      const displayName = isHoaiMy ? 'Hoài My' : isNamMinh ? 'Nam Minh' : match[2];
-      const tag = isMale ? 'Nam • Edge Neural Tự Nhiên' : 'Nữ • Edge Neural Tự Nhiên';
+        const displayName = isHoaiMy ? 'Hoài My' : isNamMinh ? 'Nam Minh' : (v.FriendlyName || v.ShortName);
+        const tag = isMale ? 'Nam • Edge Neural Tự Nhiên' : 'Nữ • Edge Neural Tự Nhiên';
 
-      parsed.push({
-        id: shortName,
-        shortName,
-        name: displayName,
-        tag,
-        gender: isMale ? 'male' : 'female',
-        locale: 'vi-VN',
-        description: `Giọng đọc ${isMale ? 'nam' : 'nữ'} Microsoft Edge Neural tự nhiên, chuẩn bản ngữ tiếng Việt.`,
-        sampleText: isMale
-          ? 'Tôi là Nam Minh. Mời quý độc giả cùng thưởng thức câu chuyện qua giọng đọc Edge TTS chân thực.'
-          : 'Chào bạn, mình là Hoài My. Đây là giọng đọc Edge TTS truyền cảm tự nhiên của Microsoft.',
+        return {
+          id: v.ShortName,
+          shortName: v.ShortName,
+          name: displayName,
+          tag,
+          gender: isMale ? 'male' : 'female',
+          locale: v.Locale,
+          description: `Giọng đọc ${isMale ? 'nam' : 'nữ'} Microsoft Edge Neural tự nhiên, chuẩn bản ngữ tiếng Việt.`,
+          sampleText: isMale
+            ? 'Tôi là Nam Minh. Mời quý độc giả cùng thưởng thức câu chuyện qua giọng đọc Edge TTS chân thực.'
+            : 'Chào bạn, mình là Hoài My. Đây là giọng đọc Edge TTS truyền cảm tự nhiên của Microsoft.',
+        };
       });
-    }
-
-    if (parsed.length > 0) {
-      cachedViVoices = parsed;
       lastVoiceFetch = now;
-      console.log(`[Edge TTS CLI] Scanned ${cachedViVoices.length} Vietnamese voices:`, cachedViVoices.map((v) => v.id));
+      console.log(`[Edge TTS] Scanned ${cachedViVoices.length} real Vietnamese voices:`, cachedViVoices.map(v => v.id));
       return cachedViVoices;
     }
   } catch (err) {
-    console.warn('[Edge TTS CLI] Voice list scan warning, using verified defaults:', (err as any)?.message || err);
+    console.warn('[Edge TTS] Voice list scan warning, using verified defaults:', err);
+  } finally {
+    try {
+      tts.close();
+    } catch {}
   }
 
-  cachedViVoices = DEFAULT_VI_VOICES;
+  // Fallback to the 2 real Edge TTS Vietnamese voices if scan network times out
+  cachedViVoices = [
+    {
+      id: 'vi-VN-HoaiMyNeural',
+      shortName: 'vi-VN-HoaiMyNeural',
+      name: 'Hoài My',
+      tag: 'Nữ • Edge Neural Tự Nhiên',
+      gender: 'female',
+      locale: 'vi-VN',
+      description: 'Giọng đọc nữ Microsoft Edge Neural tự nhiên, chuẩn bản ngữ tiếng Việt.',
+      sampleText: 'Chào bạn, mình là Hoài My. Đây là giọng đọc Edge TTS truyền cảm tự nhiên của Microsoft.',
+    },
+    {
+      id: 'vi-VN-NamMinhNeural',
+      shortName: 'vi-VN-NamMinhNeural',
+      name: 'Nam Minh',
+      tag: 'Nam • Edge Neural Tự Nhiên',
+      gender: 'male',
+      locale: 'vi-VN',
+      description: 'Giọng đọc nam Microsoft Edge Neural trầm ấm, đĩnh đạc, chuẩn bản ngữ tiếng Việt.',
+      sampleText: 'Tôi là Nam Minh. Mời quý độc giả cùng thưởng thức câu chuyện qua giọng đọc Edge TTS chân thực.',
+    },
+  ];
   lastVoiceFetch = now;
   return cachedViVoices;
 }
 
 /**
  * GET /api/tts/voices
- * Returns verified list of Vietnamese voices from Microsoft Edge TTS
+ * Returns actual scanned list of Vietnamese voices from Edge TTS
  */
 app.get('/api/tts/voices', async (_req: Request, res: Response) => {
   try {
@@ -175,163 +115,29 @@ app.get('/api/tts/voices', async (_req: Request, res: Response) => {
 });
 
 // =========================================================================
-// TỐI ƯU EDGE TTS PYTHON CLI CHO CLOUDFLY VPS (1 vCPU, 1GB RAM, 20GB SSD)
-// 1. RAM LRU Cache 80 đoạn hot (~8MB RAM) + SSD Disk Cache (tối đa ~3GB trên 20GB SSD)
-// 2. Gọi trực tiếp CLI `edge-tts` (Python) qua execFile -> /tmp/*.mp3, chạy tối đa 3 luồng song song
-// 3. Chỉ dùng giọng thật Microsoft (Nam Minh / Hoài My), không fallback sang giọng Google, retry tối đa 2 lần
+// TỐI ƯU EDGE TTS CHO RENDER FREE (0.1 CPU, 512MB RAM)
+// 1. LRU Cache tối đa 40 đoạn để không tràn 512MB RAM
+// 2. Hàng đợi giới hạn tối đa 5 kết nối MsEdgeTTS chạy song song
+// 3. Sanitize văn bản chống hỏng SSML + Timeout 20s + Retry tối đa 2 lần (nghỉ 500ms)
 // =========================================================================
-const MAX_AUDIO_CACHE_ITEMS = 80;
-const MAX_CONCURRENT_TTS = Math.max(1, Math.min(3, Number(process.env.TTS_MAX_CONCURRENCY) || 3));
-const TTS_SYNTHESIS_TIMEOUT_MS = 15000;
-const TTS_MAX_RETRIES = 2;
-const TTS_RETRY_DELAY_MS = 250;
-const TTS_TMP_DIR = process.env.TTS_TMP_DIR || '/tmp';
-const TTS_DISK_CACHE_DIR =
-  process.env.TTS_DISK_CACHE_DIR || path.resolve(__dirname, '.tts-cache');
-const MAX_DISK_CACHE_BYTES =
-  Math.max(128, Number(process.env.TTS_DISK_CACHE_MAX_MB) || 3072) * 1024 * 1024;
-
-let diskCacheReady = false;
-let diskCacheWriteCounter = 0;
-let isPruningDiskCache = false;
-let estimatedDiskFiles = 0;
-let estimatedDiskBytes = 0;
-
-function ensureDiskCacheDir() {
-  if (diskCacheReady) return;
-  try {
-    fs.mkdirSync(TTS_DISK_CACHE_DIR, { recursive: true });
-    diskCacheReady = true;
-  } catch (err) {
-    console.warn('[TTS DiskCache] Không thể tạo thư mục cache:', err);
-  }
-}
-
-function getDiskCachePath(cacheKey: string): string {
-  const hash = crypto.createHash('sha256').update(cacheKey).digest('hex');
-  return path.join(TTS_DISK_CACHE_DIR, `${hash}.mp3`);
-}
-
-async function readDiskCache(cacheKey: string): Promise<Buffer | null> {
-  if (!diskCacheReady) return null;
-  const filePath = getDiskCachePath(cacheKey);
-  try {
-    const buf = await fs.promises.readFile(filePath);
-    if (buf && buf.length > 100) {
-      // Cập nhật mtime nhẹ để giữ file hot lâu hơn khi dọn cache LRU trên SSD
-      const now = new Date();
-      fs.promises.utimes(filePath, now, now).catch(() => {});
-      return buf;
-    }
-  } catch {}
-  return null;
-}
-
-async function pruneDiskCacheIfNeeded() {
-  if (!diskCacheReady || isPruningDiskCache) return;
-  isPruningDiskCache = true;
-  try {
-    const entries = await fs.promises.readdir(TTS_DISK_CACHE_DIR, { withFileTypes: true });
-    const files: Array<{ filePath: string; size: number; mtimeMs: number }> = [];
-    let totalBytes = 0;
-
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.mp3')) continue;
-      const filePath = path.join(TTS_DISK_CACHE_DIR, entry.name);
-      try {
-        const st = await fs.promises.stat(filePath);
-        totalBytes += st.size;
-        files.push({ filePath, size: st.size, mtimeMs: st.mtimeMs });
-      } catch {}
-    }
-
-    estimatedDiskFiles = files.length;
-    estimatedDiskBytes = totalBytes;
-
-    if (totalBytes <= MAX_DISK_CACHE_BYTES) return;
-
-    const targetBytes = Math.floor(MAX_DISK_CACHE_BYTES * 0.85);
-    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const file of files) {
-      if (totalBytes <= targetBytes) break;
-      try {
-        await fs.promises.unlink(file.filePath);
-        totalBytes -= file.size;
-        estimatedDiskFiles = Math.max(0, estimatedDiskFiles - 1);
-      } catch {}
-    }
-    estimatedDiskBytes = totalBytes;
-  } catch {
-  } finally {
-    isPruningDiskCache = false;
-  }
-}
-
-function writeDiskCacheAsync(cacheKey: string, buf: Buffer) {
-  if (!diskCacheReady || !buf || buf.length < 100) return;
-  const filePath = getDiskCachePath(cacheKey);
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.promises
-    .writeFile(tmpPath, buf)
-    .then(() => fs.promises.rename(tmpPath, filePath))
-    .then(() => {
-      estimatedDiskFiles += 1;
-      estimatedDiskBytes += buf.length;
-      diskCacheWriteCounter += 1;
-      if (diskCacheWriteCounter % 50 === 0 || estimatedDiskBytes > MAX_DISK_CACHE_BYTES) {
-        pruneDiskCacheIfNeeded().catch(() => {});
-      }
-    })
-    .catch(() => {
-      fs.promises.unlink(tmpPath).catch(() => {});
-    });
-}
-
-// 4 valid MPEG-1 Layer 3 (128kbps, 44.1kHz, stereo) silent frames (~104ms, 1668 bytes)
-const SILENT_MP3_BUFFER = (() => {
-  const frameSize = 417;
-  const frameCount = 4;
-  const buf = Buffer.alloc(frameSize * frameCount, 0);
-  for (let i = 0; i < frameCount; i++) {
-    const offset = i * frameSize;
-    buf[offset] = 0xff;
-    buf[offset + 1] = 0xfb;
-    buf[offset + 2] = 0x90;
-    buf[offset + 3] = 0x00;
-  }
-  return buf;
-})();
+const MAX_AUDIO_CACHE_ITEMS = 40;
+const MAX_CONCURRENT_TTS = 5;
+const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
+const TTS_BACKEND_MAX_RETRIES = 2;
+const TTS_BACKEND_RETRY_DELAY_MS = 500;
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
   return rawText
-    // Loại bỏ các ký tự điều khiển ẩn, zero-width, BOM, ký tự lỗi Unicode
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
-    // Chuyển dấu xuống dòng chưa có dấu kết câu thành dấu chấm để giữ nhịp ngắt nghỉ Việt Nam
-    .replace(/([^\s.,?!:;…])\s*\r?\n+/g, '$1. ')
-    .replace(/[\r\n\t]+/g, ' ')
-    // Giải mã HTML entities cơ bản
+    .normalize('NFC')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/?(?:p|div|span|br|hr|b|i|u|s|em|strong|small|sub|sup|h[1-6]|a|img|ul|ol|li|table|tr|td|th|thead|tbody|blockquote|pre|code|font|center|section|article|header|footer|aside|main|nav)\b(?:\s[^>]*)?>/gi, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, ' và ')
-    .replace(/&/g, ' và ')
-    .replace(/&lt;|&gt;/gi, ' ')
-    .replace(/&quot;|&#39;|&apos;/gi, ' ')
-    // Chuẩn hóa ba chấm Unicode thành ...
-    .replace(/…+/g, '...')
-    .replace(/[.]{4,}/g, '...')
-    // Chuyển gạch ngang nối giữa câu thành dấu phẩy nhẹ cho giọng đọc tự nhiên
-    .replace(/\s[-–—]+\s/g, ', ')
-    // Giữ nguyên toàn bộ chữ cái Unicode (\p{L}), chữ số (\p{N}), khoảng trắng và dấu câu ngắt nghỉ (. , ? ! : ;)
-    // Thay thế mọi ký tự/ngoặc/emoji lạ (【】《》「」『』—~*#_...) bằng khoảng trắng
+    .replace(/&lt;|&gt;|&quot;|&#39;|&apos;/gi, ' ')
     .replace(/[^\p{L}\p{N}\s.,?!:;]/gu, ' ')
-    // Chuẩn hóa khoảng trắng quanh dấu câu Việt Nam
-    .replace(/\s+([.,?!:;])/g, '$1')
-    .replace(/([,;?!:])(?=[\p{L}\p{N}])/gu, '$1 ')
-    .replace(/(\.{2,})(?=[\p{L}\p{N}])/gu, '$1 ')
-    .replace(/([\p{Ll}])\.([\p{Lu}])/gu, '$1. $2')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 3000);
+    .trim();
 }
 
 function sleepWithAbortServer(ms: number, signal?: AbortSignal): Promise<void> {
@@ -349,6 +155,24 @@ function sleepWithAbortServer(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function isRetryableEdgeTtsError(err: unknown): boolean {
+  const msg = String((err as any)?.message || err || '').toLowerCase();
+  return (
+    msg.includes('stream closed') ||
+    msg.includes('no turn.end') ||
+    msg.includes('turn.end') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('quá thời gian') ||
+    msg.includes('đóng sớm') ||
+    msg.includes('websocket') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('socket') ||
+    msg.includes('không nhận được dữ liệu âm thanh')
+  );
 }
 
 interface InFlightTtsEntry {
@@ -402,127 +226,187 @@ function setLruAudioCache(cacheKey: string, fullBuffer: Buffer) {
   audioCache.set(cacheKey, fullBuffer);
 }
 
-function normalizeEdgeTtsRate(_rawRate?: string): string {
-  // Frontend tự điều chỉnh tốc độ phát qua HTMLAudioElement.playbackRate, luôn khóa +0% ở CLI để an toàn & tối đa hit cache
-  return '+0%';
-}
-
-async function runPythonEdgeTtsOnce(
+async function runEdgeTtsSynthesisOnce(
   cleanText: string,
   voiceCode: string,
-  _rate: string,
   abortSignal: AbortSignal
 ): Promise<Buffer> {
   if (abortSignal.aborted) {
     throw new Error('Client aborted TTS request');
   }
 
-  if (!/[\p{L}\p{N}]/u.test(cleanText)) {
-    return SILENT_MP3_BUFFER;
-  }
+  // Luôn khởi tạo một instance MsEdgeTTS mới cho mỗi lượt tổng hợp (tránh dùng lại WebSocket cũ)
+  const tts = new MsEdgeTTS({
+    connectionTimeoutMs: 10000,
+    synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+  });
 
-  const uniqueId = `${process.pid}_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-  const tempTxtPath = path.join(TTS_TMP_DIR, `tts_in_${uniqueId}.txt`);
-  const tmpFilePath = path.join(TTS_TMP_DIR, `tts_out_${uniqueId}.mp3`);
+  let audioStream: any = null;
+  let metadataStream: any = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let isCleanedUp = false;
 
-  const args = [
-    '--voice',
-    voiceCode,
-    '--rate=+0%',
-    '--file',
-    tempTxtPath,
-    '--write-media',
-    tmpFilePath,
-  ];
-
-  try {
-    await fs.promises.writeFile(tempTxtPath, cleanText, 'utf8');
-
-    await new Promise<void>((resolve, reject) => {
-      execFile(
-        EDGE_TTS_BIN,
-        args,
-        {
-          timeout: TTS_SYNTHESIS_TIMEOUT_MS,
-          maxBuffer: 1024 * 1024,
-          signal: abortSignal,
-        },
-        (err, _stdout, stderr) => {
-          if (err) {
-            if (abortSignal.aborted || (err as any)?.name === 'AbortError') {
-              return reject(new Error('Client aborted TTS request'));
-            }
-            const stderrText = String(stderr || '').trim();
-            const isTimeout = Boolean((err as any)?.killed) && String((err as any)?.signal || '') === 'SIGTERM';
-            const detail = isTimeout
-              ? `Quá thời gian ${Math.round(TTS_SYNTHESIS_TIMEOUT_MS / 1000)}s khi chạy edge-tts CLI`
-              : stderrText || err.message || 'edge-tts CLI exited with error';
-            return reject(new Error(detail));
-          }
-          resolve();
+  const cleanup = () => {
+    if (isCleanedUp) return;
+    isCleanedUp = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (audioStream) {
+      try {
+        audioStream.removeAllListeners();
+        if (typeof audioStream.destroy === 'function') {
+          audioStream.destroy();
         }
-      );
-    });
+      } catch {}
+      audioStream = null;
+    }
+    if (metadataStream) {
+      try {
+        metadataStream.removeAllListeners();
+        if (typeof metadataStream.destroy === 'function') {
+          metadataStream.destroy();
+        }
+      } catch {}
+      metadataStream = null;
+    }
+    try {
+      tts.close();
+    } catch {}
+  };
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    let settled = false;
+    const chunks: Buffer[] = [];
+
+    const finishWithError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      abortSignal.removeEventListener('abort', onAbort);
+      cleanup();
+      reject(err);
+    };
+
+    const finishWithSuccess = (buf: Buffer) => {
+      if (settled) return;
+      settled = true;
+      abortSignal.removeEventListener('abort', onAbort);
+      cleanup();
+      resolve(buf);
+    };
+
+    const onAbort = () => {
+      finishWithError(new Error('Client aborted TTS request'));
+    };
 
     if (abortSignal.aborted) {
-      throw new Error('Client aborted TTS request');
+      finishWithError(new Error('Client aborted TTS request'));
+      return;
     }
+    abortSignal.addEventListener('abort', onAbort, { once: true });
 
-    const audioBuffer = await fs.promises.readFile(tmpFilePath);
-    if (!audioBuffer || audioBuffer.length < 100) {
-      throw new Error('edge-tts CLI không trả về dữ liệu âm thanh hợp lệ');
-    }
-    return audioBuffer;
-  } finally {
-    await Promise.allSettled([
-      fs.promises.unlink(tempTxtPath).catch(() => {}),
-      fs.promises.unlink(tmpFilePath).catch(() => {}),
-    ]);
-  }
+    timer = setTimeout(() => {
+      finishWithError(new Error('Quá thời gian 20s tổng hợp âm thanh từ Edge TTS'));
+    }, TTS_SYNTHESIS_TIMEOUT_MS);
+
+    tts
+      .setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)
+      .then(() => {
+        if (settled || abortSignal.aborted) {
+          finishWithError(new Error('Client aborted TTS request'));
+          return;
+        }
+
+        const streams = tts.toStream(cleanText);
+        audioStream = streams.audioStream;
+        metadataStream = streams.metadataStream;
+
+        if (metadataStream && typeof metadataStream.on === 'function') {
+          metadataStream.on('error', () => {});
+          metadataStream.resume?.();
+        }
+
+        audioStream.on('data', (chunk: Buffer) => {
+          if (!settled && chunk && chunk.length > 0) {
+            chunks.push(chunk);
+          }
+        });
+
+        audioStream.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          chunks.length = 0;
+          if (buf.length > 0) {
+            finishWithSuccess(buf);
+          } else {
+            finishWithError(new Error('Không nhận được dữ liệu âm thanh từ Edge TTS'));
+          }
+        });
+
+        audioStream.on('close', () => {
+          if (!settled) {
+            const buf = Buffer.concat(chunks);
+            chunks.length = 0;
+            if (buf.length > 0) {
+              finishWithSuccess(buf);
+            } else {
+              finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm'));
+            }
+          }
+        });
+
+        audioStream.on('error', (streamErr: any) => {
+          chunks.length = 0;
+          finishWithError(
+            streamErr instanceof Error ? streamErr : new Error(String(streamErr))
+          );
+        });
+      })
+      .catch((initErr: any) => {
+        finishWithError(initErr instanceof Error ? initErr : new Error(String(initErr)));
+      });
+  });
 }
 
-async function runPythonEdgeTtsWithRetry(
+async function runEdgeTtsSynthesisWithRetry(
   cleanText: string,
   voiceCode: string,
-  rate: string,
   abortSignal: AbortSignal
 ): Promise<Buffer> {
   let lastError: unknown;
 
-  for (let attempt = 0; attempt <= TTS_MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
     if (abortSignal.aborted) {
       throw new Error('Client aborted TTS request');
     }
 
     if (attempt > 0) {
-      await sleepWithAbortServer(TTS_RETRY_DELAY_MS, abortSignal);
+      await sleepWithAbortServer(TTS_BACKEND_RETRY_DELAY_MS, abortSignal);
     }
 
     try {
-      return await runPythonEdgeTtsOnce(cleanText, voiceCode, rate, abortSignal);
+      return await runEdgeTtsSynthesisOnce(cleanText, voiceCode, abortSignal);
     } catch (err) {
       lastError = err;
       if (abortSignal.aborted) {
         throw err;
       }
-      if (attempt < TTS_MAX_RETRIES) {
+      if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
         console.warn(
-          `[Edge TTS CLI] Thử lại lần ${attempt + 1}/${TTS_MAX_RETRIES} (${voiceCode}): ${(err as any)?.message || err}`
+          `[Edge TTS] Thử lại lần ${attempt + 1}/${TTS_BACKEND_MAX_RETRIES} (${voiceCode}): ${(err as any)?.message || err}`
         );
         continue;
       }
+      throw err;
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(String(lastError || 'Edge TTS CLI synthesis failed'));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Edge TTS synthesis failed'));
 }
 
 async function synthesizeEdgeTtsBuffer(
   cleanText: string,
   voiceCode: string,
-  rate: string,
   cacheKey: string,
   clientSignal?: AbortSignal
 ): Promise<Buffer> {
@@ -532,13 +416,6 @@ async function synthesizeEdgeTtsBuffer(
     audioCache.delete(cacheKey);
     audioCache.set(cacheKey, cached);
     return cached;
-  }
-
-  // Kiểm tra SSD Disk Cache trước khi vào hàng đợi CLI (phục vụ < 5ms, 0 tải CPU)
-  const diskCached = await readDiskCache(cacheKey);
-  if (diskCached) {
-    setLruAudioCache(cacheKey, diskCached);
-    return diskCached;
   }
 
   if (clientSignal?.aborted) {
@@ -599,14 +476,12 @@ async function synthesizeEdgeTtsBuffer(
     },
     run: async () => {
       try {
-        const fullBuffer = await runPythonEdgeTtsWithRetry(
+        const fullBuffer = await runEdgeTtsSynthesisWithRetry(
           cleanText,
           voiceCode,
-          rate,
           entryAbortController.signal
         );
         setLruAudioCache(cacheKey, fullBuffer);
-        writeDiskCacheAsync(cacheKey, fullBuffer);
         resolveEntry(fullBuffer);
       } catch (err) {
         rejectEntry(err);
@@ -629,43 +504,35 @@ async function synthesizeEdgeTtsBuffer(
 }
 
 /**
- * Handle Edge TTS Speech Synthesis with Python edge-tts CLI, LRU RAM/SSD cache & concurrency queue
+ * Handle Edge TTS Speech Synthesis with LRU cache, concurrency queue & clean stream disposal
  */
 async function handleTtsSynthesis(
   text: string,
   requestedVoice: string | undefined,
-  requestedRate: string | undefined,
   res: Response
 ) {
-  if (!text || !text.trim()) {
-    return res.status(400).json({ error: 'Nội dung văn bản (text) không được để trống' });
-  }
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Normalize voice code: chỉ sử dụng giọng thật của Microsoft Edge Neural
-  let voiceCode = 'vi-VN-HoaiMyNeural';
+  // Normalize voice code: must be a real Edge TTS voice code (default: vi-VN-NamMinhNeural)
+  let voiceCode = 'vi-VN-NamMinhNeural';
   if (requestedVoice) {
     const lower = requestedVoice.toLowerCase();
-    if (lower.includes('namminh') || lower === 'nam-minh') {
-      voiceCode = 'vi-VN-NamMinhNeural';
-    } else if (lower.includes('hoaimy') || lower === 'hoai-my') {
+    if (lower.includes('hoaimy') || lower === 'hoai-my') {
       voiceCode = 'vi-VN-HoaiMyNeural';
+    } else if (lower.includes('namminh') || lower === 'nam-minh') {
+      voiceCode = 'vi-VN-NamMinhNeural';
     } else if (requestedVoice.startsWith('vi-VN-')) {
       voiceCode = requestedVoice;
     }
   }
 
-  const safeRate = normalizeEdgeTtsRate(requestedRate);
-
-  // Làm sạch văn bản trước khi đưa vào edge-tts CLI
+  // Làm sạch văn bản trước khi đưa vào msedge-tts
   const cleanText = sanitizeTextForEdgeTts(text);
-  // Nếu sau khi lọc không chứa chữ cái hay chữ số nào (chỉ có dấu câu như ..., ---, ***),
-  // trả về ngay đoạn MP3 im lặng ngắn hợp lệ để frontend trượt qua mượt mà, không gọi edge-tts
   if (!cleanText || !/[\p{L}\p{N}]/u.test(cleanText)) {
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Length', SILENT_MP3_BUFFER.length);
-    res.setHeader('Cache-Control', 'public, max-age=2592000');
-    res.setHeader('X-TTS-Engine', 'silent-skip');
-    return res.end(SILENT_MP3_BUFFER);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.status(204).end();
   }
   const cacheKey = `${voiceCode}:::${cleanText}`;
 
@@ -681,7 +548,6 @@ async function handleTtsSynthesis(
     const fullBuffer = await synthesizeEdgeTtsBuffer(
       cleanText,
       voiceCode,
-      safeRate,
       cacheKey,
       clientAbortController.signal
     );
@@ -689,15 +555,14 @@ async function handleTtsSynthesis(
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', fullBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'public, max-age=2592000, stale-while-revalidate=604800');
-      res.setHeader('X-TTS-Engine', 'edge-tts-py');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
       res.end(fullBuffer);
     }
   } catch (err: any) {
     if (clientAbortController.signal.aborted) {
       return;
     }
-    console.error(`[Edge TTS CLI Error for voice ${voiceCode}]:`, err);
+    console.error(`[Edge TTS Error for voice ${voiceCode}]:`, err);
     if (!res.headersSent && !res.writableEnded) {
       const msg = String(err?.message || 'Unknown');
       const isTimeout = msg.includes('Quá thời gian') || msg.includes('timed out');
@@ -710,14 +575,20 @@ async function handleTtsSynthesis(
   }
 }
 
+app.options('/api/tts', (_req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  return res.status(200).end();
+});
+
 /**
  * GET /api/tts?text=...&voice=...
  */
 app.get('/api/tts', async (req: Request, res: Response) => {
   const text = (req.query.text as string) || '';
   const voice = (req.query.voice as string) || '';
-  const rate = (req.query.rate as string) || '';
-  await handleTtsSynthesis(text, voice, rate, res);
+  await handleTtsSynthesis(text, voice, res);
 });
 
 /**
@@ -726,8 +597,7 @@ app.get('/api/tts', async (req: Request, res: Response) => {
 app.get('/api/tts/stream', async (req: Request, res: Response) => {
   const text = (req.query.text as string) || '';
   const voice = (req.query.voice as string) || '';
-  const rate = (req.query.rate as string) || '';
-  await handleTtsSynthesis(text, voice, rate, res);
+  await handleTtsSynthesis(text, voice, res);
 });
 
 /**
@@ -736,25 +606,7 @@ app.get('/api/tts/stream', async (req: Request, res: Response) => {
 app.post('/api/tts', async (req: Request, res: Response) => {
   const text = req.body?.text || '';
   const voice = req.body?.voice || '';
-  const rate = req.body?.rate || '';
-  await handleTtsSynthesis(text, voice, rate, res);
-});
-
-/**
- * GET /api/tts/health
- */
-app.get('/api/tts/health', (_req: Request, res: Response) => {
-  res.json({
-    ok: true,
-    engine: 'edge-tts-py',
-    maxConcurrency: MAX_CONCURRENT_TTS,
-    ramCacheItems: audioCache.size,
-    diskCacheFiles: estimatedDiskFiles,
-    diskCacheMb: Number((estimatedDiskBytes / (1024 * 1024)).toFixed(1)),
-    activeWorkers: activeTtsWorkers,
-    queueLength: ttsWaitQueue.length,
-    uptimeSec: Math.round(process.uptime()),
-  });
+  await handleTtsSynthesis(text, voice, res);
 });
 
 // =========================================================================
@@ -1126,31 +978,24 @@ app.post('/api/batch-chapters', async (req: Request, res: Response) => {
 
 // Mount Vite or serve static build
 async function startServer() {
-  ensureDiskCacheDir();
-  pruneDiskCacheIfNeeded().catch(() => {});
-
   // Pre-scan voices on boot
   scanVietnameseVoices().catch(() => {});
 
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else if (process.env.TTS_ONLY_MODE !== 'true') {
-    const distDir = path.resolve(__dirname, 'dist');
-    if (fs.existsSync(path.join(distDir, 'index.html'))) {
-      app.use(express.static(distDir));
-      app.get('*', (_req: Request, res: Response) => {
-        res.sendFile(path.join(distDir, 'index.html'));
-      });
-    }
+  } else {
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Đạo Tâm Server] Running on http://0.0.0.0:${PORT} (SSD Cache: ${TTS_DISK_CACHE_DIR})`);
+    console.log(`[Đạo Tâm Server] Running on http://0.0.0.0:${PORT}`);
   });
 }
 

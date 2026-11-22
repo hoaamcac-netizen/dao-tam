@@ -1,8 +1,9 @@
 /**
  * backgroundAudio.ts
  * Hỗ trợ phát Audio đọc truyện kể cả khi người dùng TẮT MÀN HÌNH ĐIỆN THOẠI hoặc chuyển tab.
- * - Sử dụng HTML5 silent keep-alive audio element để kích hoạt Background Audio session trên iOS Safari và Android Chrome.
- * - Tích hợp MediaSession API hiển thị trình phát trên Màn hình khóa (Lockscreen Controls) và thanh thông báo điện thoại.
+ * - Tuyệt đối KHÔNG khởi tạo thêm bất kỳ thẻ new Audio() phụ nào để tuân thủ kiến trúc
+ *   tái sử dụng DUY NHẤT 1 thẻ <audio> cố định (bảo toàn playbackRate 2x & iOS/Android MediaSession).
+ * - Tích hợp đầy đủ MediaSession API (Metadata, Play/Pause/Next/Prev, PositionState) và WakeLock.
  */
 
 interface BackgroundMediaOptions {
@@ -17,191 +18,85 @@ interface BackgroundMediaOptions {
 }
 
 class BackgroundAudioManager {
-  private silentAudio: HTMLAudioElement | null = null;
   private audioCtx: AudioContext | null = null;
   private wakeLock: any = null;
-  private isInitialized = false;
+  private lastMetadataKey = '';
+  private handlersRegistered = false;
+  private callbacks: {
+    onPlay?: () => void;
+    onPause?: () => void;
+    onNext?: () => void;
+    onPrev?: () => void;
+  } = {};
 
-  private silentBlobUrl: string | null = null;
-
-  private createSilentWavBlobUrl(): string {
-    const sampleRate = 8000;
-    const durationSec = 0.5;
-    const numSamples = Math.floor(sampleRate * durationSec);
-    const buffer = new ArrayBuffer(44 + numSamples);
-    const view = new DataView(buffer);
-
-    const writeString = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) {
-        view.setUint8(offset + i, str.charCodeAt(i));
-      }
-    };
-
-    writeString(0, 'RIFF');
-    view.setUint32(4, 36 + numSamples, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true); // PCM chunk size
-    view.setUint16(20, 1, true); // PCM format
-    view.setUint16(22, 1, true); // Mono
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate, true); // Byte rate (8kHz * 1ch * 1byte)
-    view.setUint16(32, 1, true); // Block align
-    view.setUint16(34, 8, true); // Bits per sample
-    writeString(36, 'data');
-    view.setUint32(40, numSamples, true);
-
-    // 8-bit unsigned PCM silence = 0x80
-    const bytes = new Uint8Array(buffer, 44);
-    bytes.fill(0x80);
-
-    const blob = new Blob([buffer], { type: 'audio/wav' });
-    return URL.createObjectURL(blob);
-  }
-
-  private initSilentAudio() {
-    if (this.isInitialized && this.silentAudio) return;
-
+  private ensureAudioContextAlive() {
     try {
-      if (!this.silentBlobUrl) {
-        this.silentBlobUrl = this.createSilentWavBlobUrl();
-      }
-      this.silentAudio = new Audio(this.silentBlobUrl);
-      this.silentAudio.loop = true;
-      this.silentAudio.volume = 0.01; // Giữ audio session với hệ thống mobile mà không gây nhiễu
-      this.silentAudio.setAttribute('playsinline', 'true');
-      this.isInitialized = true;
-    } catch (e) {
-      console.warn('Could not initialize background keep-alive audio:', e);
-    }
-
-    try {
-      // Web Audio API Keep-Alive: Kích hoạt AudioContext để hệ điều hành điện thoại
-      // duy trì kênh âm thanh phần cứng chạy ngầm khi màn hình tắt
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioContextClass && !this.audioCtx) {
         this.audioCtx = new AudioContextClass();
       }
-    } catch (e) {
-      // Silent catch
-    }
-  }
-
-  /**
-   * Lấy Blob URL WAV im lặng để mở khóa đồng bộ thẻ <audio> chính trong tích tắc bấm nút Play
-   */
-  public getSilentWavUrl(): string {
-    if (!this.silentBlobUrl) {
-      this.silentBlobUrl = this.createSilentWavBlobUrl();
-    }
-    return this.silentBlobUrl;
-  }
-
-  /**
-   * Kích hoạt đồng bộ AudioContext & Silent Keep-Alive Audio ngay trong event click của người dùng
-   * (bắt buộc trên iOS Safari / Android Chrome để không bị mất session khi tắt màn hình)
-   */
-  public unlockFromUserGesture() {
-    this.initSilentAudio();
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      try {
+      if (this.audioCtx && this.audioCtx.state === 'suspended') {
         this.audioCtx.resume().catch(() => {});
-      } catch {}
+      }
+    } catch {}
+  }
+
+  private registerMediaSessionHandlersOnce() {
+    if (this.handlersRegistered || typeof navigator === 'undefined' || !('mediaSession' in navigator)) {
+      return;
     }
-    if (this.silentAudio && this.silentAudio.paused) {
-      try {
-        const playPromise = this.silentAudio.play();
-        if (playPromise && typeof playPromise.catch === 'function') {
-          playPromise.catch(() => {});
-        }
-      } catch {}
+    try {
+      navigator.mediaSession.setActionHandler('play', () => {
+        this.callbacks.onPlay?.();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        this.callbacks.onPause?.();
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        this.callbacks.onNext?.();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        this.callbacks.onPrev?.();
+      });
+      navigator.mediaSession.setActionHandler('seekforward', () => {
+        this.callbacks.onNext?.();
+      });
+      navigator.mediaSession.setActionHandler('seekbackward', () => {
+        this.callbacks.onPrev?.();
+      });
+      this.handlersRegistered = true;
+    } catch (e) {
+      console.warn('MediaSession action handler error:', e);
     }
   }
 
   /**
-   * Bắt đầu phiên phát âm thanh nền và đăng ký Lockscreen Controls
+   * Bắt đầu / cập nhật phiên phát âm thanh nền và Lockscreen Controls
    */
   public async startBackgroundPlayback(options: BackgroundMediaOptions) {
-    this.initSilentAudio();
+    this.ensureAudioContextAlive();
 
-    // 1. Kích hoạt AudioContext & Silent Audio để duy trì AudioContext/SpeechSynthesis khi tắt màn hình
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+    this.callbacks = {
+      onPlay: options.onPlay,
+      onPause: options.onPause,
+      onNext: options.onNext,
+      onPrev: options.onPrev,
+    };
+
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       try {
-        await this.audioCtx.resume();
-      } catch (e) {}
-    }
-
-    if (this.silentAudio && this.silentAudio.paused) {
-      try {
-        await this.silentAudio.play();
-      } catch (err) {
-        // Trình duyệt yêu cầu cử chỉ người dùng trước đó
-        console.warn('Silent audio play request caught:', err);
-      }
-    }
-
-    // 2. Thiết lập MediaSession để hiển thị trên màn hình khóa điện thoại
-    if ('mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: options.title,
-          artist: options.artist,
-          album: options.album || 'Đạo Tâm • Audio',
-          artwork: options.coverImage
-            ? [
-                { src: options.coverImage, sizes: '96x96', type: 'image/jpeg' },
-                { src: options.coverImage, sizes: '256x256', type: 'image/jpeg' },
-                { src: options.coverImage, sizes: '512x512', type: 'image/jpeg' },
-              ]
-            : [],
-        });
-
+        this.updateMetadata(options.title, options.artist, options.coverImage, options.album);
         navigator.mediaSession.playbackState = 'playing';
-
-        if (options.onPlay) {
-          navigator.mediaSession.setActionHandler('play', () => {
-            options.onPlay?.();
-          });
-        }
-
-        if (options.onPause) {
-          navigator.mediaSession.setActionHandler('pause', () => {
-            options.onPause?.();
-          });
-        }
-
-        if (options.onNext) {
-          navigator.mediaSession.setActionHandler('nexttrack', () => {
-            options.onNext?.();
-          });
-        }
-
-        if (options.onPrev) {
-          navigator.mediaSession.setActionHandler('previoustrack', () => {
-            options.onPrev?.();
-          });
-        }
-
-        // Tua nhanh / tua lại trên màn hình khóa
-        navigator.mediaSession.setActionHandler('seekforward', () => {
-          options.onNext?.();
-        });
-
-        navigator.mediaSession.setActionHandler('seekbackward', () => {
-          options.onPrev?.();
-        });
+        this.registerMediaSessionHandlersOnce();
       } catch (e) {
         console.warn('MediaSession error:', e);
       }
     }
 
-    // 3. Yêu cầu WakeLock nếu chưa có
-    if (!this.wakeLock && 'wakeLock' in navigator && (navigator as any).wakeLock?.request) {
+    if (!this.wakeLock && typeof navigator !== 'undefined' && 'wakeLock' in navigator && (navigator as any).wakeLock?.request) {
       try {
         this.wakeLock = await (navigator as any).wakeLock.request('screen');
-      } catch (e) {
-        // WakeLock có thể bị từ chối khi pin yếu hoặc không hỗ trợ
-      }
+      } catch {}
     }
   }
 
@@ -209,12 +104,10 @@ class BackgroundAudioManager {
    * Tạm dừng hoặc kết thúc phiên audio nền
    */
   public pauseBackgroundPlayback() {
-    if (this.silentAudio) {
-      this.silentAudio.pause();
-    }
-
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.playbackState = 'paused';
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = 'paused';
+      } catch {}
     }
 
     if (this.wakeLock) {
@@ -224,26 +117,47 @@ class BackgroundAudioManager {
   }
 
   /**
-   * Cập nhật thông tin bài hát / chương mới trên màn hình khóa mà không làm gián đoạn session
+   * Cập nhật thông tin truyện / chương trên màn hình khóa mà không làm gián đoạn session
    */
-  public updateMetadata(title: string, artist: string, coverImage?: string) {
-    if ('mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title,
-          artist,
-          album: 'Đạo Tâm • Audio',
-          artwork: coverImage
-            ? [
-                { src: coverImage, sizes: '96x96', type: 'image/jpeg' },
-                { src: coverImage, sizes: '256x256', type: 'image/jpeg' },
-                { src: coverImage, sizes: '512x512', type: 'image/jpeg' },
-              ]
-            : [],
-        });
-        navigator.mediaSession.playbackState = 'playing';
-      } catch {}
-    }
+  public updateMetadata(
+    title: string,
+    artist: string,
+    coverImage?: string,
+    album = 'Đạo Tâm • Audio'
+  ) {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const key = `${title}:::${artist}:::${coverImage || ''}:::${album}`;
+    if (this.lastMetadataKey === key) return;
+    this.lastMetadataKey = key;
+
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title,
+        artist,
+        album,
+        artwork: coverImage
+          ? [
+              { src: coverImage, sizes: '96x96', type: 'image/jpeg' },
+              { src: coverImage, sizes: '256x256', type: 'image/jpeg' },
+              { src: coverImage, sizes: '512x512', type: 'image/jpeg' },
+            ]
+          : [],
+      });
+    } catch {}
+  }
+
+  public updatePositionState(duration: number, position: number, playbackRate: number) {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession as any;
+    if (typeof ms.setPositionState !== 'function') return;
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position)) return;
+    try {
+      ms.setPositionState({
+        duration,
+        playbackRate: Math.max(0.5, Math.min(3.5, playbackRate || 1.0)),
+        position: Math.max(0, Math.min(duration, position)),
+      });
+    } catch {}
   }
 }
 

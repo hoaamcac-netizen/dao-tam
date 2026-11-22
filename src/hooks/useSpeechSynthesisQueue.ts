@@ -1,13 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import {
-  DEFAULT_CHUNK_MAX_LENGTH,
-  DEFAULT_CHUNK_MIN_LENGTH,
-  DEFAULT_FIRST_CHUNK_MAX_LENGTH,
-  DEFAULT_FIRST_CHUNK_MIN_LENGTH,
-  DEFAULT_HEAD_CHUNK_COUNT,
-  chunkChapterContent,
-  splitTextIntoSpeechChunks,
-} from '../utils/audioChunker';
+import { splitTextIntoSpeechChunks } from '../utils/audioChunker';
 import { getMatchingBrowserVoice } from '../utils/rulesAndVoices';
 
 /**
@@ -15,8 +7,6 @@ import { getMatchingBrowserVoice } from '../utils/rulesAndVoices';
  * Luôn giữ sẵn 5 câu (utterance) trong hàng đợi speechSynthesis để không bị khựng khi nghe tốc độ 2.0x - 3.0x.
  */
 export const BUFFER_SIZE = 5;
-const MAX_UTTERANCE_RETRIES = 3;
-const UTTERANCE_RETRY_DELAY_MS = 250;
 
 export interface UseSpeechSynthesisQueueOptions {
   text: string;
@@ -70,22 +60,10 @@ export function useSpeechSynthesisQueue({
 }: UseSpeechSynthesisQueueOptions): UseSpeechSynthesisQueueReturn {
   const isSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
 
-  const chunks = useMemo(() => {
-    if (maxChunkLength && maxChunkLength !== 180 && maxChunkLength < 250) {
-      return splitTextIntoSpeechChunks(text, maxChunkLength);
-    }
-    const maxLen = maxChunkLength && maxChunkLength !== 180
-      ? Math.max(250, maxChunkLength)
-      : DEFAULT_CHUNK_MAX_LENGTH;
-    return chunkChapterContent(
-      text,
-      DEFAULT_CHUNK_MIN_LENGTH,
-      maxLen,
-      DEFAULT_FIRST_CHUNK_MIN_LENGTH,
-      DEFAULT_FIRST_CHUNK_MAX_LENGTH,
-      DEFAULT_HEAD_CHUNK_COUNT
-    ).map((c) => c.text);
-  }, [text, maxChunkLength]);
+  const chunks = useMemo(
+    () => splitTextIntoSpeechChunks(text, maxChunkLength),
+    [text, maxChunkLength]
+  );
 
   const [currentChunkIndex, setCurrentChunkIndex] = useState<number>(0);
   const [bufferedCount, setBufferedCount] = useState<number>(0);
@@ -96,7 +74,6 @@ export function useSpeechSynthesisQueue({
 
   const chunksRef = useRef<string[]>(chunks);
   const currentChunkIndexRef = useRef<number>(0);
-  const expectedNextIndexRef = useRef<number>(0);
   const isPlayingRef = useRef<boolean>(false);
   const isPausedRef = useRef<boolean>(false);
   const isStoppedRef = useRef<boolean>(true);
@@ -105,9 +82,6 @@ export function useSpeechSynthesisQueue({
   // Giữ toàn bộ utterance đang nằm trong hàng đợi để tránh Chrome GC làm mất onstart/onend
   const utterancePoolRef = useRef<Map<number, SpeechSynthesisUtterance>>(new Map());
   const queuedIndicesRef = useRef<Set<number>>(new Set());
-  const settledIndicesRef = useRef<Set<number>>(new Set());
-  const retryCountsRef = useRef<Map<number, number>>(new Map());
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const voiceIdRef = useRef<string>(initialVoiceId);
   const playbackRateRef = useRef<number>(initialPlaybackRate);
@@ -136,15 +110,8 @@ export function useSpeechSynthesisQueue({
     setPlaybackRateState(initialPlaybackRate);
   }, [initialPlaybackRate]);
 
-  const clearRetryTimer = useCallback(() => {
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-  }, []);
-
   /**
-   * Đẩy (enqueue) một chunk cụ thể vào hàng đợi window.speechSynthesis theo đúng thứ tự chỉ mục (0 -> 1 -> 2...)
+   * Đẩy (enqueue) một chunk cụ thể vào hàng đợi window.speechSynthesis với đầy đủ Rate & Voice hiện tại
    */
   const enqueueChunk = useCallback((index: number, sessionId: number) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
@@ -152,7 +119,7 @@ export function useSpeechSynthesisQueue({
 
     const list = Array.isArray(chunksRef.current) ? chunksRef.current : [];
     if (index < 0 || index >= (list?.length || 0)) return;
-    if (queuedIndicesRef.current.has(index) || settledIndicesRef.current.has(index)) return;
+    if (queuedIndicesRef.current.has(index)) return;
 
     const chunkText = list[index];
     const utterance = new SpeechSynthesisUtterance(chunkText);
@@ -171,44 +138,35 @@ export function useSpeechSynthesisQueue({
     utterancePoolRef.current.set(index, utterance);
     setBufferedCount(utterancePoolRef.current.size);
 
-    // Cập nhật chính xác vị trí câu đang đọc khi utterance bắt đầu phát tiếng, khóa không nhảy ngược/nhảy cóc
+    // Cập nhật chính xác vị trí câu đang đọc khi utterance bắt đầu phát tiếng
     utterance.onstart = () => {
       if (sessionId !== queueSessionIdRef.current || isStoppedRef.current) return;
-      if (index < expectedNextIndexRef.current) return;
-      expectedNextIndexRef.current = index;
       currentChunkIndexRef.current = index;
       setCurrentChunkIndex(index);
       onChunkChangeRef.current?.(index, chunkText);
     };
 
     // NẠP ĐẠN NỐI TIẾP (Continuous Feed):
-    // Khi utterance thứ i kết thúc -> lập tức nạp chunk thứ i + BUFFER_SIZE vào hàng đợi theo đúng thứ tự
+    // Khi utterance thứ i kết thúc -> lập tức nạp chunk thứ i + BUFFER_SIZE vào hàng đợi
     utterance.onend = () => {
       if (sessionId !== queueSessionIdRef.current || isStoppedRef.current) return;
-      if (settledIndicesRef.current.has(index)) return;
-      settledIndicesRef.current.add(index);
-      retryCountsRef.current.delete(index);
 
       utterancePoolRef.current.delete(index);
       setBufferedCount(utterancePoolRef.current.size);
-      expectedNextIndexRef.current = Math.max(expectedNextIndexRef.current, index + 1);
 
       const nextBufferIndex = index + BUFFER_SIZE;
       if (nextBufferIndex < (list?.length || 0)) {
         enqueueChunk(nextBufferIndex, sessionId);
       }
 
-      // Chỉ hoàn thành khi đúng đoạn cuối cùng của chương phát xong
-      if (index === (list?.length || 0) - 1) {
+      // Kiểm tra nếu đã phát hết câu cuối cùng trong chương
+      if (index === (list?.length || 0) - 1 || utterancePoolRef.current.size === 0) {
         isStoppedRef.current = true;
         isPlayingRef.current = false;
         isPausedRef.current = false;
         queuedIndicesRef.current.clear();
-        settledIndicesRef.current.clear();
-        retryCountsRef.current.clear();
         setBufferedCount(0);
         currentChunkIndexRef.current = 0;
-        expectedNextIndexRef.current = 0;
         setCurrentChunkIndex(0);
         setIsPlaying(false);
         setIsPaused(false);
@@ -216,56 +174,38 @@ export function useSpeechSynthesisQueue({
       }
     };
 
-    // Xử lý lỗi: tự động thử lại nhanh tối đa 3 lần ngay tại đúng chunk bị lỗi, không bỏ qua đoạn oan
+    // Xử lý lỗi: bỏ qua chunk kẹt nhưng vẫn duy trì nạp chunk thứ i + BUFFER_SIZE
     utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
       if (sessionId !== queueSessionIdRef.current || isStoppedRef.current) return;
       if (event.error === 'interrupted' || event.error === 'canceled') return;
-      if (settledIndicesRef.current.has(index)) return;
 
-      const attempts = (retryCountsRef.current.get(index) || 0) + 1;
-      if (attempts <= MAX_UTTERANCE_RETRIES) {
-        retryCountsRef.current.set(index, attempts);
-        console.warn(`[SpeechQueue] Chunk #${index} gặp lỗi (${event.error}), thử lại lần ${attempts}/${MAX_UTTERANCE_RETRIES}.`);
-        const retrySessionId = queueSessionIdRef.current + 1;
-        queueSessionIdRef.current = retrySessionId;
-        utterancePoolRef.current.clear();
-        queuedIndicesRef.current.clear();
-        setBufferedCount(0);
-        window.speechSynthesis.cancel();
-
-        clearRetryTimer();
-        retryTimerRef.current = setTimeout(() => {
-          retryTimerRef.current = null;
-          if (retrySessionId !== queueSessionIdRef.current || isStoppedRef.current) return;
-          const retryEnd = Math.min(index + BUFFER_SIZE, list.length);
-          for (let idx = index; idx < retryEnd; idx++) {
-            enqueueChunk(idx, retrySessionId);
-          }
-        }, UTTERANCE_RETRY_DELAY_MS);
-        return;
-      }
-
-      console.warn(`[SpeechQueue] Chunk #${index} thất bại sau ${MAX_UTTERANCE_RETRIES} lần thử lại (${event.error}).`);
+      console.warn(`[SpeechQueue] Chunk #${index} gặp lỗi (${event.error}), tiếp tục nạp gối đầu.`);
       onChunkErrorRef.current?.(index, event.error || 'unknown');
 
-      // Dừng an toàn tại đúng đoạn hiện tại để không bị nhảy cóc mất chữ
-      queueSessionIdRef.current += 1;
-      isStoppedRef.current = true;
-      isPlayingRef.current = false;
-      isPausedRef.current = false;
-      utterancePoolRef.current.clear();
-      queuedIndicesRef.current.clear();
-      setBufferedCount(0);
-      window.speechSynthesis.cancel();
-      currentChunkIndexRef.current = index;
-      expectedNextIndexRef.current = index;
-      setCurrentChunkIndex(index);
-      setIsPlaying(false);
-      setIsPaused(false);
+      utterancePoolRef.current.delete(index);
+      setBufferedCount(utterancePoolRef.current.size);
+
+      const nextBufferIndex = index + BUFFER_SIZE;
+      if (nextBufferIndex < (list?.length || 0)) {
+        enqueueChunk(nextBufferIndex, sessionId);
+      }
+
+      if (index === (list?.length || 0) - 1 || utterancePoolRef.current.size === 0) {
+        isStoppedRef.current = true;
+        isPlayingRef.current = false;
+        isPausedRef.current = false;
+        queuedIndicesRef.current.clear();
+        setBufferedCount(0);
+        currentChunkIndexRef.current = 0;
+        setCurrentChunkIndex(0);
+        setIsPlaying(false);
+        setIsPaused(false);
+        onCompleteRef.current?.();
+      }
     };
 
     window.speechSynthesis.speak(utterance);
-  }, [clearRetryTimer]);
+  }, []);
 
   /**
    * Khởi động vòng lặp Sliding Window Buffer từ startIndex đến startIndex + BUFFER_SIZE - 1
@@ -274,7 +214,6 @@ export function useSpeechSynthesisQueue({
     (startIndex?: number) => {
       if (!isSupported || (chunksRef.current?.length || 0) === 0) return;
 
-      clearRetryTimer();
       const list = Array.isArray(chunksRef.current) ? chunksRef.current : [];
       const listLen = list?.length || 0;
       const targetIndex =
@@ -291,15 +230,12 @@ export function useSpeechSynthesisQueue({
 
       utterancePoolRef.current.clear();
       queuedIndicesRef.current.clear();
-      settledIndicesRef.current.clear();
-      retryCountsRef.current.clear();
       setBufferedCount(0);
 
       if (window.speechSynthesis.speaking || window.speechSynthesis.pending || window.speechSynthesis.paused) {
         window.speechSynthesis.cancel();
       }
 
-      expectedNextIndexRef.current = targetIndex;
       currentChunkIndexRef.current = targetIndex;
       setCurrentChunkIndex(targetIndex);
       setIsPaused(false);
@@ -311,7 +247,7 @@ export function useSpeechSynthesisQueue({
         enqueueChunk(idx, nextSessionId);
       }
     },
-    [clearRetryTimer, isSupported, enqueueChunk]
+    [isSupported, enqueueChunk]
   );
 
   /**
@@ -360,27 +296,23 @@ export function useSpeechSynthesisQueue({
    * Dừng hẳn: Xóa sạch Buffer Queue, gọi speechSynthesis.cancel() và reset currentChunkIndex về 0
    */
   const stop = useCallback(() => {
-    clearRetryTimer();
     queueSessionIdRef.current += 1;
     isStoppedRef.current = true;
     isPausedRef.current = false;
     isPlayingRef.current = false;
     utterancePoolRef.current.clear();
     queuedIndicesRef.current.clear();
-    settledIndicesRef.current.clear();
-    retryCountsRef.current.clear();
     setBufferedCount(0);
 
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
 
-    expectedNextIndexRef.current = 0;
     currentChunkIndexRef.current = 0;
     setCurrentChunkIndex(0);
     setIsPlaying(false);
     setIsPaused(false);
-  }, [clearRetryTimer]);
+  }, []);
 
   const seekToChunk = useCallback(
     (index: number) => {
@@ -479,18 +411,15 @@ export function useSpeechSynthesisQueue({
 
   useEffect(() => {
     return () => {
-      clearRetryTimer();
       queueSessionIdRef.current += 1;
       isStoppedRef.current = true;
       utterancePoolRef.current.clear();
       queuedIndicesRef.current.clear();
-      settledIndicesRef.current.clear();
-      retryCountsRef.current.clear();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
     };
-  }, [clearRetryTimer]);
+  }, []);
 
   const currentChunkText =
     currentChunkIndex >= 0 && currentChunkIndex < (chunks?.length || 0)

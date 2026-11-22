@@ -1,6 +1,6 @@
 import { Chapter, VoiceOption, Novel } from '../types';
 import { checkIsAdmin } from '../firebase/config';
-import { buildTtsEndpoint } from './ttsApi';
+import { getTtsEndpointUrl } from './audioChunker';
 
 /**
  * QUY TẮC THIẾT LẬP VIP TỰ ĐỘNG:
@@ -134,9 +134,17 @@ export function normalizeEdgeVoiceId(voiceId?: string): string {
 let dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
 
 export async function fetchAvailableEdgeVoices(): Promise<VoiceOption[]> {
+  const customTtsUrl = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
+  if (customTtsUrl) {
+    return dynamicEdgeVoices;
+  }
   try {
-    const res = await fetch(buildTtsEndpoint('/api/tts/voices'));
+    const res = await fetch('/api/tts/voices');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return dynamicEdgeVoices;
+    }
     const data = await res.json();
     if (data.success && Array.isArray(data.voices) && (data.voices?.length || 0) > 0) {
       dynamicEdgeVoices = (data.voices || []).map((v: any) => ({
@@ -168,8 +176,9 @@ export function getLoadedEdgeVoices(): VoiceOption[] {
  */
 export function getEdgeTtsAudioUrl(text: string, voiceId: string): string {
   const normalizedVoice = normalizeEdgeVoiceId(voiceId);
-  const endpoint = buildTtsEndpoint('/api/tts');
-  return `${endpoint}?text=${encodeURIComponent(text.trim())}&voice=${encodeURIComponent(normalizedVoice)}`;
+  const endpoint = getTtsEndpointUrl();
+  const sep = endpoint.includes('?') ? '&' : '?';
+  return `${endpoint}${sep}text=${encodeURIComponent(text.trim())}&voice=${encodeURIComponent(normalizedVoice)}`;
 }
 
 /**

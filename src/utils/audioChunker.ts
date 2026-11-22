@@ -3,10 +3,8 @@
  * - Làm sạch văn bản bằng Regex (loại bỏ HTML, URL, ký tự rác)
  * - Gộp câu thành các đoạn tối ưu 500 - 800 ký tự theo ranh giới dấu chấm/xuống dòng
  * - Fetch TTS với AbortController timeout 8 giây + Retry tối đa 3 lần
- * - Bộ nhớ đệm Blob URL giới hạn cứng tối đa 3 đoạn, tự động revokeObjectURL chống tràn RAM
+ * - Bộ nhớ đệm Blob URL giới hạn cứng tối đa 5 đoạn, tự động revokeObjectURL chống tràn RAM
  */
-
-import { buildTtsEndpoint } from './ttsApi';
 
 export interface AudioChunk {
   id: number;
@@ -17,17 +15,32 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 28000;
+export const TTS_FETCH_TIMEOUT_MS = 20000;
 export const TTS_MAX_RETRIES = 3;
-export const TTS_RETRY_DELAY_MS = 600;
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 130;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 240;
-export const DEFAULT_RAMP_CHUNK_MIN_LENGTH = 200;
-export const DEFAULT_RAMP_CHUNK_MAX_LENGTH = 320;
-export const DEFAULT_HEAD_CHUNK_COUNT = 1;
-export const DEFAULT_CHUNK_MIN_LENGTH = 280;
-export const DEFAULT_CHUNK_MAX_LENGTH = 380;
+export const TTS_RETRY_DELAY_MS = 2000;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 80;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 120;
+export const DEFAULT_CHUNK_MIN_LENGTH = 400;
+export const DEFAULT_CHUNK_MAX_LENGTH = 500;
 export const MAX_BLOB_CACHE_ENTRIES = 8;
+export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
+
+/**
+ * Lấy địa chỉ endpoint TTS từ biến môi trường VITE_TTS_API_URL.
+ * Hỗ trợ:
+ * - Origin/base URL (VD: https://my-tts.netlify.app -> https://my-tts.netlify.app/api/tts)
+ * - Full endpoint (VD: https://my-tts.netlify.app/api/tts hoặc /.netlify/functions/tts)
+ * - Mặc định fallback về /api/tts nếu chưa cấu hình
+ */
+export function getTtsEndpointUrl(): string {
+  const raw = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
+  if (!raw) return '/api/tts';
+  const clean = raw.replace(/\/+$/, '');
+  if (clean.endsWith('/api/tts') || clean.endsWith('/.netlify/functions/tts')) {
+    return clean;
+  }
+  return `${clean}/api/tts`;
+}
 
 function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
@@ -47,8 +60,8 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Fetch audio TTS qua AbortController giới hạn 28 giây + Retry tối đa 3 lần.
- * Hoàn toàn không đọc/ghi Firestore, chỉ giao tiếp Client <-> /api/tts.
+ * Fetch audio TTS qua AbortController giới hạn cứng 20 giây + Retry tối đa 3 lần (mỗi lần nghỉ 2s).
+ * Trả về null nếu server trả mã 204 (đoạn không chứa chữ cái/chữ số sau khi lọc) để trượt qua mượt mà.
  */
 export async function fetchTtsAudioBlobWithWatchdog(params: {
   text: string;
@@ -57,7 +70,7 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
   onRetryAttempt?: (attempt: number) => void;
   timeoutMs?: number;
   maxRetries?: number;
-}): Promise<Blob> {
+}): Promise<Blob | null> {
   const {
     text,
     voiceId,
@@ -68,10 +81,11 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
   } = params;
 
   const cleanText = cleanTextForTTS(text);
-  if (!cleanText) {
-    throw new Error('Empty audio chunk');
+  if (!cleanText || !/[\p{L}\p{N}]/u.test(cleanText)) {
+    return null;
   }
 
+  const endpointUrl = getTtsEndpointUrl();
   let lastError: unknown = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -95,34 +109,24 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
     }, timeoutMs);
 
     try {
-      const baseEndpoint = buildTtsEndpoint('/api/tts');
-      const getUrl = `${baseEndpoint}?voice=${encodeURIComponent(voiceId)}&text=${encodeURIComponent(cleanText)}`;
-      const useGetRequest = getUrl.length <= 2400;
+      const response = await fetch(endpointUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: cleanText,
+          voice: voiceId,
+        }),
+        signal: controller.signal,
+      });
 
-      const response = useGetRequest
-        ? await fetch(getUrl, {
-            method: 'GET',
-            signal: controller.signal,
-          })
-        : await fetch(baseEndpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              text: cleanText,
-              voice: voiceId,
-            }),
-            signal: controller.signal,
-          });
+      if (response.status === 204) {
+        return null;
+      }
 
       if (!response.ok) {
         throw new Error(`TTS API failed with status ${response.status}`);
-      }
-
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('text/html')) {
-        throw new Error('Máy chủ TTS chưa phản hồi đúng định dạng âm thanh (HTML thay vì MP3)');
       }
 
       const arrayBuffer = await response.arrayBuffer();
@@ -150,122 +154,60 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
 }
 
 /**
- * Làm sạch văn bản hiển thị sơ cấp (giữ dấu ngoặc thoại/dấu câu gốc để hiển thị đẹp trên màn hình đọc)
- */
-function cleanDisplayParagraph(raw: string): string {
-  if (!raw) return '';
-  return raw
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
-    .replace(/<\/?(?:p|div|span|br|hr|h[1-6]|strong|em|b|i|u|s|a|ul|ol|li|blockquote|pre|code|table|tr|td|th|thead|tbody|img|script|style|font|center|section|article|header|footer|nav|figure|figcaption)\b[^>]*>/gi, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;|&gt;/gi, ' ')
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Làm sạch văn bản tiếng Việt chuẩn trước khi đưa vào Microsoft Edge TTS (Nam Minh / Hoài My):
- * - Giữ toàn bộ chữ cái Unicode (\p{L}), chữ số (\p{N}), khoảng trắng và dấu câu ngắt nghỉ (. , ? ! : ;)
- * - Xử lý dấu gạch đầu dòng thoại, ngoặc đơn, dấu ba chấm và khoảng trắng sau dấu câu để ngắt nghỉ tự nhiên
+ * Làm sạch văn bản trước khi đưa vào Microsoft Edge TTS (Nam Minh / Hoài My):
+ * - Gỡ bỏ thẻ HTML, HTML entities, link URL, Markdown & ký tự đặc biệt rác
+ * - Chuẩn hóa khoảng trắng và dấu câu để giọng đọc mượt mà, không khựng
  */
 export function cleanTextForTTS(raw: string): string {
   if (!raw) return '';
   return raw
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFFD]/g, ' ')
-    .replace(/<\/?(?:p|div|span|br|hr|h[1-6]|strong|em|b|i|u|s|a|ul|ol|li|blockquote|pre|code|table|tr|td|th|thead|tbody|img|script|style|font|center|section|article|header|footer|nav|figure|figcaption)\b[^>]*>/gi, ' ')
-    .replace(/([^\s.,?!:;…])\s*\r?\n+/g, '$1. ')
-    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/?(?:p|div|span|br|hr|b|i|u|s|em|strong|small|sub|sup|h[1-6]|a|img|ul|ol|li|table|tr|td|th|thead|tbody|blockquote|pre|code|font|center|section|article|header|footer|aside|main|nav)\b(?:\s[^>]*)?>/gi, ' ')
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, ' và ')
-    .replace(/&quot;|&#39;|&apos;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
     .replace(/&lt;|&gt;/gi, ' ')
     .replace(/https?:\/\/\S+/gi, ' ')
     .replace(/&/g, ' và ')
-    // Gỡ gạch đầu dòng hội thoại đầu câu để giọng đọc không vấp
-    .replace(/^[-–—•*+]+\s*/u, '')
-    // Chuẩn hóa ba chấm & gạch nối giữa câu
-    .replace(/…+/g, '...')
+    .replace(/[“”„‟«»]/g, '"')
+    .replace(/[‘’‚‛]/g, "'")
+    .replace(/[*_~`#|\\<>^{}[\]•◆◇■□●○★☆※♥♡✿🌸⚔️💎]+/g, ' ')
     .replace(/[.]{4,}/g, '...')
-    .replace(/\s[-–—]+\s/g, ', ')
-    // Chuyển dấu ngoặc đơn/vuông chứa chú thích thành ngắt phẩy tự nhiên thay vì nuốt nhịp
-    .replace(/\(([^()]+)\)/g, ', $1, ')
-    // Giữ nguyên chữ cái Unicode, số, khoảng trắng và dấu câu ngắt nghỉ Việt Nam (. , ? ! : ;)
-    .replace(/[^\p{L}\p{N}\s.,?!:;]/gu, ' ')
-    // Chuẩn hóa khoảng trắng quanh dấu câu để Edge TTS nhận diện chính xác nhịp ngắt nghỉ
-    .replace(/\s+([.,?!:;])/g, '$1')
-    .replace(/([,;?!:])(?=[\p{L}\p{N}])/gu, '$1 ')
-    .replace(/(\.{2,})(?=[\p{L}\p{N}])/gu, '$1 ')
-    .replace(/([\p{Ll}])\.([\p{Lu}])/gu, '$1. $2')
-    .replace(/,\s*,+/g, ',')
+    .replace(/[!]{2,}/g, '!')
+    .replace(/[?]{2,}/g, '?')
+    .replace(/[-–—]{2,}/g, ', ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function ensureParagraphEndsWithPunctuation(speechLine: string): string {
-  const trimmed = speechLine.trim();
-  if (!trimmed) return '';
-  if (/[.?!:;]$/.test(trimmed)) return trimmed;
-  if (/,$/.test(trimmed)) return `${trimmed.slice(0, -1)}.`;
-  return `${trimmed}.`;
-}
-
-function splitVietnameseSentences(text: string): string[] {
-  const rawParts = text
-    .split(/(?<=[.?!;]["”'’)\]]*)\s+(?!\d+\.)/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  // Gộp tiền tố số thứ tự như "1." với câu liền sau để không tách thành chunk lẻ
-  const merged: string[] = [];
-  for (const part of rawParts) {
-    if (merged.length > 0 && /^\d{1,3}\.$/.test(merged[merged.length - 1])) {
-      merged[merged.length - 1] = `${merged[merged.length - 1]} ${part}`;
-    } else {
-      merged.push(part);
-    }
-  }
-  return merged;
-}
-
 /**
- * Thuật toán Chunking theo ranh giới câu tiếng Việt:
- * - Không bao giờ cắt ngang câu ở dấu phẩy trừ khi bản thân 1 câu đơn lẻ dài hơn giới hạn tối đa.
- * - Đoạn 0: 130 - 240 ký tự (giữ trọn câu đầu tiên tới 340 ký tự nếu cần) để khởi động nhanh nhưng vẫn đủ dài cho đoạn 1 tải kịp.
- * - Đoạn 1 (ramp-up): 200 - 320 ký tự.
- * - Các đoạn tiếp theo: 280 - 380 ký tự (vừa đọc mượt, vừa luôn nằm gọn trong GET URL cache của Cloudflare).
+ * Thuật toán Chunking tối ưu khởi động nhanh & tổng hợp Edge TTS ổn định ở tốc độ x2:
+ * - Đoạn đầu tiên (chunk 0): cắt ngắn 150 - 250 ký tự để máy chủ tạo giọng và phát tiếng ngay lập tức.
+ * - Các đoạn tiếp theo (chunk >= 1): gộp câu thành 250 - 350 ký tự theo ranh giới dấu câu / xuống dòng,
+ *   tuyệt đối không cắt ngang từ, vừa đọc mượt 8 - 10s ở tốc độ x2 vừa tránh ngắt kết nối WebSocket.
  */
 export function chunkChapterContent(
   content: string,
   idealMinLength: number = DEFAULT_CHUNK_MIN_LENGTH,
   idealMaxLength: number = DEFAULT_CHUNK_MAX_LENGTH,
   firstMinLength: number = DEFAULT_FIRST_CHUNK_MIN_LENGTH,
-  firstMaxLength: number = DEFAULT_FIRST_CHUNK_MAX_LENGTH,
-  headChunkCount: number = DEFAULT_HEAD_CHUNK_COUNT
+  firstMaxLength: number = DEFAULT_FIRST_CHUNK_MAX_LENGTH
 ): AudioChunk[] {
   if (!content || !content.trim()) return [];
 
-  const activeHeadChunkCount = Math.max(1, headChunkCount);
-  const nextMinLen = Math.max(150, idealMinLength);
+  const nextMinLen = Math.max(200, idealMinLength);
   const nextMaxLen = Math.max(nextMinLen + 50, idealMaxLength);
-  const headMinLen = Math.max(80, firstMinLength);
-  const headMaxLen = Math.max(headMinLen + 40, firstMaxLength);
-  const rampMinLen = Math.min(nextMinLen, Math.max(headMinLen + 40, DEFAULT_RAMP_CHUNK_MIN_LENGTH));
-  const rampMaxLen = Math.min(nextMaxLen, Math.max(rampMinLen + 60, DEFAULT_RAMP_CHUNK_MAX_LENGTH));
+  const headMinLen = Math.max(60, firstMinLength);
+  const headMaxLen = Math.max(headMinLen + 20, firstMaxLength);
 
-  const paragraphPairs = content
+  const rawParagraphs = content
     .split(/\r?\n+/)
-    .map((rawLine) => {
-      const displayLine = cleanDisplayParagraph(rawLine);
-      const speechLine = ensureParagraphEndsWithPunctuation(cleanTextForTTS(rawLine));
-      return { displayLine, speechLine };
-    })
-    .filter((p) => p.speechLine.length > 0 && /[\p{L}\p{N}]/u.test(p.speechLine));
+    .map((p) => cleanTextForTTS(p))
+    .filter((p) => p.length > 0 && /[\p{L}\p{N}]/u.test(p));
 
-  if (paragraphPairs.length === 0) return [];
+  if (rawParagraphs.length === 0) return [];
 
   const chunks: AudioChunk[] = [];
   let chunkIndex = 0;
@@ -277,13 +219,10 @@ export function chunkChapterContent(
   let accParaIndex = 0;
 
   const getActiveLimits = () => {
-    if (chunks.length < activeHeadChunkCount) {
-      return { minLen: headMinLen, maxLen: headMaxLen, singleSentenceMax: Math.max(headMaxLen, 340) };
+    if (chunks.length === 0) {
+      return { minLen: headMinLen, maxLen: headMaxLen };
     }
-    if (chunks.length === activeHeadChunkCount) {
-      return { minLen: rampMinLen, maxLen: rampMaxLen, singleSentenceMax: Math.max(rampMaxLen, 360) };
-    }
-    return { minLen: nextMinLen, maxLen: nextMaxLen, singleSentenceMax: nextMaxLen };
+    return { minLen: nextMinLen, maxLen: nextMaxLen };
   };
 
   const pushChunk = (textVal: string, rawVal: string, startOffset: number, pIdx: number) => {
@@ -309,13 +248,13 @@ export function chunkChapterContent(
     }
   };
 
-  const appendSubUnit = (unit: string, rawUnit: string, rawSep: string, pIndex: number) => {
+  const appendSubUnit = (unit: string, rawSep: string, pIndex: number) => {
     const { minLen, maxLen } = getActiveLimits();
     if (!accumulator) {
       accParaIndex = pIndex;
       accStartOffset = runningCharOffset;
       accumulator = unit;
-      rawAccumulator = rawUnit;
+      rawAccumulator = unit;
       if (accumulator.length >= minLen) {
         flushAccumulator();
       }
@@ -324,7 +263,7 @@ export function chunkChapterContent(
 
     if (accumulator.length + 1 + unit.length <= maxLen) {
       accumulator = `${accumulator} ${unit}`;
-      rawAccumulator = `${rawAccumulator}${rawSep}${rawUnit}`;
+      rawAccumulator = `${rawAccumulator}${rawSep}${unit}`;
       if (accumulator.length >= minLen) {
         flushAccumulator();
       }
@@ -335,33 +274,39 @@ export function chunkChapterContent(
     accParaIndex = pIndex;
     accStartOffset = runningCharOffset;
     accumulator = unit;
-    rawAccumulator = rawUnit;
+    rawAccumulator = unit;
     if (getActiveLimits().minLen <= accumulator.length) {
       flushAccumulator();
     }
   };
 
-  for (let pIndex = 0; pIndex < paragraphPairs.length; pIndex++) {
-    const { speechLine, displayLine } = paragraphPairs[pIndex];
-    const speechSentences = splitVietnameseSentences(speechLine);
-    const displaySentences = splitVietnameseSentences(displayLine);
+  for (let pIndex = 0; pIndex < rawParagraphs.length; pIndex++) {
+    const paraText = rawParagraphs[pIndex];
+    const sentences = paraText
+      .split(/(?<=[.?!…;])\s+|(?<=[”"'])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     let isFirstSentenceInPara = true;
 
-    for (let sIdx = 0; sIdx < speechSentences.length; sIdx++) {
-      const sentence = speechSentences[sIdx];
-      const rawSentence = displaySentences[sIdx] || sentence;
-      const { minLen, maxLen, singleSentenceMax } = getActiveLimits();
+    for (const sentence of sentences) {
+      const { minLen, maxLen } = getActiveLimits();
       const rawSeparator = isFirstSentenceInPara ? '\n' : ' ';
 
-      // Chỉ tách theo mệnh đề nếu BẢN THÂN câu đơn lẻ vượt quá singleSentenceMax (tuyệt đối không cắt câu ngắn tại dấu phẩy)
-      if (sentence.length > singleSentenceMax) {
-        if (accumulator) {
+      // Nếu câu hiện tại vượt quá maxLen (ví dụ > 250 ở đoạn đầu hoặc > 600 ở các đoạn sau)
+      // Hoặc đoạn đầu mới chỉ có tiêu đề ngắn (< 120 ký tự) nhưng câu tiếp theo vượt quá 250 ký tự:
+      // Tách theo ranh giới mệnh đề (dấu phẩy, hai chấm, gạch ngang) hoặc ranh giới từ (không bao giờ cắt ngang từ)
+      const needsSubSplit =
+        sentence.length > maxLen ||
+        (chunks.length === 0 && accumulator.length > 0 && accumulator.length < headMinLen && accumulator.length + 1 + sentence.length > maxLen);
+
+      if (needsSubSplit) {
+        if (accumulator && (accumulator.length >= headMinLen || chunks.length > 0)) {
           flushAccumulator();
         }
 
         const clauses = sentence
-          .split(/(?<=[,;:])\s+/)
+          .split(/(?<=[,:—–-])\s+/)
           .map((c) => c.trim())
           .filter(Boolean);
 
@@ -379,11 +324,11 @@ export function chunkChapterContent(
                 flushAccumulator();
                 pushChunk(word, word, runningCharOffset, pIndex);
               } else {
-                appendSubUnit(word, word, ' ', pIndex);
+                appendSubUnit(word, ' ', pIndex);
               }
             }
           } else {
-            appendSubUnit(clause, clause, sep, pIndex);
+            appendSubUnit(clause, sep, pIndex);
           }
         }
 
@@ -395,13 +340,13 @@ export function chunkChapterContent(
         accParaIndex = pIndex;
         accStartOffset = runningCharOffset;
         accumulator = sentence;
-        rawAccumulator = rawSentence;
+        rawAccumulator = sentence;
         if (accumulator.length >= minLen) {
           flushAccumulator();
         }
-      } else if (accumulator.length + 1 + sentence.length <= Math.max(maxLen, singleSentenceMax)) {
+      } else if (accumulator.length + 1 + sentence.length <= maxLen) {
         accumulator = `${accumulator} ${sentence}`;
-        rawAccumulator = `${rawAccumulator}${rawSeparator}${rawSentence}`;
+        rawAccumulator = `${rawAccumulator}${rawSeparator}${sentence}`;
         if (accumulator.length >= minLen) {
           flushAccumulator();
         }
@@ -410,7 +355,7 @@ export function chunkChapterContent(
         accParaIndex = pIndex;
         accStartOffset = runningCharOffset;
         accumulator = sentence;
-        rawAccumulator = rawSentence;
+        rawAccumulator = sentence;
         if (getActiveLimits().minLen <= accumulator.length) {
           flushAccumulator();
         }
@@ -419,12 +364,12 @@ export function chunkChapterContent(
       isFirstSentenceInPara = false;
     }
 
-    // Ngắt đúng điểm xuống dòng nếu đoạn văn vừa kết thúc và đã đủ độ dài tối thiểu
+    // Nếu đoạn văn vừa kết thúc và độ dài tích lũy đã đạt tối thiểu, ngắt đúng điểm xuống dòng
     if (accumulator.length >= getActiveLimits().minLen) {
       flushAccumulator();
     }
 
-    runningCharOffset += speechLine.length + 1;
+    runningCharOffset += paraText.length + 1;
   }
 
   flushAccumulator();
@@ -441,7 +386,7 @@ export function splitTextIntoSpeechChunks(
   if (!cleaned) return [];
 
   const safeMax = Math.max(150, Math.min(DEFAULT_CHUNK_MAX_LENGTH, maxLength));
-  const rawSegments = splitVietnameseSentences(cleaned);
+  const rawSegments = cleaned.split(/(?<=[.?!;…])/);
   const chunks: string[] = [];
   let buffer = '';
 
@@ -577,8 +522,8 @@ class SeamlessAudioCache {
     protectedText?: string
   ): Promise<string> {
     const cleanText = cleanTextForTTS(text);
-    if (!cleanText) {
-      throw new Error('Empty audio chunk');
+    if (!cleanText || !/[\p{L}\p{N}]/u.test(cleanText)) {
+      return SKIPPED_TTS_CHUNK_URL;
     }
     const key = this.makeKey(voiceId, cleanText);
     const protectedKey = protectedText ? this.makeKey(voiceId, protectedText) : undefined;
@@ -605,6 +550,10 @@ class SeamlessAudioCache {
 
         if (externalSignal?.aborted) {
           throw new DOMException('Aborted', 'AbortError');
+        }
+
+        if (!blob) {
+          return SKIPPED_TTS_CHUNK_URL;
         }
 
         const objectUrl = URL.createObjectURL(blob);
@@ -744,6 +693,13 @@ export class AudioStreamer {
         chunk.text
       );
 
+      if (audioUrl === SKIPPED_TTS_CHUNK_URL) {
+        if (!signal.aborted) {
+          await this.playChunk(index + 1);
+        }
+        return;
+      }
+
       this.audioElement.onended = null;
       this.audioElement.onerror = null;
       this.audioElement.onstalled = null;
@@ -773,6 +729,13 @@ export class AudioStreamer {
           if (!recoveryAttempted) {
             recoveryAttempted = true;
             try {
+              if (this.audioElement.readyState >= 2) {
+                this.audioElement.defaultPlaybackRate = this.playbackRate;
+                this.audioElement.playbackRate = this.playbackRate;
+                await this.audioElement.play();
+                this.audioElement.playbackRate = this.playbackRate;
+                return;
+              }
               const savedTime = Number.isFinite(this.audioElement.currentTime) ? this.audioElement.currentTime : 0;
               const savedDuration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : 0;
               this.audioElement.load();
@@ -788,8 +751,9 @@ export class AudioStreamer {
               return;
             } catch {}
           }
-          seamlessAudioCache.revokeEntry(this.voiceId, chunk.text);
-          this.playChunk(index + 1);
+          // Tuyệt đối không nhảy sang đoạn khác khi đoạn hiện tại chưa phát xong
+          this.isPlaying = false;
+          this.onError?.('Phát đoạn hiện tại bị gián đoạn. Vui lòng nhấn Phát để tiếp tục đúng đoạn này.');
         }, 8000);
       };
 
@@ -817,14 +781,14 @@ export class AudioStreamer {
       this.audioElement.playbackRate = this.playbackRate;
       this.isPlaying = true;
 
-      // Prefetch song song 4 đoạn kế tiếp (index + 1 .. index + 4) ngay khi đoạn hiện tại bắt đầu phát
-      if (!signal.aborted) {
-        const prefetchTargets = [1, 2, 3, 4]
-          .map((offset) => this.chunks[index + offset])
-          .filter((c): c is AudioChunk => Boolean(c));
+      // Tải trước song song 4 đoạn kế tiếp
+      const lookahead = [1, 2, 3, 4]
+        .map((offset) => this.chunks[index + offset])
+        .filter(Boolean);
+      if (lookahead.length > 0 && !signal.aborted) {
         Promise.allSettled(
-          prefetchTargets.map((target) =>
-            seamlessAudioCache.fetchAndCache(this.voiceId, target.text, undefined, signal, chunk.text)
+          lookahead.map((nextTarget) =>
+            seamlessAudioCache.fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text)
           )
         ).catch(() => {});
       }

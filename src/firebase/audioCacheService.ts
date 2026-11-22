@@ -500,7 +500,13 @@ export async function resolveAndCacheChunkAudio(
       }
     }
 
-    const ttsUrl = `/api/tts?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(voiceId)}`;
+    const endpoint = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim().replace(/\/+$/, '');
+    const ttsBase = !endpoint
+      ? '/api/tts'
+      : endpoint.endsWith('/api/tts') || endpoint.endsWith('/.netlify/functions/tts')
+      ? endpoint
+      : `${endpoint}/api/tts`;
+    const ttsUrl = `${ttsBase}?text=${encodeURIComponent(cleanText)}&voice=${encodeURIComponent(voiceId)}`;
     const audioBlob = await fetchAudioBlobWithRetry(
       ttsUrl,
       TTS_MAX_RETRIES,
