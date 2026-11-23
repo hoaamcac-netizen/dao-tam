@@ -500,13 +500,13 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* Notification Popover */}
             {isNotifDropdownOpen && (
-              <div className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-1rem)] sm:w-96 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
-                <div className="px-4 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white">
-                    <Bell className="w-3.5 h-3.5 text-pink-600 dark:text-pink-400" />
-                    <span>Thông Báo</span>
+              <div className="fixed inset-x-3 top-[96px] sm:inset-x-auto sm:top-full sm:right-0 sm:mt-2 sm:absolute w-auto sm:w-96 max-h-[calc(100vh-120px)] sm:max-h-[420px] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                <div className="px-3.5 sm:px-4 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-1.5 font-bold text-xs text-slate-900 dark:text-white min-w-0">
+                    <Bell className="w-3.5 h-3.5 text-pink-600 dark:text-pink-400 flex-shrink-0" />
+                    <span className="truncate">Thông Báo</span>
                     {unreadNotifCount > 0 && (
-                      <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                      <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold flex-shrink-0">
                         {unreadNotifCount}
                       </span>
                     )}
@@ -515,55 +515,68 @@ export const Header: React.FC<HeaderProps> = ({
                     <button
                       type="button"
                       onClick={onMarkNotificationsRead}
-                      className="text-[11px] text-pink-600 dark:text-pink-400 hover:underline font-semibold cursor-pointer"
+                      className="text-[11px] text-pink-600 dark:text-pink-400 hover:underline font-semibold cursor-pointer flex-shrink-0"
                     >
                       Đánh dấu đã đọc
                     </button>
                   )}
                 </div>
 
-                <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800">
+                <div className="flex-1 min-h-0 max-h-[60vh] sm:max-h-80 overflow-y-auto overscroll-contain divide-y divide-slate-100 dark:divide-slate-800">
                   {(notifications?.length || 0) === 0 ? (
                     <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
                       Chưa có thông báo nào.
                     </div>
                   ) : (
-                    (notifications || []).map((n) => (
-                      <div
-                        key={n.id}
-                        className={`p-3.5 text-xs transition-colors flex items-start gap-3 ${
-                          !n.isRead ? 'bg-pink-50/50 dark:bg-pink-950/20' : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
-                        }`}
-                      >
-                        <div className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 flex-shrink-0 mt-0.5">
-                          {n.type === 'topup' ? (
-                            <Coins className="w-4 h-4 text-emerald-500" />
-                          ) : n.type === 'withdrawal_approved' || n.type === 'payout' ? (
-                            <Coins className="w-4 h-4 text-pink-500" />
-                          ) : (
-                            <BookOpen className="w-4 h-4 text-pink-500" />
-                          )}
-                        </div>
-                        <div className="flex-1 space-y-1">
-                          <div className="font-bold text-slate-900 dark:text-white flex items-center justify-between gap-2">
-                            <span className="line-clamp-1">{n.title}</span>
-                            <span className="text-[10px] font-normal text-slate-400 flex-shrink-0">
-                              {new Date(n.createdAt).toLocaleDateString('vi-VN')}
-                            </span>
+                    (notifications || []).map((n) => {
+                      const targetNovel = n.novelId
+                        ? (allNovels || []).find((nov) => nov.id === n.novelId)
+                        : undefined;
+                      return (
+                        <div
+                          key={n.id}
+                          onClick={() => {
+                            if (targetNovel && onSelectNovel) {
+                              onSelectNovel(targetNovel);
+                              setIsNotifDropdownOpen(false);
+                            }
+                          }}
+                          className={`p-3 sm:p-3.5 text-xs transition-colors flex items-start gap-2.5 sm:gap-3 ${
+                            targetNovel && onSelectNovel ? 'cursor-pointer' : ''
+                          } ${
+                            !n.isRead ? 'bg-pink-50/50 dark:bg-pink-950/20' : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                          }`}
+                        >
+                          <div className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 flex-shrink-0 mt-0.5">
+                            {n.type === 'topup' ? (
+                              <Coins className="w-4 h-4 text-emerald-500" />
+                            ) : n.type === 'withdrawal_approved' || n.type === 'payout' ? (
+                              <Coins className="w-4 h-4 text-pink-500" />
+                            ) : (
+                              <BookOpen className="w-4 h-4 text-pink-500" />
+                            )}
                           </div>
-                          <p className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
-                            {(() => {
-                              const msg = n.message || '';
-                              const match = msg.match(/(.*?đã được nâng cấp quyền Tác [Gg]iả\s*\/\s*Editor)/i);
-                              if (match && match[1]) {
-                                return match[1] + '.';
-                              }
-                              return msg;
-                            })()}
-                          </p>
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="font-bold text-slate-900 dark:text-white flex items-start justify-between gap-2">
+                              <span className="break-words leading-snug">{n.title}</span>
+                              <span className="text-[10px] font-normal text-slate-400 flex-shrink-0 mt-0.5">
+                                {new Date(n.createdAt).toLocaleDateString('vi-VN')}
+                              </span>
+                            </div>
+                            <p className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed break-words whitespace-normal">
+                              {(() => {
+                                const msg = n.message || '';
+                                const match = msg.match(/(.*?đã được nâng cấp quyền Tác [Gg]iả\s*\/\s*Editor)/i);
+                                if (match && match[1]) {
+                                  return match[1] + '.';
+                                }
+                                return msg;
+                              })()}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>

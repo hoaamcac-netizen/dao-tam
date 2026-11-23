@@ -5328,41 +5328,161 @@ export async function creditUserXuAndNotify(
 }
 
 /**
- * Gửi thông báo đến tất cả độc giả đang theo dõi người sáng tác này khi họ đăng truyện mới
+ * Gửi thông báo đến tất cả độc giả đang theo dõi người sáng tác / nhà đăng truyện khi có truyện mới được xuất bản
  */
 export async function notifyFollowersOfNewNovel(
   creatorNameOrId: string,
   novelTitle: string,
-  novelId: string
+  novelId: string,
+  options?: {
+    creatorId?: string;
+    creatorEmail?: string;
+    editorName?: string;
+    submittedByUserName?: string;
+    displayLabel?: string;
+  }
 ): Promise<number> {
   try {
     const usersCol = collection(db, 'users');
     const snap = await getDocs(usersCol);
+    const allDocs = snap?.docs || [];
 
-    let notifiedCount = 0;
-    const notifPayload = {
-      id: `new-novel-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      title: `Tác giả ${creatorNameOrId} vừa đăng truyện mới!`,
-      message: `Tác phẩm mới "${novelTitle}" đã được xuất bản. Nhấn vào để đón đọc những chương đầu tiên ngay!`,
-      type: 'system',
-      createdAt: Date.now(),
-      isRead: false,
-      novelId,
+    const normalizeKey = (val?: string | null) => (val || '').trim().toLowerCase();
+    const stripCreatorPrefix = (val: string) =>
+      val.startsWith('creator-') ? val.slice('creator-'.length).trim() : val;
+
+    const candidateNames = new Set<string>();
+    const addCandidateName = (val?: string | null) => {
+      const clean = normalizeKey(val);
+      if (!clean || clean === 'khách độc truyện') return;
+      candidateNames.add(clean);
+      candidateNames.add(`creator-${clean}`);
     };
 
-    for (const d of snap?.docs || []) {
-      const u = d.data() as UserProfile;
+    addCandidateName(creatorNameOrId);
+    addCandidateName(options?.editorName);
+    addCandidateName(options?.submittedByUserName);
+    addCandidateName(options?.displayLabel);
+
+    const candidateIds = new Set<string>();
+    const addCandidateId = (val?: string | null) => {
+      const clean = (val || '').trim();
+      if (!clean || clean === 'guest' || clean === 'creator' || clean === 'usr-guest') return;
+      candidateIds.add(clean);
+      candidateIds.add(clean.toLowerCase());
+    };
+
+    addCandidateId(options?.creatorId);
+    if (creatorNameOrId && !creatorNameOrId.includes(' ')) {
+      addCandidateId(creatorNameOrId);
+    }
+
+    const cleanCreatorEmail = normalizeKey(options?.creatorEmail);
+    const creatorFollowerIds = new Set<string>();
+    const creatorOwnDocIds = new Set<string>();
+
+    // Bước 1: Quét tìm document tài khoản của tác giả/nhà đăng truyện để lấy đủ ID, UID, displayName và mảng followers
+    for (const d of allDocs) {
+      const u = (d.data() || {}) as Record<string, any>;
+      const docUid = String(u.uid || '').trim();
+      const docEmail = normalizeKey(u.email);
+      const docDisplayName = normalizeKey(u.displayName);
+
+      const matchesCreatorDoc =
+        candidateIds.has(d.id) ||
+        candidateIds.has(d.id.toLowerCase()) ||
+        (docUid && (candidateIds.has(docUid) || candidateIds.has(docUid.toLowerCase()))) ||
+        (cleanCreatorEmail && docEmail === cleanCreatorEmail) ||
+        (docDisplayName && candidateNames.has(docDisplayName));
+
+      if (matchesCreatorDoc) {
+        creatorOwnDocIds.add(d.id);
+        if (docUid) creatorOwnDocIds.add(docUid);
+        addCandidateId(d.id);
+        addCandidateId(docUid);
+        addCandidateName(u.displayName);
+        if (Array.isArray(u.followers)) {
+          u.followers.forEach((fid: any) => {
+            const cleanFid = String(fid || '').trim();
+            if (cleanFid) creatorFollowerIds.add(cleanFid);
+          });
+        }
+      }
+    }
+
+    const publisherLabel =
+      (options?.displayLabel ||
+        options?.editorName ||
+        options?.submittedByUserName ||
+        creatorNameOrId ||
+        'Nhà đăng truyện').trim();
+
+    let notifiedCount = 0;
+    const now = Date.now();
+    const baseNotifId = `new-novel-${novelId}-${now}`;
+
+    // Bước 2: Gửi thông báo cho toàn bộ độc giả đang theo dõi (khớp theo ID, tên, tiền tố creator- hoặc nằm trong followers)
+    for (const d of allDocs) {
+      const u = (d.data() || {}) as Record<string, any>;
+      const readerUid = String(u.uid || '').trim();
+      const readerEmail = normalizeKey(u.email);
+
+      // Không gửi trùng thông báo cho chính tài khoản đang đăng truyện
+      if (
+        (options?.creatorId && (d.id === options.creatorId || readerUid === options.creatorId)) ||
+        (cleanCreatorEmail && readerEmail === cleanCreatorEmail)
+      ) {
+        continue;
+      }
+
       const following = Array.isArray(u?.followingCreators) ? u.followingCreators : [];
-      // Độc giả này có theo dõi tác giả/editor này không
-      const isFollowing = following.some(
-        (key) => key.toLowerCase() === creatorNameOrId.toLowerCase() || key === creatorNameOrId
-      );
+      const isInCreatorFollowers =
+        creatorFollowerIds.has(d.id) || (readerUid ? creatorFollowerIds.has(readerUid) : false);
+
+      const isFollowing =
+        isInCreatorFollowers ||
+        following.some((rawKey: any) => {
+          const key = String(rawKey || '').trim();
+          if (!key) return false;
+          const lower = key.toLowerCase();
+          const stripped = stripCreatorPrefix(lower);
+          return (
+            candidateIds.has(key) ||
+            candidateIds.has(lower) ||
+            candidateNames.has(lower) ||
+            candidateNames.has(stripped)
+          );
+        });
 
       if (isFollowing) {
-        const nextNotifs = [notifPayload, ...(Array.isArray(u?.notifications) ? u.notifications : [])];
-        await updateDoc(doc(db, 'users', d.id), {
-          notifications: nextNotifs,
-        }).catch((err) => console.error('Lỗi gửi thông báo follower:', err));
+        const notifPayload: UserNotification = {
+          id: baseNotifId,
+          title: `${publisherLabel} vừa đăng truyện mới!`,
+          message: `Tác phẩm mới "${novelTitle}" đã được xuất bản. Nhấn vào để đón đọc những chương đầu tiên ngay!`,
+          type: 'system',
+          createdAt: now,
+          isRead: false,
+          novelId,
+        };
+
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'users', d.id), {
+          notifications: arrayUnion(notifPayload),
+        });
+        const notifDocRef = doc(collection(db, 'notifications'));
+        batch.set(notifDocRef, {
+          ...notifPayload,
+          userId: readerUid || d.id,
+          targetDocId: d.id,
+        });
+
+        await batch.commit().catch((err) => {
+          console.error('Lỗi gửi thông báo follower:', err);
+          return updateDoc(doc(db, 'users', d.id), {
+            notifications: arrayUnion(notifPayload),
+          }).catch((fallbackErr) => console.error('Lỗi fallback gửi thông báo follower:', fallbackErr));
+        });
+
         notifiedCount++;
       }
     }

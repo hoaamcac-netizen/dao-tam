@@ -122,7 +122,8 @@ import {
   createWithdrawalWithTransaction,
   refundRejectedWithdrawalWithTransaction
 } from './firebase/services';
-import { auth, checkIsAdmin } from './firebase/config';
+import { auth, db, checkIsAdmin } from './firebase/config';
+import { doc, getDoc } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { 
   FileCode2, 
@@ -317,6 +318,7 @@ function DaoTamApp() {
     const relatedNovel = (novels || []).find((n) => 
       n.author?.toLowerCase().trim() === cleanName.toLowerCase() ||
       n.editor?.toLowerCase().trim() === cleanName.toLowerCase() ||
+      n.submittedBy?.userName?.toLowerCase().trim() === cleanName.toLowerCase() ||
       (directCreatorId && n.submittedBy?.userId === directCreatorId) ||
       (n.submittedBy && n.submittedBy.userId === cleanName)
     );
@@ -1851,8 +1853,14 @@ function DaoTamApp() {
       } else {
         await saveNovelToFirestore(newNovel, { syncChapters: false });
       }
-      // Bắn thông báo cho độc giả đang theo dõi tác giả
-      notifyFollowersOfNewNovel(newNovel.author, newNovel.title, newNovel.id).catch((err) => {
+      // Bắn thông báo cho độc giả đang theo dõi tác giả / nhà đăng truyện
+      notifyFollowersOfNewNovel(newNovel.author, newNovel.title, newNovel.id, {
+        creatorId: (newNovel as any).authorId || newNovel.submittedBy?.userId || activeUser.id,
+        creatorEmail: (newNovel as any).authorEmail || newNovel.submittedBy?.userEmail || activeUser.email,
+        editorName: newNovel.editor,
+        submittedByUserName: newNovel.submittedBy?.userName,
+        displayLabel: newNovel.editor || newNovel.submittedBy?.userName || newNovel.author,
+      }).catch((err) => {
         console.error('Lỗi gửi thông báo cho follower:', err);
       });
     } catch (err) {
@@ -1876,7 +1884,17 @@ function DaoTamApp() {
 
   // Admin approves a novel submission -> converts to a live Novel and updates Firestore
   const handleApproveNovelSubmission = async (submissionId: string) => {
-    const sub = novelSubmissions.find((s) => s.id === submissionId);
+    let sub = novelSubmissions.find((s) => s.id === submissionId);
+    if (!sub) {
+      try {
+        const subSnap = await getDoc(doc(db, 'novel_submissions', submissionId));
+        if (subSnap.exists()) {
+          sub = { ...(subSnap.data() as NovelSubmission), id: subSnap.id };
+        }
+      } catch (err) {
+        console.warn('Không thể tải bản thảo từ Firestore khi duyệt:', err);
+      }
+    }
     if (!sub) return;
 
     try {
@@ -1952,8 +1970,14 @@ function DaoTamApp() {
       // Batch Write cho luật 5 chương: gom 1 thao tác ghi truyện, 5 thao tác ghi chương và cập nhật submission vào chung 1 luồng WriteBatch
       await saveNovelWithInitialChaptersBatch(approvedNovel, approvedChapters, submissionId);
 
-      // Gửi thông báo cho tất cả độc giả đang theo dõi tác giả
-      notifyFollowersOfNewNovel(sub.author, sub.title, approvedNovel.id).catch((err) => {
+      // Gửi thông báo cho tất cả độc giả đang theo dõi tác giả / nhà đăng truyện
+      notifyFollowersOfNewNovel(sub.author, sub.title, approvedNovel.id, {
+        creatorId: sub.submittedBy?.userId,
+        creatorEmail: sub.submittedBy?.userEmail,
+        editorName: sub.editor,
+        submittedByUserName: sub.submittedBy?.userName,
+        displayLabel: sub.editor || sub.submittedBy?.userName || sub.author,
+      }).catch((err) => {
         console.error('Lỗi gửi thông báo cho follower:', err);
       });
 
@@ -3423,7 +3447,17 @@ function DaoTamApp() {
               setNominatingNovel(novel);
               setIsNominateOpen(true);
             }}
-            onOpenAuthorShowcase={(authorName) => handleSelectCreator(authorName)}
+            onOpenAuthorShowcase={(authorName) => {
+              const isUploaderMatch = Boolean(
+                selectedNovel?.submittedBy?.userId &&
+                (authorName.trim().toLowerCase() === (selectedNovel.editor || '').trim().toLowerCase() ||
+                  authorName.trim().toLowerCase() === (selectedNovel.submittedBy?.userName || '').trim().toLowerCase())
+              );
+              handleSelectCreator(
+                authorName,
+                isUploaderMatch ? selectedNovel?.submittedBy?.userId : undefined
+              );
+            }}
             onOpenReport={handleOpenReport}
             allNovels={novels}
             onSelectNovel={(n) => {
