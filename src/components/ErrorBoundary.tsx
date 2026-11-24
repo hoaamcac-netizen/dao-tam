@@ -132,7 +132,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             {this.state.isReconnecting && (
               <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-pink-50 dark:bg-pink-950/60 text-pink-600 dark:text-pink-300 text-xs font-semibold">
                 <Wifi className="w-3.5 h-3.5 animate-pulse" />
-                <span>Đang kiểm tra lại kết nối Firebase...</span>
+                <span>Đang kiểm tra lại kết nối hệ thống...</span>
               </div>
             )}
 

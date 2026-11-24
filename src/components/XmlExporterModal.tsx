@@ -165,7 +165,7 @@ export const XmlExporterModal: React.FC<XmlExporterModalProps> = ({
             }`}
           >
             <Settings className="w-4 h-4" />
-            Tùy Chỉnh Tên &amp; Firebase
+            Tùy Chỉnh Tên &amp; Đồng Bộ
           </button>
         </div>
 
@@ -335,10 +335,10 @@ export const XmlExporterModal: React.FC<XmlExporterModalProps> = ({
           {activeTab === 'config' && (
             <div className="max-w-2xl mx-auto space-y-5 text-sm text-neutral-300">
               <h3 className="font-serif text-lg font-bold text-amber-300">
-                Tùy Chỉnh Thông Tin Theme &amp; Firebase Đồng Bộ
+                Tùy Chỉnh Thông Tin Giao Diện &amp; Đồng Bộ
               </h3>
               <p className="text-xs text-neutral-400">
-                Bạn có thể đổi tên trang web hoặc điền thông tin dự án Firebase của bạn vào đây. Mã nguồn XML bên tab "Xem Mã Nguồn" sẽ tự động được cập nhật tương ứng theo thời gian thực!
+                Bạn có thể đổi tên trang web hoặc điền thông tin đồng bộ đám mây của bạn vào đây. Mã nguồn XML bên tab "Xem Mã Nguồn" sẽ tự động được cập nhật tương ứng theo thời gian thực!
               </p>
 
               <div className="space-y-4">
@@ -356,7 +356,7 @@ export const XmlExporterModal: React.FC<XmlExporterModalProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-                    Firebase API Key (Tùy chọn - Dùng cho đồng bộ đám mây qua tài khoản Google):
+                    Mã kết nối đồng bộ đám mây (Tùy chọn - Dùng cho đồng bộ qua tài khoản Google):
                   </label>
                   <input
                     type="text"
@@ -368,7 +368,7 @@ export const XmlExporterModal: React.FC<XmlExporterModalProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 mb-1.5">
-                    Firebase Project ID:
+                    Mã dự án đồng bộ:
                   </label>
                   <input
                     type="text"
@@ -379,7 +379,7 @@ export const XmlExporterModal: React.FC<XmlExporterModalProps> = ({
                 </div>
 
                 <div className="p-3 rounded-lg bg-neutral-900 border border-neutral-800 text-xs text-neutral-400">
-                  💡 <em>Lưu ý: Nếu bạn không có tài khoản Firebase, theme vẫn tự động lưu tiến trình đọc trên thiết bị (LocalStorage) một cách hoàn hảo và mượt mà!</em>
+                  💡 <em>Lưu ý: Nếu bạn không cấu hình đồng bộ đám mây, giao diện vẫn tự động lưu tiến trình đọc trên thiết bị (LocalStorage) một cách hoàn hảo và mượt mà!</em>
                 </div>
               </div>
             </div>

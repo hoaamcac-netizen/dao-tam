@@ -294,7 +294,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
   };
 
   const handleShare = () => {
-    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://dao-tam-doc-truyen.vercel.app';
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
     const cleanSlug = (novel.slug && novel.slug.trim()) ? novel.slug.trim() : (novel.id || '').trim();
     const shareUrl = `${origin}/truyen/${cleanSlug}`;
 
@@ -1173,7 +1173,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 Bạn có chắc chắn muốn xóa tác phẩm <strong className="text-rose-500">"{novel.title}"</strong> không?
               </p>
               <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-2xl text-[11px] text-rose-700 dark:text-rose-300 text-left">
-                ⚠️ <strong>Cảnh báo:</strong> Thao tác này sẽ xóa vĩnh viễn toàn bộ chương của tác phẩm khỏi Firestore và ứng dụng. Không thể khôi phục sau khi xóa.
+                ⚠️ <strong>Cảnh báo:</strong> Thao tác này sẽ xóa vĩnh viễn toàn bộ chương của tác phẩm khỏi cơ sở dữ liệu và ứng dụng. Không thể khôi phục sau khi xóa.
               </div>
             </div>
 

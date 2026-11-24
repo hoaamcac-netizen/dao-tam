@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Chapter, Novel } from '../types';
 import {
-  DEFAULT_GITHUB_AUDIO_REPO,
   getAdminGitHubConfig,
   saveAdminGitHubConfig,
   parseGitHubRepo,
@@ -24,7 +23,6 @@ import {
 } from '../utils/rulesAndVoices';
 import { useAudio } from '../contexts/AudioContext';
 import {
-  Github,
   KeyRound,
   Save,
   CheckCircle2,
@@ -83,7 +81,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
     const trimmedToken = tokenInput.trim();
 
     if (!trimmedRepo) {
-      setErrorNotice(`Vui lòng nhập Tên kho GitHub (dạng ${DEFAULT_GITHUB_AUDIO_REPO}).`);
+      setErrorNotice('Vui lòng nhập Tên kho âm thanh (dạng chu-so-huu/ten-kho).');
       return;
     }
 
@@ -94,13 +92,13 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
       setTokenInput(saved.token);
       setSavedNotice(
         saved.token
-          ? 'Đã lưu cấu hình GitHub vào trình duyệt Admin!'
-          : 'Đã lưu tên kho GitHub (chưa có Token PAT).'
+          ? 'Đã lưu cấu hình kho âm thanh trên trình duyệt Quản trị!'
+          : 'Đã lưu tên kho âm thanh (chưa có Mã xác thực).'
       );
       onConfigSaved?.(saved);
       setTimeout(() => setSavedNotice(null), 3500);
     } catch (err: any) {
-      setErrorNotice(err?.message || 'Tên kho GitHub không đúng định dạng.');
+      setErrorNotice(err?.message || 'Tên kho âm thanh không đúng định dạng.');
     }
   };
 
@@ -109,14 +107,14 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
       <div className="px-3.5 sm:px-4 py-3 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0 flex-1">
           <div className="w-8 h-8 rounded-xl bg-slate-900 dark:bg-zinc-900 text-white flex items-center justify-center shrink-0 border border-slate-700">
-            <Github className="w-4 h-4" />
+            <Headphones className="w-4 h-4" />
           </div>
           <div className="min-w-0 flex-1">
             <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white break-words">
-              Cấu hình kho lưu trữ MP3 trên GitHub (Admin)
+              Cấu hình kho lưu trữ MP3 (Quản trị)
             </h4>
             <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-snug">
-              Chỉ lưu cục bộ trong trình duyệt Admin (localStorage), không đẩy lên Firestore
+              Chỉ lưu cục bộ trên trình duyệt Quản trị, không đồng bộ lên cơ sở dữ liệu
             </p>
           </div>
         </div>
@@ -129,7 +127,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
                 : 'bg-amber-50 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-700'
             }`}
           >
-            {repoInput.trim() && tokenInput.trim() ? `Sẵn sàng: ${repoInput.trim()}` : 'Chưa cấu hình đủ'}
+            {repoInput.trim() && tokenInput.trim() ? 'Kho âm thanh sẵn sàng' : 'Chưa cấu hình đủ'}
           </span>
           {defaultCollapsed && (
             <button
@@ -149,15 +147,15 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="min-w-0">
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                Tên kho GitHub (dạng {DEFAULT_GITHUB_AUDIO_REPO}):
+                Tên kho âm thanh (dạng chu-so-huu/ten-kho):
               </label>
               <div className="relative">
-                <Github className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <FolderUp className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={repoInput}
                   onChange={(e) => setRepoInput(e.target.value)}
-                  placeholder={DEFAULT_GITHUB_AUDIO_REPO}
+                  placeholder="chu-so-huu/ten-kho-am-thanh"
                   className="w-full min-h-[42px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-8 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none transition"
                 />
               </div>
@@ -165,7 +163,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
 
             <div className="min-w-0">
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                GitHub Token (PAT):
+                Mã xác thực kho âm thanh:
               </label>
               <div className="relative">
                 <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -173,7 +171,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
                   type={showToken ? 'text' : 'password'}
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="ghp_... hoặc github_pat_..."
+                  placeholder="Nhập mã xác thực truy cập..."
                   autoComplete="off"
                   className="w-full min-h-[42px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-8 pr-10 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none transition font-mono"
                 />
@@ -181,7 +179,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
                   type="button"
                   onClick={() => setShowToken((prev) => !prev)}
                   className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
-                  title={showToken ? 'Ẩn Token' : 'Hiện Token'}
+                  title={showToken ? 'Ẩn mã xác thực' : 'Hiện mã xác thực'}
                 >
                   {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
@@ -205,8 +203,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
               )}
               {!errorNotice && !savedNotice && !isConfigured && (
                 <p className="text-[11px] text-slate-500 leading-snug">
-                  Repo public nhánh <code className="font-mono font-bold">main</code>, PAT có quyền{' '}
-                  <code className="font-mono font-bold">Contents: Read &amp; Write</code>.
+                  Kho lưu trữ công khai nhánh mặc định, mã xác thực cần có quyền đọc và ghi tệp âm thanh.
                 </p>
               )}
             </div>
@@ -281,7 +278,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     const cfg = getAdminGitHubConfig();
     if (!cfg.repo || !cfg.token) {
       throw new Error(
-        `Vui lòng nhập Tên kho GitHub (${DEFAULT_GITHUB_AUDIO_REPO}) và GitHub Token (PAT) ở khung cấu hình phía trên rồi bấm Lưu.`
+        'Vui lòng nhập Tên kho âm thanh và Mã xác thực ở khung cấu hình phía trên rồi bấm Lưu.'
       );
     }
     return cfg;
@@ -327,23 +324,23 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       });
 
       setProgressPercent(98);
-      setStatusLabel('Đang lưu link phát CDN vào Firestore...');
+      setStatusLabel('Đang lưu liên kết phát MP3 vào hệ thống...');
       try {
         await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
       } catch (fsErr: any) {
         throw new Error(
-          `Đã đẩy MP3 lên GitHub nhưng lưu Firestore thất bại: ${fsErr?.message || 'Lỗi Firestore'}`
+          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${fsErr?.message || 'Lỗi cơ sở dữ liệu'}`
         );
       }
 
       setJustUploadedAt(Date.now());
       onAudioUrlUpdated(chapter, cdnUrl);
       setProgressPercent(100);
-      setSuccessMsg('Đã tải file MP3 lên GitHub và lưu link phát CDN thành công!');
+      setSuccessMsg('Đã tải tệp MP3 lên kho âm thanh và lưu vào hệ thống thành công!');
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
-        setErrorMsg(err?.message || 'Lỗi tải MP3 lên GitHub (không xác định).');
+        setErrorMsg(err?.message || 'Lỗi tải MP3 lên kho âm thanh (không xác định).');
       }
     } finally {
       abortControllerRef.current = null;
@@ -392,7 +389,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       });
 
       setProgressPercent(90);
-      setStatusLabel('Đang đẩy lên GitHub...');
+      setStatusLabel('Đang tải MP3 lên kho âm thanh...');
       const { cdnUrl } = await uploadMp3ToGitHub({
         repoInput: cfg.repo,
         token: cfg.token,
@@ -408,19 +405,19 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       });
 
       setProgressPercent(98);
-      setStatusLabel('Đang lưu link phát CDN vào Firestore...');
+      setStatusLabel('Đang lưu liên kết phát MP3 vào hệ thống...');
       try {
         await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
       } catch (fsErr: any) {
         throw new Error(
-          `Đã đẩy MP3 lên GitHub nhưng lưu Firestore thất bại: ${fsErr?.message || 'Lỗi Firestore'}`
+          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${fsErr?.message || 'Lỗi cơ sở dữ liệu'}`
         );
       }
 
       setJustUploadedAt(Date.now());
       onAudioUrlUpdated(chapter, cdnUrl);
       setProgressPercent(100);
-      setSuccessMsg('Đã tạo MP3, ghép file, đẩy lên GitHub và lưu link CDN thành công!');
+      setSuccessMsg('Đã tạo MP3, ghép tệp và lưu vào hệ thống thành công!');
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
@@ -449,7 +446,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       previewAudioRef.current.onerror = () => {
         setIsPreviewPlaying(false);
         setErrorMsg(
-          'Không phát được file MP3 (nếu vừa mới đẩy lên GitHub, CDN jsDelivr có thể cần vài giây để đồng bộ).'
+          'Không phát được tệp MP3 (nếu vừa mới tải lên, máy chủ âm thanh có thể cần vài giây để đồng bộ).'
         );
       };
     }
@@ -495,13 +492,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
 
     try {
       setIsBusy(true);
-      setStatusLabel('Đang xóa link audioUrl khỏi Firestore...');
+      setStatusLabel('Đang xóa đường dẫn MP3 khỏi hệ thống...');
       await updateChapterAudioUrlInFirestore(novel.id, chapter, null);
       onAudioUrlUpdated(chapter, undefined);
-      setSuccessMsg('Đã xóa link MP3 khỏi chương này.');
+      setSuccessMsg('Đã xóa liên kết MP3 khỏi chương này.');
       setTimeout(() => setSuccessMsg(null), 3500);
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Không thể xóa audioUrl trên Firestore.');
+      setErrorMsg(err?.message || 'Không thể xóa đường dẫn MP3 trên hệ thống.');
     } finally {
       setIsBusy(false);
       setStatusLabel('');
@@ -524,7 +521,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           disabled={actionsDisabled}
           onClick={() => fileInputRef.current?.click()}
           className="min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Chọn file .mp3 có sẵn và đẩy lên GitHub"
+          title="Chọn tệp .mp3 có sẵn và tải lên kho âm thanh"
         >
           <Upload className="w-3.5 h-3.5 text-slate-700 shrink-0" />
           <span>Tải MP3 lên</span>
@@ -535,7 +532,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           disabled={actionsDisabled}
           onClick={handleAutoGenerateMp3}
           className="min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Chia nhỏ chương <= 400 ký tự, ghép TTS thành 1 file MP3 và đẩy lên GitHub"
+          title="Chuyển văn bản chương thành 1 tệp MP3 và tải lên kho âm thanh"
         >
           {isBusy ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin text-pink-600 shrink-0" />
@@ -571,7 +568,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               className="min-h-[40px] min-w-[40px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-800 border border-slate-200 transition"
-              title="Mở link MP3 CDN"
+              title="Mở liên kết MP3"
             >
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
@@ -585,7 +582,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
                   ? 'bg-rose-600 text-white border-rose-600'
                   : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
               }`}
-              title="Xóa đường dẫn audioUrl của chương khỏi Firestore"
+              title="Xóa đường dẫn MP3 của chương khỏi hệ thống"
             >
               <Trash2 className="w-3.5 h-3.5 shrink-0" />
               <span>{confirmClear ? 'Xác nhận xóa?' : 'Xóa MP3'}</span>
@@ -790,7 +787,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     const cfg = getAdminGitHubConfig();
     if (!cfg.repo || !cfg.token) {
       setBulkConfigError(
-        `Vui lòng nhập Tên kho GitHub (${DEFAULT_GITHUB_AUDIO_REPO}) và GitHub Token (PAT) rồi bấm "Lưu cấu hình" trước khi tải MP3 hàng loạt.`
+        'Vui lòng nhập Tên kho âm thanh và Mã xác thực rồi bấm "Lưu cấu hình" trước khi tải MP3 hàng loạt.'
       );
       return;
     }
@@ -798,7 +795,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     try {
       parseGitHubRepo(cfg.repo);
     } catch (err: any) {
-      setBulkConfigError(err?.message || 'Tên kho GitHub không hợp lệ.');
+      setBulkConfigError(err?.message || 'Tên kho âm thanh không hợp lệ.');
       return;
     }
 
@@ -1059,7 +1056,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
 
     bulkAbortRef.current = null;
     const summaryNotice = stoppedByAuthError
-      ? 'Đã dừng sớm do lỗi xác thực GitHub Token (HTTP 401/403). Vui lòng kiểm tra lại PAT.'
+      ? 'Đã dừng sớm do lỗi xác thực kho âm thanh (HTTP 401/403). Vui lòng kiểm tra lại mã xác thực.'
       : wasCancelled
       ? `Đã dừng tải hàng loạt (${successCount} thành công, ${skippedCount} bỏ qua, ${errorCount} lỗi).`
       : `Hoàn tất tải MP3 hàng loạt: ${successCount} thành công, ${skippedCount} bỏ qua, ${errorCount} lỗi, ${unmatchedCount} không khớp.`;
@@ -1105,7 +1102,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
           <div className="min-w-0 flex-1">
             <h3 className="font-black text-sm sm:text-base text-slate-900 flex items-center gap-2 min-w-0">
               <Headphones className="w-4 h-4 text-pink-600 shrink-0" />
-              <span className="truncate">Quản lý MP3 GitHub — {novel.title}</span>
+              <span className="truncate">Quản lý MP3 — {novel.title}</span>
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
               Đã có MP3: <strong className="text-emerald-700">{mp3ReadyCount}/{chapters.length}</strong> chương
@@ -1179,7 +1176,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                     bulkFileInputRef.current?.click();
                   }}
                   className="w-full sm:w-auto min-h-[42px] px-3.5 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shadow-sm cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Chọn nhiều file .mp3 (vd: Chương_1.mp3, Chuong_02.mp3...) để tự khớp chương và đẩy tuần tự lên GitHub"
+                  title="Chọn nhiều tệp .mp3 (vd: Chương_1.mp3, Chuong_02.mp3...) để tự khớp chương và tải tuần tự lên kho âm thanh"
                 >
                   {bulkState.isRunning ? (
                     <Loader2 className="w-4 h-4 animate-spin shrink-0" />

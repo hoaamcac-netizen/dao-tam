@@ -768,7 +768,7 @@ export const RegisterCreatorModal: React.FC<RegisterCreatorModalProps> = ({
             {isSubmitting && (
               <div className="p-3.5 rounded-2xl bg-amber-50 border-2 border-amber-400 text-amber-950 text-xs sm:text-sm font-bold flex items-center gap-2.5 shadow-xs animate-pulse">
                 <div className="w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                <span>⚡ Đang gửi bản thảo và hồ sơ đăng ký lên Firestore... Vui lòng không nhấn liên tục!</span>
+                <span>⚡ Đang gửi bản thảo và hồ sơ đăng ký lên hệ thống... Vui lòng không nhấn liên tục!</span>
               </div>
             )}
 

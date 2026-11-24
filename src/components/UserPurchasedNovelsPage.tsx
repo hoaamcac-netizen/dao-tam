@@ -250,7 +250,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
           <div className="py-24 flex flex-col items-center justify-center space-y-3 text-slate-400">
             <Loader2 className="w-8 h-8 animate-spin text-pink-600" />
             <p className="text-xs font-semibold text-pink-600 dark:text-pink-400">
-              Đang tổng hợp dữ liệu giao dịch từ Firestore...
+              Đang tổng hợp dữ liệu giao dịch từ hệ thống...
             </p>
           </div>
         ) : (filteredStories?.length || 0) === 0 ? (

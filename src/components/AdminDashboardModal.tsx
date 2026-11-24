@@ -284,7 +284,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       console.error('Lỗi tìm kiếm server-side user:', err);
       setUserFeedbackMsg({
         type: 'warning_error',
-        text: `Cảnh báo lỗi tìm kiếm máy chủ: ${err?.message || 'Không thể truy vấn Firestore'}`,
+        text: `Cảnh báo lỗi tìm kiếm máy chủ: ${err?.message || 'Không thể truy vấn cơ sở dữ liệu'}`,
       });
     } finally {
       setIsLoadingUsers(false);
@@ -311,7 +311,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       console.error('Lỗi khi tải danh sách người dùng:', err);
       setUserFeedbackMsg({
         type: 'warning_error',
-        text: `Cảnh báo lỗi: Không thể tải danh sách người dùng từ Firebase. Chi tiết: ${err?.message || 'Lỗi mạng hoặc phân quyền'}`
+        text: `Cảnh báo lỗi: Không thể tải danh sách người dùng từ hệ thống. Chi tiết: ${err?.message || 'Lỗi mạng hoặc phân quyền'}`
       });
     } finally {
       setIsLoadingUsers(false);
@@ -397,7 +397,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       // BẮT LỖI FIREBASE BẰNG BANNER NỀN MÀU VÀNG (TUYỆT ĐỐI KHÔNG DÙNG MÀU ĐỎ)
       setUserFeedbackMsg({
         type: 'warning_error',
-        text: `Cảnh báo lỗi: Không thể ${isCurrentlyBanned ? 'mở khóa' : 'khóa'} tài khoản. Chi tiết: ${err?.message || 'Lỗi phân quyền hoặc mất kết nối Firebase'}`
+        text: `Cảnh báo lỗi: Không thể ${isCurrentlyBanned ? 'mở khóa' : 'khóa'} tài khoản. Chi tiết: ${err?.message || 'Lỗi phân quyền hoặc mất kết nối hệ thống'}`
       });
     } finally {
       setProcessingBanUid(null);
@@ -452,7 +452,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     } catch (err: any) {
       console.error('Lỗi khi tặng xu cho user:', err);
       setDonateModalError(
-        err?.message || 'Không thể tặng xu. Vui lòng kiểm tra quyền Firestore hoặc kết nối mạng.'
+        err?.message || 'Không thể tặng xu. Vui lòng kiểm tra quyền quản trị hoặc kết nối mạng.'
       );
     } finally {
       setIsDonatingCoins(false);
@@ -512,7 +512,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     } catch (err: any) {
       console.error('Lỗi khi cấp quyền truyện:', err);
       setGrantModalError(
-        err?.message || 'Không thể cấp quyền truyện. Vui lòng kiểm tra quyền Firestore hoặc kết nối mạng.'
+        err?.message || 'Không thể cấp quyền truyện. Vui lòng kiểm tra quyền quản trị hoặc kết nối mạng.'
       );
     } finally {
       setIsGrantingStory(false);
@@ -605,7 +605,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
         if (!mounted) return;
         setBannerFeedback({
           type: 'warning_error',
-          text: `Không thể tải cấu hình Thông Báo Toàn Trang: ${err?.message || 'Lỗi kết nối Firestore'}`,
+          text: `Không thể tải cấu hình Thông Báo Toàn Trang: ${err?.message || 'Lỗi kết nối hệ thống'}`,
         });
       })
       .finally(() => {
@@ -645,7 +645,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       } catch {}
       setBannerFeedback({
         type: 'warning_error',
-        text: `Cảnh báo lỗi Firestore: ${msg}`,
+        text: `Cảnh báo lỗi hệ thống: ${msg}`,
       });
     } finally {
       setIsSavingBanner(false);
@@ -812,7 +812,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       });
     } catch (err: any) {
       console.error('Lỗi khi duyệt nạp xu:', err);
-      let errMsg = err?.message || 'Lỗi mạng hoặc không thể kết nối tới cơ sở dữ liệu Firestore.';
+      let errMsg = err?.message || 'Lỗi mạng hoặc không thể kết nối tới cơ sở dữ liệu.';
       try {
         const parsed = JSON.parse(errMsg);
         if (parsed && parsed.error) errMsg = parsed.error;
@@ -858,7 +858,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       });
     } catch (err: any) {
       console.error('Lỗi khi từ chối nạp xu:', err);
-      let errMsg = err?.message || 'Lỗi mạng hoặc không thể cập nhật cơ sở dữ liệu Firestore.';
+      let errMsg = err?.message || 'Lỗi mạng hoặc không thể cập nhật cơ sở dữ liệu.';
       try {
         const parsed = JSON.parse(errMsg);
         if (parsed && parsed.error) errMsg = parsed.error;
@@ -2300,7 +2300,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         }
                       }}
                       className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50"
-                      title="Tải lại danh sách truyện từ Firestore"
+                      title="Tải lại danh sách truyện từ hệ thống"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${isReloadingNovels ? 'animate-spin' : ''}`} />
                       <span>Tải lại</span>
@@ -2336,7 +2336,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         type="button"
                         onClick={() => setMp3ManagingNovel(novel)}
                         className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
-                        title="Tải lên hoặc tự tạo file MP3 GitHub cho từng chương"
+                        title="Tải lên hoặc tự tạo tệp MP3 cho từng chương"
                       >
                         <Headphones className="w-3.5 h-3.5 text-emerald-600" />
                         <span>MP3 Chương</span>
@@ -2755,7 +2755,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   <div className="w-10 h-10 rounded-xl bg-pink-50 border border-pink-200 flex items-center justify-center text-pink-600">
                     <FileCode2 className="w-5 h-5" />
                   </div>
-                  <h4 className="font-bold text-sm text-slate-900">Kiến Trúc Vercel Serverless &amp; API Bảo Mật</h4>
+                  <h4 className="font-bold text-sm text-slate-900">Kiến Trúc Máy Chủ &amp; API Bảo Mật</h4>
                   <p className="text-xs text-slate-600 leading-relaxed">
                     Toàn bộ logic trừ Xu, kiểm tra quyền VIP, trả nội dung đã mã hóa và chia nhuận bút được chạy trên môi trường Server an toàn chống can thiệp.
                   </p>
@@ -2767,7 +2767,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       }}
                       className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white font-bold text-xs cursor-pointer shadow-xs transition"
                     >
-                      Xem Hồ Sơ Kiến Trúc Vercel
+                      Xem Hồ Sơ Kiến Trúc Hệ Thống
                     </button>
                   )}
                 </div>
@@ -2958,11 +2958,11 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   <span>
                     {isSearchingUsersServer ? (
                       <>
-                        <strong>Tìm kiếm máy chủ (Prefix Email):</strong> Đang truy vấn trực tiếp trên Firestore (giới hạn <strong>limit 20</strong> kết quả để bảo vệ Quota Đọc).
+                        <strong>Tìm kiếm máy chủ (Theo Email):</strong> Đang truy vấn trực tiếp trên cơ sở dữ liệu (giới hạn tối đa <strong>20</strong> kết quả mỗi lượt).
                       </>
                     ) : (
                       <>
-                        <strong>Tối ưu Quota Spark:</strong> Hệ thống sử dụng phân trang con trỏ (limit 25 &amp; startAfter), tuyệt đối không tải toàn bộ database cùng lúc.
+                        <strong>Tối ưu tốc độ tải:</strong> Hệ thống sử dụng phân trang theo từng đợt (25 tài khoản/trang), không tải toàn bộ cơ sở dữ liệu cùng lúc.
                       </>
                     )}
                   </span>
@@ -3006,8 +3006,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                     <Loader2 className="w-8 h-8 animate-spin text-pink-600" />
                     <p className="text-xs font-medium">
                       {isSearchingUsersServer
-                        ? 'Đang tìm kiếm người dùng trên Firestore...'
-                        : 'Đang tải danh sách người dùng từ Firestore...'}
+                        ? 'Đang tìm kiếm người dùng trên hệ thống...'
+                        : 'Đang tải danh sách người dùng từ hệ thống...'}
                     </p>
                   </div>
                 ) : (usersList?.length || 0) === 0 ? (
@@ -4141,7 +4141,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Hệ thống dùng <code className="font-mono font-bold">arrayUnion()</code> đẩy trực tiếp vào mảng <code className="font-mono font-bold">purchasedChapters</code> trên Firestore và không ảnh hưởng tới <code className="font-mono font-bold">xuBalance</code>.
+                  Hệ thống cập nhật trực tiếp danh sách chương đã mở khóa trên cơ sở dữ liệu và không ảnh hưởng tới số dư Xu.
                 </p>
               </div>
 

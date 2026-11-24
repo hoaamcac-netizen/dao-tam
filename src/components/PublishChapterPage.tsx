@@ -379,7 +379,7 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
               <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/60 border-2 border-amber-400 text-amber-950 dark:text-amber-200 text-xs sm:text-sm font-bold flex items-center gap-3 shadow-xs animate-pulse">
                 <div className="w-5 h-5 border-2 border-amber-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                 <div className="flex-1">
-                  <span>⚡ Đang ghi chương vào Firestore... Vui lòng không nhấn liên tục hoặc làm mới trang để tiết kiệm quota Firebase!</span>
+                  <span>⚡ Đang lưu chương lên hệ thống... Vui lòng không nhấn liên tục hoặc làm mới trang!</span>
                 </div>
               </div>
             )}

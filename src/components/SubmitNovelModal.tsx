@@ -432,7 +432,7 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
     } catch (err: any) {
       // BẮT LỖI FIREBASE VÀO BLOCK CATCH & HIỆN CẢNH BÁO NỀN MÀU VÀNG
       console.error('Lỗi khi đăng truyện:', err);
-      setSubmitError(err?.message || 'Có lỗi xảy ra khi gửi dữ liệu lên Firebase. Vui lòng kiểm tra lại mạng và thử lại!');
+      setSubmitError(err?.message || 'Có lỗi xảy ra khi gửi dữ liệu lên hệ thống. Vui lòng kiểm tra lại mạng và thử lại!');
     } finally {
       setIsSubmitting(false);
     }

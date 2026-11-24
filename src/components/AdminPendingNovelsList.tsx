@@ -86,7 +86,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
     } catch (error: any) {
       console.warn('[AdminPendingNovels] Lỗi kết nối Firestore:', error);
       setErrorMessage(
-        `Cảnh báo kết nối Firebase: ${error?.message || 'Không thể tải danh sách truyện chờ duyệt. Vui lòng bấm Tải lại.'}`
+        `Cảnh báo kết nối hệ thống: ${error?.message || 'Không thể tải danh sách truyện chờ duyệt. Vui lòng bấm Tải lại.'}`
       );
     } finally {
       setIsLoading(false);
@@ -124,7 +124,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
     } catch (err: any) {
       console.error('Lỗi khi duyệt truyện:', err);
       // Hiển thị cảnh báo lỗi bằng banner nền màu vàng
-      setErrorMessage(`Lỗi xử lý duyệt truyện "${sub.title}": ${err?.message || 'Không thể cập nhật Firestore.'}`);
+      setErrorMessage(`Lỗi xử lý duyệt truyện "${sub.title}": ${err?.message || 'Không thể cập nhật cơ sở dữ liệu.'}`);
       // Hoàn tác lại danh sách nếu thất bại
       setPendingNovels((prev) => [sub, ...prev]);
     } finally {
@@ -153,7 +153,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
       }
     } catch (err: any) {
       console.error('Lỗi khi từ chối truyện:', err);
-      setErrorMessage(`Lỗi từ chối tác phẩm: ${err?.message || 'Không thể cập nhật trạng thái lên Firestore.'}`);
+      setErrorMessage(`Lỗi từ chối tác phẩm: ${err?.message || 'Không thể cập nhật trạng thái lên hệ thống.'}`);
       if (targetSub) setPendingNovels((prev) => [targetSub, ...prev]);
     } finally {
       setActionProcessingId(null);
@@ -183,7 +183,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
   // Xử lý khi Admin bấm Xóa vĩnh viễn document
   const handleDelete = async (subId: string, title: string) => {
     if (actionProcessingId) return;
-    if (!window.confirm(`Bạn có chắc chắn muốn xóa vĩnh viễn bản thảo truyện "${title}"? Thao tác này sẽ xóa document khỏi Firestore.`)) {
+    if (!window.confirm(`Bạn có chắc chắn muốn xóa vĩnh viễn bản thảo truyện "${title}"? Thao tác này sẽ xóa dữ liệu khỏi hệ thống.`)) {
       return;
     }
 
@@ -201,7 +201,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
       }
     } catch (err: any) {
       console.error('Lỗi khi xóa truyện:', err);
-      setErrorMessage(`Lỗi xóa tác phẩm: ${err?.message || 'Không thể xóa document trên Firestore.'}`);
+      setErrorMessage(`Lỗi xóa tác phẩm: ${err?.message || 'Không thể xóa dữ liệu trên hệ thống.'}`);
       if (targetSub) setPendingNovels((prev) => [targetSub, ...prev]);
     } finally {
       setActionProcessingId(null);
@@ -260,7 +260,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
             Danh sách Chờ Duyệt:
           </span>
           <span className="text-pink-700 font-semibold">
-            Đọc 1 lần theo yêu cầu (status: 'pending') • Tiết kiệm Quota Spark
+            Đọc theo yêu cầu • Tối ưu tốc độ tải
           </span>
         </div>
 
@@ -285,7 +285,7 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
       {isLoading && (
         <div className="py-12 text-center text-xs text-pink-600 flex flex-col items-center justify-center gap-2 bg-white rounded-2xl border border-pink-100 shadow-2xs">
           <div className="w-6 h-6 border-2 border-pink-600 border-t-transparent rounded-full animate-spin" />
-          <span className="font-semibold">Đang tải danh sách truyện chờ duyệt từ Firestore...</span>
+          <span className="font-semibold">Đang tải danh sách truyện chờ duyệt từ hệ thống...</span>
         </div>
       )}
 

@@ -457,7 +457,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
               <div className="flex-1 min-w-0">
                 {isDirectMp3 ? (
                   <div className="min-h-[44px] px-2.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/60 text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold flex items-center justify-center truncate">
-                    <span className="truncate">MP3 GitHub • Nền ổn định</span>
+                    <span className="truncate">MP3 • Nền ổn định</span>
                   </div>
                 ) : (
                   <VoiceSelectorDropdown

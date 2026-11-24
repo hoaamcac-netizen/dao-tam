@@ -593,9 +593,10 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     const handleCopy = (e: ClipboardEvent) => {
       e.preventDefault();
       if (e.clipboardData) {
+        const currentSource = typeof window !== 'undefined' ? window.location.origin : 'Đạo Tâm';
         e.clipboardData.setData(
           'text/plain',
-          `[NỘI DUNG BẢN QUYỀN ĐẠO TÂM]\nTác phẩm: "${novel.title}" - ${chapter.title}\nTác giả: ${novel.author}\nNguồn chính thức: https://dao-tam-doc-truyen.vercel.app\nCảnh báo: Tác phẩm được bảo hộ bản quyền. Mọi hành vi cào dữ liệu hoặc sao chép lậu đều bị xử lý.`
+          `[NỘI DUNG BẢN QUYỀN ĐẠO TÂM]\nTác phẩm: "${novel.title}" - ${chapter.title}\nTác giả: ${novel.author}\nNguồn chính thức: ${currentSource}\nCảnh báo: Tác phẩm được bảo hộ bản quyền. Mọi hành vi cào dữ liệu hoặc sao chép lậu đều bị xử lý.`
         );
       }
       setDrmWarning('Cảnh báo: Hành vi sao chép nội dung đã bị chặn!');
@@ -972,7 +973,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {/* Share / Copy direct link */}
             <button
               onClick={() => {
-                const origin = typeof window !== 'undefined' ? window.location.origin : 'https://dao-tam-doc-truyen.vercel.app';
+                const origin = typeof window !== 'undefined' ? window.location.origin : '';
                 const cleanNovelSlug = (novel.slug && novel.slug.trim()) ? novel.slug.trim() : (novel.id || '').trim();
                 const cleanChapterSlug = (chapter.slug && chapter.slug.trim()) ? chapter.slug.trim() : `chuong-${chapter.number}`;
                 const shareUrl = `${origin}/truyen/${cleanNovelSlug}/${cleanChapterSlug}`;

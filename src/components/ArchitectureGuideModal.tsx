@@ -128,10 +128,10 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                   </div>
                   <div>
                     <h4 className="font-bold text-emerald-400 text-sm">
-                      Kiến Trúc Vercel Serverless Hiện Đại — Tối Ưu Chi Phí $0 Vận Hành
+                      Kiến Trúc Máy Chủ Hiện Đại — Tối Ưu Chi Phí $0 Vận Hành
                     </h4>
                     <p className="text-xs text-neutral-300">
-                      Hệ thống loại bỏ hoàn toàn các giới hạn cấu trúc cũ của Blogger, vận hành trên nền tảng <strong>Vercel Serverless + Edge TTS Chunking</strong> siêu tốc. Toàn bộ logic khóa VIP, trừ Xu và chia nhuận bút được bảo mật trên Server an toàn, cho phép chi trả tỷ lệ doanh thu kỷ lục cho nhà sáng tạo: <strong>Tác giả 98%</strong>, <strong>Độc quyền 95%</strong>, <strong>Editor 90%</strong>!
+                      Hệ thống vận hành trên nền tảng <strong>Máy chủ Đám mây + Hệ thống Đọc Audio Tốc độ Cao</strong>. Toàn bộ logic khóa VIP, trừ Xu và chia nhuận bút được bảo mật trên máy chủ an toàn, cho phép chi trả tỷ lệ doanh thu kỷ lục cho nhà sáng tạo: <strong>Tác giả 98%</strong>, <strong>Độc quyền 95%</strong>, <strong>Editor 90%</strong>!
                     </p>
                   </div>
                 </div>
@@ -141,37 +141,37 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="p-4 rounded-xl bg-[#171822] border border-neutral-800 space-y-2">
                   <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
-                    <Cpu className="w-4 h-4" /> Giao Diện (Frontend): React 19 + Tailwind
+                    <Cpu className="w-4 h-4" /> Giao Diện Web Tốc Độ Cao
                   </div>
                   <p className="text-xs text-neutral-400">
-                    Ứng dụng dạng SPA tốc độ cao, hiển thị tức thì, hỗ trợ mượt mà trên iPhone, iPad và điện thoại Android. Không cần bảo trì máy chủ web.
+                    Ứng dụng web đơn trang (SPA) hiển thị tức thì, hỗ trợ mượt mà trên iPhone, iPad và điện thoại Android. Không cần bảo trì máy chủ thủ công.
                   </p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#171822] border border-neutral-800 space-y-2">
                   <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
-                    <Sparkles className="w-4 h-4" /> Trình Đọc Audio TTS (Web Speech Engine)
+                    <Sparkles className="w-4 h-4" /> Trình Đọc Audio &amp; Kho Âm Thanh MP3
                   </div>
                   <p className="text-xs text-neutral-400">
-                    Tận dụng công nghệ Text-to-Speech tự nhiên có sẵn trong mọi thiết bị (Chrome, Safari, Edge). Tiết kiệm 100% dung lượng lưu trữ file âm thanh và tiền băng thông (tiết kiệm hàng triệu đồng/tháng so với upload MP3).
+                    Kết hợp máy chủ âm thanh giọng đọc tự nhiên cùng kho âm thanh MP3 phát nền ổn định, tối ưu trải nghiệm nghe xuyên suốt kể cả khi tắt màn hình điện thoại.
                   </p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#171822] border border-neutral-800 space-y-2">
                   <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
-                    <Database className="w-4 h-4" /> Cơ Sở Dữ Liệu: Firebase Firestore &amp; Auth
+                    <Database className="w-4 h-4" /> Cơ Sở Dữ Liệu &amp; Xác Thực Đám Mây
                   </div>
                   <p className="text-xs text-neutral-400">
-                    Gói miễn phí của Google hỗ trợ 50.000 lượt đọc/ngày và 1GB lưu trữ. Đồng bộ dữ liệu ví Xu, chương đã mua và tiến trình đọc giữa điện thoại và máy tính tự động.
+                    Lưu trữ dữ liệu theo thời gian thực với khả năng đồng bộ ví Xu, chương đã mua và tiến trình đọc giữa điện thoại và máy tính hoàn toàn tự động.
                   </p>
                 </div>
 
                 <div className="p-4 rounded-xl bg-[#171822] border border-neutral-800 space-y-2">
                   <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
-                    <Rocket className="w-4 h-4" /> Máy Chủ Triển Khai: Vercel / Netlify
+                    <Rocket className="w-4 h-4" /> Hạ Tầng Máy Chủ Triển Khai Toàn Cầu
                   </div>
                   <p className="text-xs text-neutral-400">
-                    Băng thông miễn phí 100GB/tháng, chứng chỉ bảo mật SSL (https://) miễn phí vĩnh viễn, tự động chịu tải khi có hàng nghìn người cùng đọc truyện.
+                    Băng thông rộng, chứng chỉ bảo mật SSL (https://) miễn phí vĩnh viễn, tự động chịu tải khi có hàng nghìn người cùng đọc và nghe truyện.
                   </p>
                 </div>
               </div>
@@ -182,7 +182,7 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
             <div className="max-w-3xl mx-auto space-y-5">
               <div>
                 <h3 className="font-serif text-lg font-bold text-amber-300">
-                  Hướng Dẫn Xuất Mã Nguồn &amp; Triển Khai Lên Vercel Miễn Phí 100%
+                  Hướng Dẫn Xuất Mã Nguồn &amp; Triển Khai Lên Máy Chủ Đám Mây
                 </h3>
                 <p className="text-xs text-neutral-400 mt-1">
                   Chỉ cần 5 - 10 phút, không cần thuê máy chủ VPS đắt đỏ, website của bạn sẽ chạy 24/7 với chứng chỉ SSL HTTPS hoàn toàn miễn phí.
@@ -196,12 +196,12 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                     1
                   </span>
                   <h4 className="font-bold text-neutral-100 text-base">
-                    Tải (Download/Export) toàn bộ mã nguồn về máy tính
+                    Tải (Export) toàn bộ mã nguồn về máy tính
                   </h4>
                 </div>
                 <div className="text-neutral-400 text-xs pl-10 space-y-1.5">
                   <p>
-                    • Trên giao diện của Google AI Studio Build, nhấp vào biểu tượng <strong>Tải Xuống (Download Project / Export ZIP)</strong> hoặc <strong>Push to GitHub</strong> ở góc trên bên phải.
+                    • Tải gói mã nguồn dạng ZIP từ bảng quản trị dự án về máy tính của bạn.
                   </p>
                   <p>
                     • Giải nén file ZIP vào một thư mục trên máy tính của bạn (ví dụ: <code>C:\daotam-web</code> hoặc <code>/Users/tenban/daotam-web</code>).
@@ -216,18 +216,15 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                     2
                   </span>
                   <h4 className="font-bold text-neutral-100 text-base">
-                    Đưa mã nguồn lên GitHub (Kho lưu trữ mã nguồn miễn phí)
+                    Đưa mã nguồn lên kho lưu trữ trực tuyến
                   </h4>
                 </div>
                 <div className="text-neutral-400 text-xs pl-10 space-y-1.5">
                   <p>
-                    • Truy cập <a href="https://github.com" target="_blank" rel="noreferrer" className="text-amber-400 underline font-semibold">GitHub.com</a> và đăng nhập (nếu chưa có thì đăng ký tài khoản miễn phí).
+                    • Tạo một kho lưu trữ mã nguồn trực tuyến (chế độ <em>Private</em> hoặc <em>Public</em>).
                   </p>
                   <p>
-                    • Bấm vào nút <strong>New Repository</strong>, đặt tên kho (ví dụ: <code>dao-tam-truyen</code>), chọn chế độ <em>Private</em> (riêng tư) hoặc <em>Public</em> rồi nhấn <strong>Create repository</strong>.
-                  </p>
-                  <p>
-                    • Tải mã nguồn lên bằng phần mềm trực quan <strong>GitHub Desktop</strong> (rất dễ dùng cho người không biết code) hoặc kéo thả trực tiếp các file vào GitHub.
+                    • Tải toàn bộ thư mục mã nguồn vừa giải nén lên kho lưu trữ để sẵn sàng đồng bộ tự động mỗi khi cập nhật.
                   </p>
                 </div>
               </div>
@@ -239,24 +236,18 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                     3
                   </span>
                   <h4 className="font-bold text-neutral-100 text-base">
-                    Kết nối với Vercel để chạy website online
+                    Kết nối với máy chủ triển khai để chạy website online
                   </h4>
                 </div>
                 <div className="text-neutral-400 text-xs pl-10 space-y-1.5">
                   <p>
-                    • Truy cập <a href="https://vercel.com" target="_blank" rel="noreferrer" className="text-amber-400 underline font-semibold">Vercel.com</a> &rarr; Chọn <strong>Sign Up</strong> / <strong>Log In</strong> bằng tài khoản <strong>GitHub</strong> vừa tạo.
+                    • Kết nối kho mã nguồn với nhà cung cấp máy chủ web tĩnh/đám mây và chọn <strong>Import</strong>.
                   </p>
                   <p>
-                    • Nhấp vào nút <strong>Add New... &rarr; Project</strong>.
+                    • Thiết lập lệnh dựng là <code>npm run build</code> và thư mục xuất là <code>dist</code>, sau đó bấm <strong>Deploy</strong>.
                   </p>
                   <p>
-                    • Tại danh sách Git Repositories, tìm kho <code>dao-tam-truyen</code> của bạn và bấm <strong>Import</strong>.
-                  </p>
-                  <p>
-                    • Vercel sẽ tự động nhận diện dự án là <strong>Vite</strong> với Build Command là <code>npm run build</code> và Output Directory là <code>dist</code>. Bạn chỉ cần nhấn nút <strong>Deploy</strong> màu xanh.
-                  </p>
-                  <p>
-                    • Trong 1 phút, Vercel sẽ cung cấp tên miền trực tiếp miễn phí (ví dụ: <code>dao-tam-truyen.vercel.app</code>).
+                    • Sau khoảng 1 phút, máy chủ sẽ cung cấp địa chỉ truy cập trực tuyến có sẵn HTTPS.
                   </p>
                 </div>
               </div>
@@ -268,21 +259,18 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
                     4
                   </span>
                   <h4 className="font-bold text-neutral-100 text-base">
-                    Thêm tên miền Vercel vào Firebase Console (Để đăng nhập Google hoạt động)
+                    Cấp phép tên miền trong bảng điều khiển xác thực hệ thống
                   </h4>
                 </div>
                 <div className="text-neutral-400 text-xs pl-10 space-y-1.5">
                   <p>
-                    • Truy cập <a href="https://console.firebase.google.com" target="_blank" rel="noreferrer" className="text-emerald-400 underline font-semibold">Firebase Console</a> &rarr; Chọn dự án Firebase của bạn.
+                    • Mở mục <strong>Xác thực (Authentication) &rarr; Cài đặt &rarr; Tên miền được cấp phép</strong> trong trang quản trị hệ thống.
                   </p>
                   <p>
-                    • Vào mục <strong>Authentication &rarr; Settings &rarr; Authorized domains</strong>.
-                  </p>
-                  <p>
-                    • Bấm <strong>Add domain</strong> và dán tên miền Vercel của bạn vào (ví dụ: <code>dao-tam-truyen.vercel.app</code>) &rarr; Bấm <strong>Save</strong>.
+                    • Thêm tên miền trang web của bạn vào danh sách cho phép và bấm <strong>Lưu</strong>.
                   </p>
                   <p className="text-emerald-400 font-semibold pt-1">
-                    🎉 Hoàn tất! Giờ đây bất kỳ độc giả nào cũng có thể truy cập website, đăng nhập bằng Google, mua chương VIP và Quản trị viên có thể đăng nhập bằng tài khoản Admin để toàn quyền quản trị!
+                    🎉 Hoàn tất! Giờ đây bất kỳ độc giả nào cũng có thể truy cập website, đăng nhập bằng Google, mua chương VIP và Quản trị viên có thể toàn quyền quản trị!
                   </p>
                 </div>
               </div>
@@ -338,28 +326,25 @@ export const ArchitectureGuideModal: React.FC<ArchitectureGuideModalProps> = ({
           {activeTab === 'source' && (
             <div className="max-w-3xl mx-auto space-y-4">
               <h3 className="font-serif text-lg font-bold text-amber-300">
-                Các Tệp Cấu Hình Nguyên Khối Độc Lập
+                Quy Tắc An Ninh Cơ Sở Dữ Liệu
               </h3>
               <p className="text-xs text-neutral-400">
-                Dưới đây là nội dung quy tắc an ninh Firestore Security Rules đảm bảo người dùng không thể hack Xu hay xem trộm chương VIP từ API.
+                Dưới đây là tóm tắt các nguyên tắc phân quyền bảo mật cơ sở dữ liệu nhằm đảm bảo người dùng không thể tự thay đổi số dư Xu hay truy cập trái phép chương VIP từ API.
               </p>
 
               <div className="relative p-4 rounded-xl bg-[#090a0f] border border-neutral-800 font-mono text-xs text-neutral-300">
                 <button
                   onClick={() =>
                     handleCopyText(
-                      `rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow update: if false; // Only cloud function/admin can update balance
-    }
-    match /novels/{novelId}/chapters/{chapterId} {
-      allow read: if resource.data.isVip == false || 
-        request.auth != null && exists(/databases/$(database)/documents/users/$(request.auth.uid)/unlocked/$(chapterId));
-    }
-  }`,
+                      `// Quy tắc phân quyền truy cập cơ sở dữ liệu
+match /users/{userId} {
+  allow read: if request.auth != null && request.auth.uid == userId;
+  allow update: if false; // Chỉ Quản trị viên / Hệ thống mới được cập nhật số dư Xu
+}
+match /novels/{novelId}/chapters/{chapterId} {
+  allow read: if resource.data.isVip == false ||
+    (request.auth != null && isChapterUnlocked(request.auth.uid, chapterId));
+}`,
                       'rules'
                     )
                   }
@@ -368,18 +353,14 @@ service cloud.firestore {
                   {copiedSection === 'rules' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   Sao chép
                 </button>
-                <pre>{`rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow update: if false; // Chỉ Admin/Backend mới được cộng Xu
-    }
-    match /novels/{novelId}/chapters/{chapterId} {
-      allow read: if resource.data.isVip == false || 
-        request.auth != null && exists(/databases/$(database)/documents/users/$(request.auth.uid)/unlocked/$(chapterId));
-    }
-  }
+                <pre>{`// Quy tắc phân quyền truy cập cơ sở dữ liệu
+match /users/{userId} {
+  allow read: if request.auth != null && request.auth.uid == userId;
+  allow update: if false; // Chỉ Quản trị viên / Hệ thống mới được cập nhật số dư Xu
+}
+match /novels/{novelId}/chapters/{chapterId} {
+  allow read: if resource.data.isVip == false ||
+    (request.auth != null && isChapterUnlocked(request.auth.uid, chapterId));
 }`}</pre>
               </div>
             </div>

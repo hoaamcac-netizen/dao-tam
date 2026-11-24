@@ -428,7 +428,7 @@ Nội dung chương 3 viết ở đây...`;
 
       setUploadProgress({ saved: formattedChapters?.length || 0, total: formattedChapters?.length || 0 });
       setFeedbackMsg({
-        text: `🎉 Đã đăng thành công ${formattedChapters?.length || 0} chương mới vào tác phẩm "${novel.title}"! Dữ liệu đã đồng bộ thời gian thực vào Cloud Firestore.`,
+        text: `🎉 Đã đăng thành công ${formattedChapters?.length || 0} chương mới vào tác phẩm "${novel.title}"! Dữ liệu đã được đồng bộ thời gian thực lên hệ thống.`,
         type: 'success',
       });
 

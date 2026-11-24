@@ -317,7 +317,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
         console.error('Error batch deleting chapters:', err);
         // Khôi phục lại mảng chương nếu Firestore báo lỗi
         setChapters((prev) => [...prev, ...toDelete].sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0)));
-        setSaveErrorMsg(`Lỗi khi xóa các chương khỏi Firestore: ${err?.message || 'Không thể xóa'}`);
+        setSaveErrorMsg(`Lỗi khi xóa các chương khỏi hệ thống: ${err?.message || 'Không thể xóa'}`);
         setTimeout(() => setSaveErrorMsg(''), 5000);
       } finally {
         setIsDeletingBatch(false);
@@ -427,7 +427,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
       console.error('Error deleting single chapter:', err);
       // Khôi phục nếu lỗi
       setChapters((prev) => [...prev, target].sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0)));
-      setSaveErrorMsg(`Lỗi khi xóa chương khỏi Firestore: ${err?.message || 'Không thể xóa'}`);
+      setSaveErrorMsg(`Lỗi khi xóa chương khỏi hệ thống: ${err?.message || 'Không thể xóa'}`);
       setTimeout(() => setSaveErrorMsg(''), 5000);
     } finally {
       setDeletingChapterIds((prev) => {
@@ -688,8 +688,8 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
           <div className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 text-amber-950 font-bold flex items-center gap-3 shadow-md animate-pulse">
             <div className="w-5 h-5 border-2 border-amber-700 border-t-transparent rounded-full animate-spin flex-shrink-0" />
             <div className="flex-1">
-              <p className="text-xs sm:text-sm font-black">⚡ Đang cập nhật và lưu thay đổi lên máy chủ Cloud Firestore...</p>
-              <p className="text-[11px] text-amber-800 font-normal">Hệ thống đang đồng bộ an toàn bằng WriteBatch. Vui lòng không nhấn nút nhiều lần.</p>
+              <p className="text-xs sm:text-sm font-black">⚡ Đang cập nhật và lưu thay đổi lên hệ thống...</p>
+              <p className="text-[11px] text-amber-800 font-normal">Hệ thống đang đồng bộ dữ liệu an toàn. Vui lòng không nhấn nút nhiều lần.</p>
             </div>
           </div>
         </div>
@@ -1201,7 +1201,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                   <div className="flex items-center gap-2 text-xs text-emerald-900 font-semibold">
                     <Headphones className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>
-                      Audio MP3 GitHub: đã có{' '}
+                      Audio MP3: đã có{' '}
                       <strong className="text-emerald-700">
                         {(chapters || []).filter((c) => Boolean(c.audioUrl && c.audioUrl.trim())).length}/{chapters?.length || 0}
                       </strong>{' '}

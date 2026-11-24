@@ -1666,7 +1666,7 @@ export async function grantStoryAccessToUserByAdmin(params: {
     const userRef = doc(db, 'users', targetUserId);
     const snap = await getDoc(userRef);
     if (!snap.exists()) {
-      throw new Error('Không tìm thấy tài khoản người dùng trên Firestore.');
+      throw new Error('Không tìm thấy tài khoản người dùng trên hệ thống.');
     }
 
     const userData = snap.data() as Record<string, any>;
@@ -1996,7 +1996,7 @@ export async function purchaseVipItemWithTransaction(params: {
     return await runTransaction(db, async (transaction) => {
       const userSnap = await transaction.get(userRef);
       if (!userSnap.exists()) {
-        throw new Error('Không tìm thấy tài khoản trên hệ thống Firestore.');
+        throw new Error('Không tìm thấy tài khoản trên hệ thống.');
       }
 
       const data = userSnap.data() as Record<string, any>;
@@ -3302,7 +3302,7 @@ async function commitChaptersInSafeBatches(
     } catch (batchErr: any) {
       if (batchErr?.message?.includes('quota') || batchErr?.message?.includes('RESOURCE_EXHAUSTED')) {
         console.warn('Spark Quota limit reached on batch save. Preserving local cache.');
-        throw new Error('Hạn mức ghi Cloud Firestore (Spark plan) tạm thời chạm ngưỡng giới hạn. Dữ liệu các chương đã được lưu trữ an toàn trong bộ nhớ máy của bạn và sẵn sàng đọc.');
+        throw new Error('Hệ thống lưu trữ đang tạm thời quá tải lượt ghi. Dữ liệu các chương đã được lưu trữ an toàn trong bộ nhớ máy của bạn và sẵn sàng đọc.');
       }
       console.error(`Lỗi ghi batch ${Math.floor(i / FIRESTORE_BATCH_LIMIT) + 1}:`, batchErr);
       throw batchErr;
@@ -3602,7 +3602,7 @@ export async function saveBatchChaptersToFirestore(
     } catch (batchErr: any) {
       if (batchErr?.message?.includes('quota') || batchErr?.message?.includes('RESOURCE_EXHAUSTED')) {
         console.warn('Spark Quota limit reached on single batch write. Local state preserved.');
-        throw new Error('Hạn mức ghi Cloud Firestore (Spark plan) tạm thời chạm ngưỡng giới hạn. Dữ liệu các chương đã được lưu trữ an toàn trong bộ nhớ máy của bạn.');
+        throw new Error('Hệ thống lưu trữ đang tạm thời quá tải lượt ghi. Dữ liệu các chương đã được lưu trữ an toàn trong bộ nhớ máy của bạn.');
       }
       throw batchErr;
     }
@@ -4622,7 +4622,7 @@ export async function fetchPendingNovelSubmissionsFromFirestore(
     return list;
   } catch (err: any) {
     console.warn('Lỗi tải danh sách novel_submissions chờ duyệt:', err);
-    throw new Error(err?.message || 'Không thể tải danh sách truyện chờ duyệt từ Firestore.');
+    throw new Error(err?.message || 'Không thể tải danh sách truyện chờ duyệt từ hệ thống.');
   }
 }
 
@@ -5412,7 +5412,7 @@ export async function creditUserXuAndNotify(
     return await runTransaction(db, async (transaction) => {
       const snap = await transaction.get(userRef);
       if (!snap.exists()) {
-        throw new Error(`User ${userId} không tồn tại trên Firestore`);
+        throw new Error('Không tìm thấy tài khoản người dùng trên hệ thống.');
       }
 
       const currentData = snap.data() as Record<string, any>;
@@ -5734,7 +5734,7 @@ export async function processDonationInFirestore(params: {
   const txResult = await runTransaction(db, async (transaction) => {
     const donorSnap = await transaction.get(donorRef);
     if (!donorSnap.exists()) {
-      throw new Error('Không tìm thấy tài khoản người gửi trên Firestore.');
+      throw new Error('Không tìm thấy tài khoản người gửi trên hệ thống.');
     }
 
     const donorData = donorSnap.data() as Record<string, any>;

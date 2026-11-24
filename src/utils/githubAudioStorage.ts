@@ -72,7 +72,7 @@ export function parseGitHubRepo(input: string): ParsedGitHubRepo {
   const match = normalized.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
   if (!match) {
     throw new Error(
-      `Tên kho GitHub không hợp lệ. Vui lòng nhập đúng dạng username/ten-repo (ví dụ: ${DEFAULT_GITHUB_AUDIO_REPO}).`
+      'Tên kho âm thanh không hợp lệ. Vui lòng nhập đúng định dạng chủ-sở-hữu/tên-kho.'
     );
   }
   return {
@@ -260,8 +260,8 @@ async function fetchExistingGitHubFileSha(params: {
       throw err;
     }
     throw new Error(
-      `Lỗi mạng khi kiểm tra file trên GitHub (${cleanOwner}/${cleanRepo}): ${
-        err?.message || 'Không thể kết nối api.github.com'
+      `Lỗi mạng khi kiểm tra tệp trên kho âm thanh: ${
+        err?.message || 'Không thể kết nối máy chủ lưu trữ'
       }.`
     );
   }
@@ -272,17 +272,17 @@ async function fetchExistingGitHubFileSha(params: {
 
   if (res.status === 401 || res.status === 403) {
     throw new Error(
-      `Lỗi GitHub Token (HTTP ${res.status}): Token không hợp lệ, đã hết hạn hoặc thiếu quyền Contents (Read & Write).`
+      `Lỗi mã xác thực kho âm thanh (HTTP ${res.status}): Mã không hợp lệ, đã hết hạn hoặc thiếu quyền đọc/ghi tệp.`
     );
   }
 
   if (res.status === 429) {
-    throw new Error('Lỗi giới hạn tốc độ GitHub (HTTP 429): Đang gửi quá nhiều yêu cầu, vui lòng thử lại sau ít phút.');
+    throw new Error('Kho âm thanh đang quá tải (HTTP 429): Đang gửi quá nhiều yêu cầu, vui lòng thử lại sau ít phút.');
   }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Lỗi kiểm tra file trên GitHub (HTTP ${res.status}): ${errText || res.statusText}`);
+    throw new Error(`Lỗi kiểm tra tệp trên kho âm thanh (HTTP ${res.status}): ${errText || res.statusText}`);
   }
 
   const json = await res.json().catch(() => null);
@@ -306,7 +306,7 @@ export async function uploadMp3ToGitHub(params: {
 
   if (!repoRaw || !token) {
     throw new Error(
-      `Vui lòng nhập đầy đủ Tên kho GitHub (vd: ${DEFAULT_GITHUB_AUDIO_REPO}) và GitHub Token (PAT) trong phần Cài đặt trước khi tải lên.`
+      'Vui lòng nhập đầy đủ Tên kho âm thanh và Mã xác thực trong phần Cài đặt trước khi tải lên.'
     );
   }
 
@@ -332,7 +332,7 @@ export async function uploadMp3ToGitHub(params: {
     cleanRepo
   )}/contents/${encodedPath}`;
 
-  params.onProgress?.(88, 'Đang kiểm tra file cũ trên GitHub...');
+  params.onProgress?.(88, 'Đang kiểm tra tệp cũ trên kho âm thanh...');
   let existingSha = await fetchExistingGitHubFileSha({
     owner: cleanOwner,
     repo: cleanRepo,
@@ -341,7 +341,7 @@ export async function uploadMp3ToGitHub(params: {
     signal: params.signal,
   });
 
-  params.onProgress?.(92, 'Đang đẩy lên GitHub...');
+  params.onProgress?.(92, 'Đang tải MP3 lên kho âm thanh...');
   const base64Content = uint8ArrayToBase64(mp3Bytes);
   const commitMessage =
     params.commitMessage || `Upload audio MP3: ${filePath}`;
@@ -373,8 +373,8 @@ export async function uploadMp3ToGitHub(params: {
         throw err;
       }
       throw new Error(
-        `Lỗi mạng khi đẩy lên GitHub (${cleanOwner}/${cleanRepo}): ${
-          err?.message || 'Không thể kết nối api.github.com'
+        `Lỗi mạng khi tải MP3 lên kho âm thanh: ${
+          err?.message || 'Không thể kết nối máy chủ lưu trữ'
         }.`
       );
     }
@@ -403,32 +403,32 @@ export async function uploadMp3ToGitHub(params: {
     const errMsg = errJson?.message || putRes.statusText || 'Lỗi không xác định';
     if (putRes.status === 401 || putRes.status === 403) {
       throw new Error(
-        `Lỗi GitHub Token (HTTP ${putRes.status}): ${errMsg}. Hãy kiểm tra PAT có quyền Contents: Read & Write.`
+        `Lỗi mã xác thực kho âm thanh (HTTP ${putRes.status}): ${errMsg}. Hãy kiểm tra lại quyền đọc/ghi của mã.`
       );
     }
     if (putRes.status === 404) {
       throw new Error(
-        `Lỗi GitHub (HTTP 404): Không tìm thấy kho "${cleanOwner}/${cleanRepo}" hoặc nhánh "main".`
+        `Lỗi kho âm thanh (HTTP 404): Không tìm thấy kho lưu trữ hoặc nhánh cấu hình.`
       );
     }
     if (putRes.status === 409) {
       throw new Error(
-        `Lỗi xung đột commit GitHub (HTTP 409): File đang được cập nhật đồng thời. Hãy thử lại.`
+        `Lỗi xung đột ghi dữ liệu (HTTP 409): Tệp đang được cập nhật đồng thời. Hãy thử lại.`
       );
     }
     if (putRes.status === 429) {
       throw new Error(
-        `Lỗi giới hạn tốc độ GitHub (HTTP 429): Quá nhiều lượt ghi liên tiếp. Hãy chờ 1 phút rồi tiếp tục.`
+        `Kho âm thanh đang quá tải (HTTP 429): Quá nhiều lượt ghi liên tiếp. Hãy chờ 1 phút rồi tiếp tục.`
       );
     }
-    throw new Error(`Lỗi đẩy file lên GitHub (HTTP ${putRes.status}): ${errMsg}`);
+    throw new Error(`Lỗi tải tệp MP3 lên kho âm thanh (HTTP ${putRes.status}): ${errMsg}`);
   }
 
   const putData = await putRes.json().catch(() => ({}));
   const newSha = typeof putData?.content?.sha === 'string' ? putData.content.sha : '';
   const cdnUrl = buildChapterMp3CdnUrl(cleanOwner, cleanRepo, params.storyId, params.chapterId);
 
-  params.onProgress?.(96, 'Đã đẩy file MP3 lên GitHub thành công!');
+  params.onProgress?.(96, 'Đã tải tệp MP3 lên kho âm thanh thành công!');
   return {
     cdnUrl,
     githubPath: filePath,

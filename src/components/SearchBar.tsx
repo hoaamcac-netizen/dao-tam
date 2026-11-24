@@ -275,7 +275,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
       console.warn('[SearchBar] Lỗi khi xử lý tìm kiếm:', err);
       let msg = 'Đã xảy ra lỗi trong quá trình tìm kiếm. Vui lòng kiểm tra lại đường truyền mạng.';
       if (err?.message?.includes('Quota') || err?.message?.includes('RESOURCE_EXHAUSTED')) {
-        msg = 'Đã vượt quá hạn mức đọc (Quota) của gói Firestore Spark. Hệ thống sẽ tự động đặt lại vào ngày tiếp theo.';
+        msg = 'Hệ thống tìm kiếm đang tạm thời quá tải lưu lượng truy cập. Vui lòng thử lại sau ít phút.';
       } else if (err?.message) {
         msg = `Lỗi tìm kiếm: ${err.message}`;
       }

@@ -40,9 +40,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   if (!isOpen) return null;
 
   const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : 'https://truyen-doc-va-nghe-dao-tam.pages.dev';
+    typeof window !== 'undefined' ? window.location.origin : '';
   const currentHostname =
-    typeof window !== 'undefined' ? window.location.hostname : 'truyen-doc-va-nghe-dao-tam.pages.dev';
+    typeof window !== 'undefined' ? window.location.hostname : '';
 
   const handleCopyCurrentUrl = async () => {
     if (typeof window === 'undefined' || !navigator?.clipboard) return;
@@ -98,7 +98,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       ) {
         setIsOriginMismatch(true);
         setErrorMsg(
-          `Tên miền "${currentHostname}" chưa được cấp phép đăng nhập Google. Vui lòng thêm tên miền này vào Firebase Authorized domains.`
+          `Tên miền "${currentHostname}" chưa được cấp phép đăng nhập Google. Vui lòng liên hệ quản trị viên để cấu hình tên miền được phép.`
         );
         return;
       }
@@ -193,17 +193,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               {isOriginMismatch && (
                 <div className="mt-1 pt-2 border-t border-amber-200 dark:border-amber-800/60 text-[11px] space-y-2">
                   <p className="font-semibold text-amber-800 dark:text-amber-300">
-                    Cách cấp phép tên miền hiện tại:
+                    Thông tin tên miền cần cấp phép trong cài đặt xác thực hệ thống:
                   </p>
                   <ol className="list-decimal pl-4 space-y-1 text-slate-700 dark:text-slate-300">
                     <li>
-                      <b>Firebase Console</b> &rarr; <i>Authentication</i> &rarr; <i>Settings</i> &rarr; <i>Authorized domains</i> &rarr; Thêm:
+                      Tên miền (Domain):
                       <code className="block mt-0.5 p-1 bg-amber-100/80 dark:bg-amber-900/50 rounded font-mono text-[10px] break-all select-all">
                         {currentHostname}
                       </code>
                     </li>
                     <li>
-                      (Nếu dùng thêm OAuth Client riêng) <b>Google Cloud Console</b> &rarr; <i>APIs &amp; Services</i> &rarr; <i>Credentials</i> &rarr; <b>Authorized JavaScript origins</b> thêm:
+                      Nguồn gốc truy cập (Origin):
                       <code className="block mt-0.5 p-1 bg-amber-100/80 dark:bg-amber-900/50 rounded font-mono text-[10px] break-all select-all">
                         {currentOrigin}
                       </code>

@@ -67,10 +67,10 @@ function isVercelEndpointUrl(url: string): boolean {
 }
 
 export function getTtsProviderLabel(endpointUrl: string): string {
-  if (isNetlifyEndpointUrl(endpointUrl)) return 'Netlify';
-  if (isVercelEndpointUrl(endpointUrl)) return 'Vercel';
-  if (endpointUrl === '/api/tts') return 'Server cục bộ (/api/tts)';
-  return endpointUrl;
+  if (isNetlifyEndpointUrl(endpointUrl)) return 'máy chủ âm thanh';
+  if (isVercelEndpointUrl(endpointUrl)) return 'máy chủ âm thanh dự phòng';
+  if (endpointUrl === '/api/tts') return 'máy chủ âm thanh';
+  return 'máy chủ âm thanh';
 }
 
 /**
@@ -399,7 +399,7 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
 
       if (attempt > 0) {
         retryCounter += 1;
-        onRetryAttempt?.(retryCounter, `Thử lại ${provider} (lần ${attempt}/${maxRetries})`);
+        onRetryAttempt?.(retryCounter, `Đang thử lại máy chủ âm thanh (lần ${attempt}/${maxRetries})...`);
         const backoffMs = Math.min(2000, Math.round(retryDelayMs * Math.pow(1.6, attempt - 1)));
         await sleepWithAbort(backoffMs, externalSignal);
       }
@@ -449,8 +449,8 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
         onRetryAttempt?.(
           retryCounter,
           attempt === 0
-            ? `Chuyển sang máy chủ dự phòng ${provider}...`
-            : `Thử lại máy chủ dự phòng ${provider}...`
+            ? 'Đang chuyển sang máy chủ âm thanh dự phòng...'
+            : 'Đang thử lại máy chủ âm thanh dự phòng...'
         );
 
         if (attempt > 0) {
