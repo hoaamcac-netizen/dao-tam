@@ -15,16 +15,56 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 8500;
-export const TTS_MAX_RETRIES = 2; // Thử lại tối đa 2 lần trên Netlify trước khi chuyển sang Vercel dự phòng
+export const TTS_FETCH_TIMEOUT_MS = 9500;
+export const TTS_MAX_RETRIES = 2; // Thử lại tối đa 2 lần trên server chính trước khi chuyển sang server dự phòng
 export const TTS_RETRY_DELAY_MS = 450;
 export const TTS_ACTIVE_SERVER_STORAGE_KEY = 'daotam_active_tts_endpoint';
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 160;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 240;
-export const DEFAULT_CHUNK_MIN_LENGTH = 200;
-export const DEFAULT_CHUNK_MAX_LENGTH = 350;
-export const MAX_BLOB_CACHE_ENTRIES = 6;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 260;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 420;
+export const DEFAULT_CHUNK_MIN_LENGTH = 400;
+export const DEFAULT_CHUNK_MAX_LENGTH = 550;
+export const MAX_BLOB_CACHE_ENTRIES = 8;
 export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
+
+export function sanitizeUserFacingErrorText(raw?: string | null, fallback = 'Máy chủ âm thanh đang bận'): string {
+  const input = String(raw || '').trim();
+  if (!input) return fallback;
+  const cleaned = input
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/\b(github|firebase|firestore|netlify|vercel|cloudflare)\b/gi, 'máy chủ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*[:\-|]+\s*$/g, '')
+    .trim();
+  return cleaned || fallback;
+}
+
+export function extractPlainTextFromChapterHtml(raw: string): string {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|h[1-6]|li|tr|blockquote|section|article)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const code = Number(dec);
+      return Number.isFinite(code) ? String.fromCharCode(code) : ' ';
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCharCode(code) : ' ';
+    })
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
 
 export interface TtsServerTierConfig {
   primaryEndpoints: string[]; // Netlify (ưu tiên tuyệt đối gọi trước)
@@ -305,8 +345,9 @@ async function fetchSingleTtsEndpoint(params: {
           serverMsg = json?.error || json?.message || '';
         }
       } catch {}
+      const safeServerMsg = serverMsg ? sanitizeUserFacingErrorText(serverMsg, '') : '';
       const err: any = new Error(
-        `${provider} lỗi HTTP ${response.status}${serverMsg ? ` (${serverMsg})` : ''}`
+        `${provider} lỗi HTTP ${response.status}${safeServerMsg ? ` (${safeServerMsg})` : ''}`
       );
       err.httpStatus = response.status;
       err.provider = provider;
@@ -482,14 +523,14 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
       }
 
       if (backupError) {
-        errorTrail.push(backupError?.message || `${provider} lỗi không xác định`);
+        errorTrail.push(sanitizeUserFacingErrorText(backupError?.message, `${provider} lỗi kết nối`));
       }
     }
   }
 
   const finalError: any = new Error(
     errorTrail.length > 0
-      ? `Không thể kết nối máy chủ giọng đọc: ${errorTrail.join(' | ')}`
+      ? `Không thể kết nối máy chủ giọng đọc: ${sanitizeUserFacingErrorText(errorTrail.join(' | '))}`
       : 'Máy chủ giọng đọc không phản hồi.'
   );
   finalError.httpStatus = backupError?.httpStatus || primaryError?.httpStatus;
@@ -792,11 +833,11 @@ export function splitTextIntoSpeechChunks(
  *   trình duyệt Android/iOS tự ngắt âm thanh giữa chừng.
  * - Ưu tiên tách tại dấu câu kết thúc, tiếp theo dấu phẩy/hai chấm, cuối cùng theo ranh giới từ.
  */
-export function splitTextForDeviceSpeech(text: string, maxLength: number = 175): string[] {
+export function splitTextForDeviceSpeech(text: string, maxLength: number = 200): string[] {
   const cleaned = cleanTextForTTS(text);
   if (!cleaned || !/[\p{L}\p{N}]/u.test(cleaned)) return [];
 
-  const safeMax = Math.max(60, Math.min(178, maxLength));
+  const safeMax = Math.max(60, Math.min(200, maxLength));
   const rawUnits = cleaned
     .split(/(?<=[.?!;…])\s+/)
     .map((s) => s.trim())
@@ -1067,6 +1108,10 @@ export class AudioStreamer {
 
   public setPlaybackRate(rate: number) {
     this.playbackRate = rate;
+    const anyAudio = this.audioElement as any;
+    if ('preservesPitch' in this.audioElement) this.audioElement.preservesPitch = true;
+    if ('mozPreservesPitch' in anyAudio) anyAudio.mozPreservesPitch = true;
+    if ('webkitPreservesPitch' in anyAudio) anyAudio.webkitPreservesPitch = true;
     this.audioElement.defaultPlaybackRate = rate;
     this.audioElement.playbackRate = rate;
   }
@@ -1126,19 +1171,17 @@ export class AudioStreamer {
       this.audioElement.onloadedmetadata = null;
       this.audioElement.onplaying = null;
       this.audioElement.src = audioUrl;
-      this.audioElement.defaultPlaybackRate = this.playbackRate;
-      this.audioElement.playbackRate = this.playbackRate;
+      this.setPlaybackRate(this.playbackRate);
 
       let recoveryAttempted = false;
 
       this.audioElement.onloadedmetadata = () => {
-        this.audioElement.defaultPlaybackRate = this.playbackRate;
-        this.audioElement.playbackRate = this.playbackRate;
+        this.setPlaybackRate(this.playbackRate);
       };
 
       this.audioElement.onplaying = () => {
         this.clearStallTimer();
-        this.audioElement.playbackRate = this.playbackRate;
+        this.setPlaybackRate(this.playbackRate);
       };
 
       this.audioElement.onstalled = () => {
@@ -1150,19 +1193,17 @@ export class AudioStreamer {
             recoveryAttempted = true;
             try {
               if (this.audioElement.readyState >= 2) {
-                this.audioElement.defaultPlaybackRate = this.playbackRate;
-                this.audioElement.playbackRate = this.playbackRate;
+                this.setPlaybackRate(this.playbackRate);
                 await this.audioElement.play();
-                this.audioElement.playbackRate = this.playbackRate;
+                this.setPlaybackRate(this.playbackRate);
                 return;
               }
               const savedTime = Number.isFinite(this.audioElement.currentTime) ? this.audioElement.currentTime : 0;
               const savedDuration = Number.isFinite(this.audioElement.duration) ? this.audioElement.duration : 0;
               this.audioElement.load();
-              this.audioElement.defaultPlaybackRate = this.playbackRate;
-              this.audioElement.playbackRate = this.playbackRate;
+              this.setPlaybackRate(this.playbackRate);
               await this.audioElement.play();
-              this.audioElement.playbackRate = this.playbackRate;
+              this.setPlaybackRate(this.playbackRate);
               if (savedTime > 0 && (savedDuration <= 0 || savedTime < savedDuration)) {
                 try {
                   this.audioElement.currentTime = savedTime;

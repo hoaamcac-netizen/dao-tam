@@ -304,8 +304,8 @@ export interface ReaderSettings {
   theme: 'dark' | 'midnight' | 'light' | 'sepia';
   autoScroll: boolean;
   autoNextChapter: boolean; // Tự động chuyển chương khi nghe audio hết chương
-  voiceSpeed: number; // 0.75 - 2.0
-  selectedVoiceId: string; // 'vi-VN-HoaiMyNeural' | 'vi-VN-NamMinhNeural' (Edge TTS)
+  voiceSpeed: number; // 0.75 - 3.0
+  selectedVoiceId: string; // 'vi-VN-HoaiMyNeural' | 'vi-VN-NamMinhNeural' | 'device-fallback'
   autoHighlight: boolean;
   audioEngine?: 'native' | 'edge'; // 'native' (Tức thì 0s trễ, mượt mà tức thì) | 'edge' (Edge Cloud)
 }

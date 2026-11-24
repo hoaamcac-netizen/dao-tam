@@ -2648,14 +2648,25 @@ export async function fetchFullChapterContent(
     } catch (e) {}
   }
 
-  // 3. Query subcollection 'novels/{novelId}/chapters' theo number
+  // 3. Query subcollection 'novels/{novelId}/chapters' theo number (hỗ trợ cả number & string)
   try {
     if (chapterNumber !== undefined) {
       const chaptersCol = collection(db, 'novels', novelId, 'chapters');
-      const q = query(chaptersCol, where('number', '==', chapterNumber));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const data = snap.docs[0].data();
+      const snapNum = await getDocs(query(chaptersCol, where('number', '==', Number(chapterNumber))));
+      if (!snapNum.empty) {
+        const data = snapNum.docs[0].data();
+        if (data.content && (data.content.trim()?.length || 0) > 0) {
+          saveChapterCache(data.content);
+          return {
+            content: data.content,
+            wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: data.audioUrl || undefined,
+          };
+        }
+      }
+      const snapStr = await getDocs(query(chaptersCol, where('number', '==', String(chapterNumber))));
+      if (!snapStr.empty) {
+        const data = snapStr.docs[0].data();
         if (data.content && (data.content.trim()?.length || 0) > 0) {
           saveChapterCache(data.content);
           return {
@@ -2668,7 +2679,54 @@ export async function fetchFullChapterContent(
     }
   } catch (e) {}
 
-  // 4. Nếu chưa có trên Firestore, trả về chuỗi rỗng để giao diện hiển thị thông báo thật (tuyệt đối không dùng nội dung ảo)
+  // 4. Fallback đọc từ root document 'novels/{novelId}' hoặc 'novel_submissions/{novelId}' nếu truyện cũ lưu nội dung trên mảng chapters
+  try {
+    const novelSnap = await getDoc(doc(db, 'novels', novelId));
+    if (novelSnap.exists()) {
+      const nData = novelSnap.data();
+      if (Array.isArray(nData.chapters)) {
+        const matched = nData.chapters.find(
+          (c: any) =>
+            (chapterId && c?.id === chapterId) ||
+            (chapterNumber !== undefined && Number(c?.number) === Number(chapterNumber))
+        );
+        if (matched?.content && (String(matched.content).trim()?.length || 0) > 0) {
+          const text = String(matched.content);
+          saveChapterCache(text);
+          return {
+            content: text,
+            wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: matched.audioUrl || undefined,
+          };
+        }
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const subSnap = await getDoc(doc(db, 'novel_submissions', novelId));
+    if (subSnap.exists()) {
+      const sData = subSnap.data();
+      if (Array.isArray(sData.chapters)) {
+        const matched = sData.chapters.find(
+          (c: any) =>
+            (chapterId && c?.id === chapterId) ||
+            (chapterNumber !== undefined && Number(c?.number) === Number(chapterNumber))
+        );
+        if (matched?.content && (String(matched.content).trim()?.length || 0) > 0) {
+          const text = String(matched.content);
+          saveChapterCache(text);
+          return {
+            content: text,
+            wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: matched.audioUrl || undefined,
+          };
+        }
+      }
+    }
+  } catch (e) {}
+
+  // 5. Nếu chưa có trên cơ sở dữ liệu, trả về chuỗi rỗng để giao diện hiển thị thông báo thật (tuyệt đối không dùng nội dung ảo)
   return { content: '', wordCount: 0 };
 }
 

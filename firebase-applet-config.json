@@ -1,12 +1,12 @@
 {
-  "projectId": "eminent-option-33rp2",
-  "appId": "1:2594352474:web:a203cbde7b0e2ec6b95763",
-  "apiKey": "AIzaSyBddlTDu1d9wiToE0ttf0PnLtQzU1P0PvY",
-  "authDomain": "eminent-option-33rp2.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-otm64-2b6d82ab-b8b3-46eb-ab1a-8055c8064a0b",
-  "storageBucket": "eminent-option-33rp2.firebasestorage.app",
-  "messagingSenderId": "2594352474",
+  "projectId": "gen-lang-client-0244306016",
+  "appId": "1:189875509543:web:4bc19662b84da8664b3102",
+  "apiKey": "AIzaSyBDFUSj0-h_tbrlI9iAe9HO1TMJn3M7QG4",
+  "authDomain": "gen-lang-client-0244306016.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-otm65-1c9165f1-ac03-4506-a1d5-eff0e9018d44",
+  "storageBucket": "gen-lang-client-0244306016.firebasestorage.app",
+  "messagingSenderId": "189875509543",
   "measurementId": "",
-  "oAuthClientId": "2594352474-uqe7em3llpesr0s48igq4qf9c4099bkr.apps.googleusercontent.com",
+  "oAuthClientId": "189875509543-npdu6ul1gnmrqs8q1hovdhf9u3jbg3ci.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

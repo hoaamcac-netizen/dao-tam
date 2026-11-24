@@ -10,7 +10,11 @@ import {
   isValidMp3UploadFile,
   type AdminGitHubConfig,
 } from '../utils/githubAudioStorage';
-import { sleepWithAbort } from '../utils/audioChunker';
+import {
+  extractPlainTextFromChapterHtml,
+  sanitizeUserFacingErrorText,
+  sleepWithAbort,
+} from '../utils/audioChunker';
 import {
   fetchChaptersForNovel,
   fetchFullChapterContent,
@@ -328,8 +332,12 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       try {
         await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
       } catch (fsErr: any) {
+        console.error('[AdminChapterMp3Actions] Lỗi lưu audioUrl khi upload:', fsErr);
         throw new Error(
-          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${fsErr?.message || 'Lỗi cơ sở dữ liệu'}`
+          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${sanitizeUserFacingErrorText(
+            fsErr?.message,
+            'Lỗi cơ sở dữ liệu'
+          )}`
         );
       }
 
@@ -340,7 +348,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
-        setErrorMsg(err?.message || 'Lỗi tải MP3 lên kho âm thanh (không xác định).');
+        console.error('[AdminChapterMp3Actions] handleUploadFileChange error:', err);
+        setErrorMsg(
+          sanitizeUserFacingErrorText(
+            err?.message,
+            'Lỗi tải MP3 lên kho âm thanh (không xác định).'
+          )
+        );
       }
     } finally {
       abortControllerRef.current = null;
@@ -361,7 +375,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       setProgressPercent(2);
       setStatusLabel('Đang tải nội dung đầy đủ của chương...');
 
-      let textContent = (chapter.content || '').trim();
+      let textContent = extractPlainTextFromChapterHtml(chapter.content || '');
       if (!textContent) {
         const fetched = await fetchFullChapterContent(
           novel.id,
@@ -369,7 +383,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           chapter.number,
           novel.updatedAt
         );
-        textContent = (fetched?.content || '').trim();
+        textContent = extractPlainTextFromChapterHtml(fetched?.content || '');
       }
 
       if (!textContent) {
@@ -409,8 +423,12 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       try {
         await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
       } catch (fsErr: any) {
+        console.error('[AdminChapterMp3Actions] Lỗi lưu audioUrl:', fsErr);
         throw new Error(
-          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${fsErr?.message || 'Lỗi cơ sở dữ liệu'}`
+          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${sanitizeUserFacingErrorText(
+            fsErr?.message,
+            'Lỗi cơ sở dữ liệu'
+          )}`
         );
       }
 
@@ -421,7 +439,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
-        setErrorMsg(err?.message || 'Lỗi khi tự tạo file MP3 từ nội dung chương.');
+        console.error('[AdminChapterMp3Actions] handleAutoGenerateMp3 error:', err);
+        setErrorMsg(
+          sanitizeUserFacingErrorText(
+            err?.message,
+            'Lỗi khi tự tạo file MP3 từ nội dung chương.'
+          )
+        );
       }
     } finally {
       abortControllerRef.current = null;

@@ -10,8 +10,10 @@
 import {
   chunkChapterContent,
   cleanTextForTTS,
+  extractPlainTextFromChapterHtml,
   fetchTtsAudioBlobWithWatchdog,
   getOrderedTtsEndpoints,
+  sanitizeUserFacingErrorText,
   sleepWithAbort,
   splitTextIntoSpeechChunks,
 } from './audioChunker';
@@ -454,7 +456,7 @@ export async function generateChapterMp3FromText(params: {
     label: string;
   }) => void;
 }): Promise<Blob> {
-  const rawBody = (params.text || '').trim();
+  const rawBody = extractPlainTextFromChapterHtml(params.text || '');
   if (!rawBody) {
     throw new Error('Nội dung chương đang trống, không thể tạo file MP3.');
   }
@@ -585,10 +587,17 @@ export async function generateChapterMp3FromText(params: {
 
       if (!rescued) {
         const endpoints = getOrderedTtsEndpoints().join(' -> ');
-        const detail = primaryErr?.message || 'Không thể kết nối máy chủ TTS';
-        throw new Error(
-          `Lỗi tại đoạn ${i + 1}/${total}: ${detail} (Thứ tự gọi: ${endpoints})`
+        console.error('[generateChapterMp3FromText] TTS chunk failed:', {
+          chunkIndex: i + 1,
+          total,
+          endpoints,
+          error: primaryErr,
+        });
+        const detail = sanitizeUserFacingErrorText(
+          primaryErr?.message,
+          'Không thể kết nối máy chủ TTS'
         );
+        throw new Error(`Lỗi tạo âm thanh tại đoạn ${i + 1}/${total}: ${detail}`);
       }
     }
 

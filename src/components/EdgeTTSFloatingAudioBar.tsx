@@ -50,7 +50,7 @@ const SLEEP_TIMER_OPTIONS: { mode: SleepTimerMode; label: string }[] = [
   { mode: 'end_of_chapter', label: 'Hết chương này' },
 ];
 
-const PLAYBACK_SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+const PLAYBACK_SPEEDS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 
 interface EdgeTTSFloatingAudioBarProps {
   onOpenReader?: (novel: any, chapter: any) => void;
@@ -470,7 +470,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
               </div>
 
               <div className="flex items-center gap-1 shrink-0">
-                {/* Tốc độ phát (0.75x -> 2.0x) */}
+                {/* Tốc độ phát (0.75x -> 3.0x) */}
                 <div className="relative shrink-0" ref={speedMenuRef}>
                   <button
                     type="button"
@@ -487,7 +487,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   </button>
 
                   {showSpeedMenu && (
-                    <div className="absolute bottom-full right-0 mb-2 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-pink-100 dark:border-slate-700 p-1.5 flex flex-wrap justify-end gap-1 z-[105] w-[200px] sm:w-auto sm:flex-nowrap max-w-[calc(100vw-16px)]">
+                    <div className="absolute bottom-full right-0 mb-2 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-pink-100 dark:border-slate-700 p-1.5 grid grid-cols-4 gap-1 z-[105] w-[216px] sm:w-[232px] max-w-[calc(100vw-16px)]">
                       {PLAYBACK_SPEEDS.map((s) => (
                         <button
                           key={s}

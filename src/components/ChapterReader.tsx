@@ -351,9 +351,21 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     audioContextRef.current = audioContext;
   }, [audioContext]);
 
-  // MEMORY LEAK PROTECTION: Giải phóng tài nguyên nếu thanh Audio đã đóng và không phát
+  // MEMORY LEAK PROTECTION: Giải phóng tài nguyên & ngắt Giọng Máy nếu thoát trang đọc
   useEffect(() => {
     return () => {
+      if (
+        isDeviceFallbackVoice(audioContextRef.current.voiceId) &&
+        !audioContextRef.current.isDirectMp3
+      ) {
+        if (audioContextRef.current.isPlaying || audioContextRef.current.isLoading) {
+          audioContextRef.current.pause();
+        } else if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+          try {
+            window.speechSynthesis.cancel();
+          } catch {}
+        }
+      }
       if (
         !audioContextRef.current.isPlaying &&
         !audioContextRef.current.isLoading &&
@@ -1015,15 +1027,17 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {/* Speed Selector */}
             <div>
               <label className="block text-slate-500 dark:text-slate-400 mb-1.5 font-medium">Tốc độ đọc Audio:</label>
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
-                {[0.8, 1.0, 1.25, 1.5, 2.0, 2.5].map((speed) => (
+              <div className="grid grid-cols-4 gap-1.5">
+                {[0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0].map((speed) => (
                   <button
                     key={speed}
                     onClick={() => {
-                      setReaderSettings({ ...readerSettings, voiceSpeed: speed });
+                      const updated = { ...readerSettings, voiceSpeed: speed };
+                      setReaderSettings(updated);
+                      safeSetItem('daotam_reader_settings', JSON.stringify(updated));
                       setPlaybackRate(speed);
                     }}
-                    className={`py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-all ${
+                    className={`py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-all tabular-nums ${
                       playbackRate === speed
                         ? 'bg-pink-600 text-white shadow-sm'
                         : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'

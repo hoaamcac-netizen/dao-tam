@@ -125,6 +125,13 @@ export interface VoiceSelectorOption {
   subtitle: string;
 }
 
+export const DEVICE_FALLBACK_VOICE_META: VoiceSelectorOption = {
+  id: DEVICE_FALLBACK_VOICE_ID,
+  label: 'Giọng Máy (Ổn định)',
+  shortLabel: 'Giọng Máy',
+  subtitle: 'Giọng thiết bị vi-VN (không phụ thuộc mạng)',
+};
+
 export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
   {
     id: 'vi-VN-NamMinhNeural',
@@ -138,14 +145,8 @@ export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
     shortLabel: 'Hoài My',
     subtitle: 'Giọng chính - Nữ',
   },
+  DEVICE_FALLBACK_VOICE_META,
 ];
-
-export const DEVICE_FALLBACK_VOICE_META: VoiceSelectorOption = {
-  id: DEVICE_FALLBACK_VOICE_ID,
-  label: 'Giọng máy dự phòng',
-  shortLabel: 'Giọng máy',
-  subtitle: 'Giọng thiết bị vi-VN (không cần mạng)',
-};
 
 export function isDeviceFallbackVoice(voiceId?: string | null): boolean {
   if (!voiceId) return false;
