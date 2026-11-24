@@ -9,9 +9,10 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 // In-memory cache for synthesized speech segments (LRU buffer cache, max 40 items)
 const audioBufferCache = new Map<string, Buffer>();
 const MAX_CACHE_ITEMS = 40;
-const TTS_SYNTHESIS_TIMEOUT_MS = 20000;
-const TTS_BACKEND_MAX_RETRIES = 2;
-const TTS_BACKEND_RETRY_DELAY_MS = 500;
+const TTS_SYNTHESIS_TIMEOUT_MS = 7000;
+const TTS_BACKEND_MAX_RETRIES = 1;
+const TTS_BACKEND_RETRY_DELAY_MS = 250;
+const VERCEL_HARD_DEADLINE_MS = 8500;
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -45,10 +46,11 @@ function isRetryableEdgeTtsError(err: unknown): boolean {
   );
 }
 
-async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buffer> {
+async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: number): Promise<Buffer> {
+  const safeTimeout = Math.max(2500, timeoutMs);
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 10000,
-    synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+    connectionTimeoutMs: Math.min(4500, safeTimeout),
+    synthesisTimeoutMs: safeTimeout,
   });
 
   let audioStream: any = null;
@@ -101,8 +103,8 @@ async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buf
     };
 
     timeout = setTimeout(() => {
-      finishWithError(new Error('Quá thời gian 20s kết nối tới máy chủ Microsoft Edge TTS.'));
-    }, TTS_SYNTHESIS_TIMEOUT_MS);
+      finishWithError(new Error('Quá thời gian kết nối tới máy chủ Microsoft Edge TTS.'));
+    }, safeTimeout);
 
     tts
       .setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)
@@ -205,20 +207,30 @@ export default async function handler(req: any, res: any) {
     return res.end(cachedBuffer);
   }
 
+  const startedAt = Date.now();
   try {
     let fullBuffer: Buffer | null = null;
     let lastErr: unknown;
 
     for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
+      const remainingMs = VERCEL_HARD_DEADLINE_MS - (Date.now() - startedAt);
+      if (remainingMs < 2500) {
+        break;
+      }
       if (attempt > 0) {
         await new Promise((r) => setTimeout(r, TTS_BACKEND_RETRY_DELAY_MS));
       }
+      const attemptBudgetMs = Math.min(
+        TTS_SYNTHESIS_TIMEOUT_MS,
+        Math.max(2500, VERCEL_HARD_DEADLINE_MS - (Date.now() - startedAt))
+      );
       try {
-        fullBuffer = await synthesizeOnce(cleanText, voiceCode);
+        fullBuffer = await synthesizeOnce(cleanText, voiceCode, attemptBudgetMs);
         break;
       } catch (err) {
         lastErr = err;
-        if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
+        const budgetLeft = VERCEL_HARD_DEADLINE_MS - (Date.now() - startedAt);
+        if (attempt < TTS_BACKEND_MAX_RETRIES && budgetLeft >= 3000 && isRetryableEdgeTtsError(err)) {
           continue;
         }
         throw err;

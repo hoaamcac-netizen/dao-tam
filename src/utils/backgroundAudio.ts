@@ -22,9 +22,13 @@ interface BackgroundMediaOptions {
 
 class BackgroundAudioManager {
   private audioCtx: AudioContext | null = null;
+  private keepAliveSource: AudioBufferSourceNode | null = null;
+  private keepAliveGain: GainNode | null = null;
   private wakeLock: any = null;
   private lastMetadataKey = '';
   private handlersRegistered = false;
+  private visibilityListenerAttached = false;
+  private isSessionActive = false;
   private callbacks: {
     onPlay?: () => void;
     onPause?: () => void;
@@ -35,16 +39,75 @@ class BackgroundAudioManager {
     onSeekBackward?: () => void;
   } = {};
 
-  private ensureAudioContextAlive() {
+  private ensureAudioContextAlive(startKeepAliveLoop: boolean) {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioContextClass && !this.audioCtx) {
         this.audioCtx = new AudioContextClass();
       }
-      if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      if (!this.audioCtx) return;
+
+      if (this.audioCtx.state === 'suspended') {
         this.audioCtx.resume().catch(() => {});
       }
+
+      if (startKeepAliveLoop && !this.keepAliveSource) {
+        const sampleRate = this.audioCtx.sampleRate || 22050;
+        const buffer = this.audioCtx.createBuffer(1, sampleRate, sampleRate);
+        const channel = buffer.getChannelData(0);
+        // Giá trị cực nhỏ (không nghe thấy) để trình duyệt di động giữ audio session hoạt động liên tục qua các khoảng chuyển đoạn/chương khi khóa màn hình
+        channel[0] = 0.00001;
+
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.loop = true;
+
+        const gain = this.audioCtx.createGain();
+        gain.gain.value = 0.0001;
+
+        source.connect(gain);
+        gain.connect(this.audioCtx.destination);
+        source.start(0);
+
+        this.keepAliveSource = source;
+        this.keepAliveGain = gain;
+      }
     } catch {}
+  }
+
+  private stopKeepAliveLoop() {
+    if (this.keepAliveSource) {
+      try {
+        this.keepAliveSource.stop();
+        this.keepAliveSource.disconnect();
+      } catch {}
+      this.keepAliveSource = null;
+    }
+    if (this.keepAliveGain) {
+      try {
+        this.keepAliveGain.disconnect();
+      } catch {}
+      this.keepAliveGain = null;
+    }
+  }
+
+  private attachVisibilityListenerOnce() {
+    if (this.visibilityListenerAttached || typeof document === 'undefined') return;
+    this.visibilityListenerAttached = true;
+
+    document.addEventListener('visibilitychange', () => {
+      if (!this.isSessionActive) return;
+      this.ensureAudioContextAlive(true);
+      this.setPlaybackState('playing');
+      if (!document.hidden && !this.wakeLock && typeof navigator !== 'undefined' && (navigator as any).wakeLock?.request) {
+        (navigator as any).wakeLock
+          .request('screen')
+          .then((lock: any) => {
+            this.wakeLock = lock;
+          })
+          .catch(() => {});
+      }
+    });
   }
 
   private registerMediaSessionHandlersOnce() {
@@ -61,6 +124,9 @@ class BackgroundAudioManager {
       this.callbacks.onPlay?.();
     });
     safeSetHandler('pause', () => {
+      this.callbacks.onPause?.();
+    });
+    safeSetHandler('stop', () => {
       this.callbacks.onPause?.();
     });
     safeSetHandler('nexttrack', () => {
@@ -95,7 +161,9 @@ class BackgroundAudioManager {
    * Bắt đầu / cập nhật phiên phát âm thanh nền và Lockscreen Controls
    */
   public async startBackgroundPlayback(options: BackgroundMediaOptions) {
-    this.ensureAudioContextAlive();
+    this.isSessionActive = true;
+    this.attachVisibilityListenerOnce();
+    this.ensureAudioContextAlive(true);
 
     this.callbacks = {
       onPlay: options.onPlay,
@@ -136,9 +204,11 @@ class BackgroundAudioManager {
   }
 
   /**
-   * Tạm dừng hoặc kết thúc phiên audio nền
+   * Tạm dừng hoặc kết thúc phiên audio nền (chỉ gọi khi người dùng bấm Tạm dừng/Đóng hoặc hết truyện)
    */
   public pauseBackgroundPlayback() {
+    this.isSessionActive = false;
+    this.stopKeepAliveLoop();
     this.setPlaybackState('paused');
 
     if (this.wakeLock) {

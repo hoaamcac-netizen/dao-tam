@@ -22,9 +22,10 @@ const CORS_HEADERS: Record<string, string> = {
 
 const MAX_CACHE_ITEMS = 40;
 const audioBufferCache = new Map<string, Buffer>();
-const TTS_SYNTHESIS_TIMEOUT_MS = 9000;
+const TTS_SYNTHESIS_TIMEOUT_MS = 6500;
 const TTS_BACKEND_MAX_RETRIES = 1;
-const TTS_BACKEND_RETRY_DELAY_MS = 250;
+const TTS_BACKEND_RETRY_DELAY_MS = 200;
+const NETLIFY_HARD_DEADLINE_MS = 8200;
 
 /**
  * Bộ lọc làm sạch văn bản cho Edge TTS:
@@ -79,10 +80,11 @@ function isRetryableEdgeTtsError(err: unknown): boolean {
   );
 }
 
-async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buffer> {
+async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: number): Promise<Buffer> {
+  const safeTimeout = Math.max(2500, timeoutMs);
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: 6000,
-    synthesisTimeoutMs: TTS_SYNTHESIS_TIMEOUT_MS,
+    connectionTimeoutMs: Math.min(4000, safeTimeout),
+    synthesisTimeoutMs: safeTimeout,
   });
 
   let audioStream: any = null;
@@ -136,7 +138,7 @@ async function synthesizeOnce(cleanText: string, voiceCode: string): Promise<Buf
 
     timeout = setTimeout(() => {
       finishWithError(new Error('Quá thời gian kết nối tới máy chủ Microsoft Edge TTS.'));
-    }, TTS_SYNTHESIS_TIMEOUT_MS);
+    }, safeTimeout);
 
     tts
       .setMetadata(voiceCode, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3)
@@ -280,20 +282,30 @@ export const handler = async (event: NetlifyEvent): Promise<NetlifyResponse> => 
     };
   }
 
+  const startedAt = Date.now();
   try {
     let fullBuffer: Buffer | null = null;
     let lastErr: unknown;
 
     for (let attempt = 0; attempt <= TTS_BACKEND_MAX_RETRIES; attempt++) {
+      const remainingMs = NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt);
+      if (remainingMs < 2500) {
+        break;
+      }
       if (attempt > 0) {
         await new Promise((r) => setTimeout(r, TTS_BACKEND_RETRY_DELAY_MS));
       }
+      const attemptBudgetMs = Math.min(
+        TTS_SYNTHESIS_TIMEOUT_MS,
+        Math.max(2500, NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt))
+      );
       try {
-        fullBuffer = await synthesizeOnce(cleanText, voiceCode);
+        fullBuffer = await synthesizeOnce(cleanText, voiceCode, attemptBudgetMs);
         break;
       } catch (err) {
         lastErr = err;
-        if (attempt < TTS_BACKEND_MAX_RETRIES && isRetryableEdgeTtsError(err)) {
+        const budgetLeft = NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt);
+        if (attempt < TTS_BACKEND_MAX_RETRIES && budgetLeft >= 3000 && isRetryableEdgeTtsError(err)) {
           continue;
         }
         throw err;

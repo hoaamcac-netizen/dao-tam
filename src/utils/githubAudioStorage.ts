@@ -11,8 +11,9 @@ import {
   chunkChapterContent,
   cleanTextForTTS,
   fetchTtsAudioBlobWithWatchdog,
-  getTtsEndpointUrls,
+  getOrderedTtsEndpoints,
   sleepWithAbort,
+  splitTextIntoSpeechChunks,
 } from './audioChunker';
 import { isDeviceFallbackVoice, normalizeEdgeVoiceId } from './rulesAndVoices';
 
@@ -207,6 +208,7 @@ async function fetchExistingGitHubFileSha(params: {
   try {
     res = await fetch(apiUrl, {
       method: 'GET',
+      cache: 'no-store',
       headers: {
         Authorization: `Bearer ${cleanToken}`,
         Accept: 'application/vnd.github+json',
@@ -396,8 +398,8 @@ export async function generateChapterMp3FromText(params: {
       ? `${cleanTitle}.\n\n${rawBody}`
       : rawBody;
 
-  // Chia nội dung thành các đoạn ~500 ký tự theo dấu câu/xuống dòng
-  const chunks = chunkChapterContent(fullText, 450, 540, 420, 520);
+  // Chia nội dung thành các đoạn ~420 ký tự theo dấu câu/xuống dòng để tổng hợp nhanh, không quá timeout serverless
+  const chunks = chunkChapterContent(fullText, 360, 460, 320, 440);
   if (!chunks || chunks.length === 0) {
     throw new Error('Không có câu văn hợp lệ để chuyển thành giọng nói.');
   }
@@ -415,9 +417,9 @@ export async function generateChapterMp3FromText(params: {
       throw new DOMException('Đã hủy tạo MP3', 'AbortError');
     }
 
-    // Nghỉ 300ms giữa các lần gọi tuần tự để tránh bị server Netlify / Vercel / Edge TTS giới hạn tốc độ
+    // Nghỉ 450ms giữa các lần gọi tuần tự để tránh bị server Netlify / Vercel / Edge TTS giới hạn tốc độ
     if (i > 0) {
-      await sleepWithAbort(300, params.signal);
+      await sleepWithAbort(450, params.signal);
     }
 
     const percentBefore = Math.max(2, Math.round((i / total) * 85));
@@ -433,7 +435,9 @@ export async function generateChapterMp3FromText(params: {
         text: chunks[i].text,
         voiceId: synthesisVoice,
         signal: params.signal,
-        maxRetries: 2,
+        timeoutMs: 14000,
+        maxRetries: 3,
+        retryDelayMs: 1100,
         onRetryAttempt: (attempt) => {
           params.onProgress?.({
             percent: percentBefore,
@@ -450,15 +454,57 @@ export async function generateChapterMp3FromText(params: {
           audioSegments.push(new Uint8Array(arrayBuf));
         }
       }
-    } catch (err: any) {
-      if (err?.name === 'AbortError' || params.signal?.aborted) {
-        throw err;
+    } catch (primaryErr: any) {
+      if (primaryErr?.name === 'AbortError' || params.signal?.aborted) {
+        throw primaryErr;
       }
-      const endpoints = getTtsEndpointUrls().join(', ');
-      const detail = err?.message || 'Không thể kết nối server';
-      throw new Error(
-        `Lỗi gọi server TTS tại đoạn ${i + 1}/${total}: ${detail} (Đã thử lần lượt: ${endpoints})`
-      );
+
+      // Dự phòng cấp 2: chia nhỏ chính đoạn bị lỗi thành các câu ngắn ~200 ký tự để cứu dữ liệu
+      const subSegments = splitTextIntoSpeechChunks(chunks[i].text, 200);
+      let rescued = false;
+      if (subSegments.length > 1) {
+        try {
+          params.onProgress?.({
+            percent: percentBefore,
+            currentChunk: i + 1,
+            totalChunks: total,
+            label: `Đoạn ${i + 1}/${total} đang tách nhỏ để tổng hợp lại...`,
+          });
+          await sleepWithAbort(900, params.signal);
+          for (let subIdx = 0; subIdx < subSegments.length; subIdx++) {
+            if (subIdx > 0) {
+              await sleepWithAbort(350, params.signal);
+            }
+            const subBlob = await fetchTtsAudioBlobWithWatchdog({
+              text: subSegments[subIdx],
+              voiceId: synthesisVoice,
+              signal: params.signal,
+              timeoutMs: 14000,
+              maxRetries: 2,
+              retryDelayMs: 1200,
+            });
+            if (subBlob && subBlob.size > 0) {
+              const subBuf = await subBlob.arrayBuffer();
+              if (subBuf.byteLength > 0) {
+                audioSegments.push(new Uint8Array(subBuf));
+              }
+            }
+          }
+          rescued = true;
+        } catch (subErr: any) {
+          if (subErr?.name === 'AbortError' || params.signal?.aborted) {
+            throw subErr;
+          }
+        }
+      }
+
+      if (!rescued) {
+        const endpoints = getOrderedTtsEndpoints().join(', ');
+        const detail = primaryErr?.message || 'Không thể kết nối server';
+        throw new Error(
+          `Lỗi gọi server TTS tại đoạn ${i + 1}/${total}: ${detail} (Đã thử lần lượt: ${endpoints})`
+        );
+      }
     }
 
     const percentAfter = Math.max(3, Math.round(((i + 1) / total) * 85));
