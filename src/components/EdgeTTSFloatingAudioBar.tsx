@@ -103,7 +103,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
 
   if (isMinimized) {
     return (
-      <div className="fixed bottom-4 right-4 z-50 animate-in fade-in zoom-in-95 duration-200">
+      <div className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-4 sm:left-auto sm:bottom-5 sm:right-6 z-[90] animate-in fade-in zoom-in-95 duration-200">
         <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-slate-900/95 dark:bg-slate-950/95 text-white border-2 border-pink-500 shadow-2xl backdrop-blur-md">
           <div
             onClick={() => setIsMinimized(false)}
@@ -167,7 +167,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
   }
 
   return (
-    <div className="fixed bottom-2 left-2 right-2 sm:bottom-4 sm:left-auto sm:right-6 sm:w-[400px] z-50 animate-in slide-in-from-bottom-4 duration-300">
+    <div className="fixed bottom-[max(0.625rem,env(safe-area-inset-bottom))] left-2 right-2 sm:bottom-5 sm:left-auto sm:right-6 sm:w-[400px] z-[90] animate-in slide-in-from-bottom-4 duration-300">
       <div className="relative bg-white/95 dark:bg-slate-900/95 backdrop-blur-md rounded-2xl sm:rounded-3xl border border-pink-200/90 dark:border-pink-900/60 shadow-[0_10px_30px_-8px_rgba(236,72,153,0.3)] text-slate-800 dark:text-slate-100 transition-all">
         <div className="h-1 bg-pink-100 dark:bg-slate-800 w-full rounded-t-2xl sm:rounded-t-3xl overflow-hidden">
           <div

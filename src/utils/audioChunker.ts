@@ -15,16 +15,25 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 9500;
+export const TTS_FETCH_TIMEOUT_MS = 8500;
 export const TTS_MAX_RETRIES = 2;
-export const TTS_RETRY_DELAY_MS = 850;
+export const TTS_RETRY_DELAY_MS = 500;
 export const TTS_ACTIVE_SERVER_STORAGE_KEY = 'daotam_active_tts_endpoint';
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 100;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 175;
-export const DEFAULT_CHUNK_MIN_LENGTH = 400;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 150;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 230;
+export const DEFAULT_CHUNK_MIN_LENGTH = 420;
 export const DEFAULT_CHUNK_MAX_LENGTH = 560;
 export const MAX_BLOB_CACHE_ENTRIES = 8;
 export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
+
+const ENDPOINT_COOLDOWN_MS = 90 * 1000;
+const deadTtsEndpoints = new Set<string>();
+const cooldownTtsEndpoints = new Map<string, number>();
+
+function isStaticFirebaseHost(): boolean {
+  if (typeof window === 'undefined' || !window.location?.hostname) return false;
+  return /\.(web\.app|firebaseapp\.com)$/i.test(window.location.hostname);
+}
 
 function normalizeTtsEndpoint(rawUrl: string): string {
   const clean = rawUrl.trim().replace(/\/+$/, '');
@@ -41,38 +50,42 @@ function normalizeTtsEndpoint(rawUrl: string): string {
 }
 
 /**
- * Đọc danh sách các server TTS từ biến môi trường VITE_TTS_API_URL (cách nhau bằng dấu phẩy).
- * Luôn bổ sung '/api/tts' cùng domain làm dự phòng cuối cùng (không dính CORS).
+ * Đọc danh sách các server TTS khả dụng:
+ * - Khi chạy trên host có backend/serverless (/api/tts không phải Firebase Hosting tĩnh), ưu tiên '/api/tts' cùng domain trước
+ *   để phát âm thanh dưới 3 giây và không bị nghẽn bởi endpoint bên ngoài bị tắt/timeout.
+ * - Khi chạy trên Firebase Hosting tĩnh (*.web.app / *.firebaseapp.com), ưu tiên VITE_TTS_API_URL trước.
  */
 export function getTtsEndpointUrls(): string[] {
   const raw = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
   const seen = new Set<string>();
-  const endpoints: string[] = [];
+  const externalEndpoints: string[] = [];
+
+  const sameOriginOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin.replace(/\/+$/, '')
+      : '';
+  const sameOriginUrl = sameOriginOrigin ? `${sameOriginOrigin}/api/tts` : '';
 
   if (raw) {
     for (const part of raw.split(',')) {
       const trimmed = part.trim();
       if (!trimmed) continue;
       const normalized = normalizeTtsEndpoint(trimmed);
+      if (normalized === '/api/tts' || (sameOriginUrl && normalized === sameOriginUrl)) {
+        continue;
+      }
       if (!seen.has(normalized)) {
         seen.add(normalized);
-        endpoints.push(normalized);
+        externalEndpoints.push(normalized);
       }
     }
   }
 
-  const sameOriginUrl =
-    typeof window !== 'undefined' && window.location?.origin
-      ? `${window.location.origin}/api/tts`
-      : '';
-  const hasSameOrigin =
-    seen.has('/api/tts') || (sameOriginUrl ? seen.has(sameOriginUrl) : false);
+  const ordered = isStaticFirebaseHost()
+    ? [...externalEndpoints, '/api/tts']
+    : ['/api/tts', ...externalEndpoints];
 
-  if (!hasSameOrigin) {
-    endpoints.push('/api/tts');
-  }
-
-  return endpoints.length > 0 ? endpoints : ['/api/tts'];
+  return ordered.length > 0 ? ordered : ['/api/tts'];
 }
 
 function getSessionActiveTtsEndpoint(): string | null {
@@ -87,6 +100,8 @@ function getSessionActiveTtsEndpoint(): string | null {
 
 export function rememberActiveTtsEndpoint(endpointUrl: string): void {
   if (typeof window === 'undefined' || !endpointUrl) return;
+  deadTtsEndpoints.delete(endpointUrl);
+  cooldownTtsEndpoints.delete(endpointUrl);
   try {
     window.sessionStorage.setItem(TTS_ACTIVE_SERVER_STORAGE_KEY, endpointUrl);
   } catch {}
@@ -109,14 +124,36 @@ export function clearActiveTtsEndpoint(onlyIfMatches?: string): void {
 export function getOrderedTtsEndpoints(): string[] {
   const configured = getTtsEndpointUrls();
   const savedActive = getSessionActiveTtsEndpoint();
-  if (savedActive && configured.includes(savedActive)) {
-    return [savedActive, ...configured.filter((url) => url !== savedActive)];
+
+  const withPinned =
+    savedActive && configured.includes(savedActive) && !deadTtsEndpoints.has(savedActive)
+      ? [savedActive, ...configured.filter((url) => url !== savedActive)]
+      : configured;
+
+  const live = withPinned.filter((url) => !deadTtsEndpoints.has(url));
+  const pool = live.length > 0 ? live : withPinned;
+  if (live.length === 0) {
+    deadTtsEndpoints.clear();
   }
-  return configured;
+
+  const now = Date.now();
+  const healthy: string[] = [];
+  const cooling: string[] = [];
+  for (const url of pool) {
+    const until = cooldownTtsEndpoints.get(url) || 0;
+    if (until > now) {
+      cooling.push(url);
+    } else {
+      cooldownTtsEndpoints.delete(url);
+      healthy.push(url);
+    }
+  }
+
+  return [...healthy, ...cooling];
 }
 
 /**
- * Lấy địa chỉ endpoint TTS ưu tiên hiện tại (từ sessionStorage nếu đã failover, hoặc server đầu tiên trong VITE_TTS_API_URL).
+ * Lấy địa chỉ endpoint TTS ưu tiên hiện tại (từ sessionStorage nếu đã failover, hoặc server ưu tiên).
  */
 export function getTtsEndpointUrl(): string {
   return getOrderedTtsEndpoints()[0] || '/api/tts';
@@ -139,8 +176,12 @@ export function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
+function isDeadEndpointStatus(status: number): boolean {
+  return status === 402 || status === 404 || status === 410;
+}
+
 function isNonRetryableSingleServerStatus(status: number): boolean {
-  return status === 402;
+  return isDeadEndpointStatus(status);
 }
 
 function isLikelyHtmlOrTextPayload(bytes: Uint8Array, contentType: string): boolean {
@@ -214,6 +255,9 @@ async function fetchSingleTtsEndpoint(params: {
     ) {
       const err: any = new Error(`TTS API failed with status ${response.status}`);
       err.httpStatus = response.status;
+      if (isDeadEndpointStatus(response.status)) {
+        err.isDeadEndpoint = true;
+      }
       throw err;
     }
 
@@ -222,7 +266,11 @@ async function fetchSingleTtsEndpoint(params: {
     const byteView = new Uint8Array(arrayBuffer);
 
     if (arrayBuffer.byteLength < 100 || isLikelyHtmlOrTextPayload(byteView, contentType)) {
-      throw new Error('Dữ liệu âm thanh trả về không hợp lệ');
+      const invalidErr: any = new Error('Dữ liệu âm thanh trả về không hợp lệ');
+      if (contentType.toLowerCase().includes('text/html')) {
+        invalidErr.isDeadEndpoint = true;
+      }
+      throw invalidErr;
     }
 
     return { blob: new Blob([arrayBuffer], { type: 'audio/mpeg' }), status: response.status };
@@ -274,7 +322,6 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
     return null;
   }
 
-  const orderedEndpoints = getOrderedTtsEndpoints();
   let lastError: unknown = null;
 
   for (let round = 0; round <= maxRetries; round++) {
@@ -284,27 +331,27 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
 
     if (round > 0) {
       onRetryAttempt?.(round);
-      const backoffMs = Math.min(5000, Math.round(retryDelayMs * Math.pow(1.75, round - 1)));
+      const backoffMs = Math.min(3500, Math.round(retryDelayMs * Math.pow(1.6, round - 1)));
       await sleepWithAbort(backoffMs, externalSignal);
     }
 
+    const orderedEndpoints = getOrderedTtsEndpoints();
     let roundHadRetryableError = false;
     const len = orderedEndpoints.length;
 
-    for (let offset = 0; offset < len; offset++) {
+    for (let idx = 0; idx < len; idx++) {
       if (externalSignal?.aborted) {
         throw new DOMException('Aborted', 'AbortError');
       }
 
-      const idx = (offset + round) % len;
-      if (round === 0 && offset > 0) {
-        onRetryAttempt?.(offset);
+      if (round === 0 && idx > 0) {
+        onRetryAttempt?.(idx);
       }
 
       const endpointUrl = orderedEndpoints[idx];
       const attemptTimeoutMs =
-        round === 0 && len > 1 && offset < len - 1
-          ? Math.min(timeoutMs, 7500)
+        round === 0 && len > 1 && idx < len - 1
+          ? Math.min(timeoutMs, 6500)
           : timeoutMs;
 
       try {
@@ -322,6 +369,11 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
           throw new DOMException('Aborted', 'AbortError');
         }
         clearActiveTtsEndpoint(endpointUrl);
+        if (err?.isDeadEndpoint) {
+          deadTtsEndpoints.add(endpointUrl);
+        } else if (err?.isTimeout || (typeof err?.httpStatus === 'number' && err.httpStatus >= 500)) {
+          cooldownTtsEndpoints.set(endpointUrl, Date.now() + ENDPOINT_COOLDOWN_MS);
+        }
         lastError = err;
         const isSingleNonRetryable =
           len === 1 &&

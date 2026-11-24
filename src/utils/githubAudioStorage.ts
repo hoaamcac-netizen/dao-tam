@@ -417,9 +417,9 @@ export async function generateChapterMp3FromText(params: {
       throw new DOMException('Đã hủy tạo MP3', 'AbortError');
     }
 
-    // Nghỉ 450ms giữa các lần gọi tuần tự để tránh bị server Netlify / Vercel / Edge TTS giới hạn tốc độ
+    // Nghỉ 200ms giữa các lần gọi tuần tự để tạo file MP3 nhanh và ổn định
     if (i > 0) {
-      await sleepWithAbort(450, params.signal);
+      await sleepWithAbort(200, params.signal);
     }
 
     const percentBefore = Math.max(2, Math.round((i / total) * 85));
@@ -435,9 +435,9 @@ export async function generateChapterMp3FromText(params: {
         text: chunks[i].text,
         voiceId: synthesisVoice,
         signal: params.signal,
-        timeoutMs: 14000,
-        maxRetries: 3,
-        retryDelayMs: 1100,
+        timeoutMs: 11000,
+        maxRetries: 2,
+        retryDelayMs: 650,
         onRetryAttempt: (attempt) => {
           params.onProgress?.({
             percent: percentBefore,
@@ -459,10 +459,10 @@ export async function generateChapterMp3FromText(params: {
         throw primaryErr;
       }
 
-      // Dự phòng cấp 2: chia nhỏ chính đoạn bị lỗi thành các câu ngắn ~200 ký tự để cứu dữ liệu
-      const subSegments = splitTextIntoSpeechChunks(chunks[i].text, 200);
+      // Dự phòng cấp 2: chia nhỏ chính đoạn bị lỗi thành các câu ngắn ~170 ký tự để cứu dữ liệu
+      const subSegments = splitTextIntoSpeechChunks(chunks[i].text, 170);
       let rescued = false;
-      if (subSegments.length > 1) {
+      if (subSegments.length > 0) {
         try {
           params.onProgress?.({
             percent: percentBefore,
@@ -470,18 +470,18 @@ export async function generateChapterMp3FromText(params: {
             totalChunks: total,
             label: `Đoạn ${i + 1}/${total} đang tách nhỏ để tổng hợp lại...`,
           });
-          await sleepWithAbort(900, params.signal);
+          await sleepWithAbort(450, params.signal);
           for (let subIdx = 0; subIdx < subSegments.length; subIdx++) {
             if (subIdx > 0) {
-              await sleepWithAbort(350, params.signal);
+              await sleepWithAbort(200, params.signal);
             }
             const subBlob = await fetchTtsAudioBlobWithWatchdog({
               text: subSegments[subIdx],
               voiceId: synthesisVoice,
               signal: params.signal,
-              timeoutMs: 14000,
+              timeoutMs: 11000,
               maxRetries: 2,
-              retryDelayMs: 1200,
+              retryDelayMs: 650,
             });
             if (subBlob && subBlob.size > 0) {
               const subBuf = await subBlob.arrayBuffer();

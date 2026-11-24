@@ -668,7 +668,8 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                       safeSetItem('daotam_audio_bar_visible', 'true');
                       safeSetItem('daotam_audio_active', 'true');
                       audio.setIsBarVisible(true);
-                      audio.playChapter({ ...novel, chapters: activeChapters }, targetAudioChapter, true, activeChapters);
+                      audio.setIsMinimized(false);
+                      audio.playChapter({ ...novel, chapters: activeChapters }, targetAudioChapter, true, activeChapters, true);
                     }}
                     className={`px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md transition-all hover:scale-102 cursor-pointer border border-white/40 ${
                       audio.isPlaying && (audio.activeChapter?.id === targetAudioChapter.id || Number(audio.activeChapter?.number) === Number(targetAudioChapter.number))

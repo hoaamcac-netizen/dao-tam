@@ -227,26 +227,37 @@ class BackgroundAudioManager {
     album = 'Đạo Tâm • Audio'
   ) {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
-    const validCover =
-      coverImage && (/^https?:\/\//i.test(coverImage) || coverImage.startsWith('/'))
-        ? coverImage
-        : '';
+    const resolveAbsUrl = (pathOrUrl: string): string => {
+      if (!pathOrUrl) return '';
+      if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+      if (pathOrUrl.startsWith('/') && typeof window !== 'undefined' && window.location?.origin) {
+        return `${window.location.origin}${pathOrUrl}`;
+      }
+      return pathOrUrl.startsWith('/') ? pathOrUrl : '';
+    };
+    const validCover = coverImage ? resolveAbsUrl(coverImage.trim()) : '';
     const key = `${title}:::${artist}:::${validCover}:::${album}`;
     if (this.lastMetadataKey === key) return;
     this.lastMetadataKey = key;
+
+    const artwork: MediaImage[] = [];
+    if (validCover) {
+      artwork.push(
+        { src: validCover, sizes: '256x256' },
+        { src: validCover, sizes: '512x512' }
+      );
+    }
+    const icon192 = resolveAbsUrl('/manifest-icon-192.png');
+    const icon512 = resolveAbsUrl('/manifest-icon-512.png');
+    if (icon192) artwork.push({ src: icon192, sizes: '192x192', type: 'image/png' });
+    if (icon512) artwork.push({ src: icon512, sizes: '512x512', type: 'image/png' });
 
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title,
         artist,
         album,
-        artwork: validCover
-          ? [
-              { src: validCover, sizes: '96x96', type: 'image/jpeg' },
-              { src: validCover, sizes: '256x256', type: 'image/jpeg' },
-              { src: validCover, sizes: '512x512', type: 'image/jpeg' },
-            ]
-          : [],
+        artwork,
       });
     } catch {}
   }

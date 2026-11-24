@@ -44,6 +44,40 @@ function resolveChapterAudioUrl(chapter?: Chapter | null): string {
   return '';
 }
 
+function createSilentWavDataUri(): string {
+  if (typeof btoa !== 'function') return '';
+  const sampleRate = 8000;
+  const numSamples = 2400; // 0.3s giữ phiên audio di động ổn định khi đang tải
+  const buffer = new Uint8Array(44 + numSamples);
+  const view = new DataView(buffer.buffer);
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      buffer[offset + i] = str.charCodeAt(i);
+    }
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate, true);
+  view.setUint16(32, 1, true);
+  view.setUint16(34, 8, true);
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples, true);
+  buffer.fill(0x80, 44);
+  let binary = '';
+  for (let i = 0; i < buffer.length; i++) {
+    binary += String.fromCharCode(buffer[i]);
+  }
+  return `data:audio/wav;base64,${btoa(binary)}`;
+}
+
+const SILENT_WAV_DATA_URI = createSilentWavDataUri();
+
 interface QueuedAudioChunk extends AudioChunk {
   novelId: string;
   chapterId: string;
@@ -690,8 +724,18 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
     };
     const handleVisibilityChange = () => {
-      if (typeof document !== 'undefined' && !document.hidden && isPlaybackActiveRef.current) {
-        applyPlaybackRateLock(singleAudio, playbackRateRef.current);
+      if (!isPlaybackActiveRef.current) return;
+      applyPlaybackRateLock(singleAudio, playbackRateRef.current);
+      if (!isDeviceFallbackVoice(voiceIdRef.current) || isDirectMp3Ref.current) {
+        if (
+          singleAudio.paused &&
+          !singleAudio.ended &&
+          singleAudio.readyState >= 2 &&
+          Boolean(singleAudio.src)
+        ) {
+          singleAudio.play().catch(() => {});
+        }
+        backgroundAudioManager.setPlaybackState('playing');
       }
     };
     const handleRateChange = () => {
@@ -1129,6 +1173,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       activeChunkTokenRef.current = '';
       const audio = audioRef.current;
       if (!audio) return;
+      audio.loop = false;
       audio.onended = null;
       audio.onerror = null;
       audio.onstalled = null;
@@ -1158,6 +1203,56 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (isDeviceFallbackVoice(voice)) return 'Giọng máy vi-VN';
     return voice.includes('NamMinh') ? 'Nam Minh (Nam)' : 'Hoài My (Nữ)';
   }, []);
+
+  /**
+   * Kích hoạt & giữ quyền phát nền cho duy nhất thẻ <audio> ngay bên trong sự kiện chạm của người dùng
+   * trước khi thực hiện bất kỳ await mạng nào (Firestore / TTS API), giúp iOS/Android hiển thị
+   * trình điều khiển ngoài màn hình khóa và không bị tắt tiếng khi thoát ra màn hình chính.
+   */
+  const primeAudioElementInUserGesture = useCallback(
+    (novel?: Novel | null, chapter?: Chapter | null) => {
+      const audio = audioRef.current;
+      if (audio && SILENT_WAV_DATA_URI) {
+        const isPlayingRealAudio =
+          !audio.paused &&
+          !audio.ended &&
+          Boolean(audio.src) &&
+          audio.src !== SILENT_WAV_DATA_URI;
+        if (!isPlayingRealAudio) {
+          try {
+            audio.loop = true;
+            if (audio.src !== SILENT_WAV_DATA_URI) {
+              audio.src = SILENT_WAV_DATA_URI;
+            }
+            applyPlaybackRateLock(audio, playbackRateRef.current);
+            audio.play().catch(() => {});
+          } catch {}
+        }
+      }
+
+      if (novel && chapter) {
+        backgroundAudioManager.startBackgroundPlayback({
+          title: formatChapterTitleForTTS(chapter),
+          artist: novel.title,
+          album: `${novel.title} • ${formatVoiceArtistLabel(voiceIdRef.current)}`,
+          coverImage: novel.coverImage,
+          onPlay: () => {
+            resumeRef.current();
+          },
+          onPause: () => {
+            pauseRef.current();
+          },
+          onNext: () => {
+            skipNextRef.current();
+          },
+          onPrev: () => {
+            skipPrevRef.current();
+          },
+        });
+      }
+    },
+    [applyPlaybackRateLock, formatVoiceArtistLabel]
+  );
 
   const stop = useCallback(() => {
     playSessionNonceRef.current += 1;
@@ -1607,6 +1702,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audio.onloadedmetadata = null;
 
         // Không gọi audio.pause() trước khi đổi src để tránh làm rớt Background Media Session khi tắt màn hình
+        audio.loop = false;
         audio.src = audioUrl;
         applyPlaybackRateLock(audio, playbackRateRef.current);
 
@@ -1682,6 +1778,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
               activeBlobKeyRef.current = chunkBlobKey;
               activeBlobUrlRef.current = freshUrl;
+              audio.loop = false;
               audio.src = freshUrl;
               applyPlaybackRateLock(audio, playbackRateRef.current);
               audio.load();
@@ -2115,6 +2212,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setAudioError('Không thể phát tệp âm thanh MP3 của chương này. Vui lòng thử lại sau.');
       };
 
+      audio.loop = false;
       audio.src = mp3Url;
       applyPlaybackRateLock(audio, playbackRateRef.current);
 
@@ -2182,13 +2280,18 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setAudioError(null);
       isAudioModeRef.current = true;
       setIsAudioMode(true);
+      setIsBarVisible(true);
+      if (isDirectMp3Ref.current || !isDeviceFallbackVoice(voiceIdRef.current)) {
+        primeAudioElementInUserGesture(activeNovelRef.current, activeChapterRef.current);
+      }
       if (isDirectMp3Ref.current && activeNovelRef.current && activeChapterRef.current) {
         const directUrl = resolveChapterAudioUrl(activeChapterRef.current);
         if (directUrl) {
           const audio = audioRef.current;
-          if (audio && audio.src && !audio.ended && !audio.error) {
+          if (audio && audio.src && audio.src !== SILENT_WAV_DATA_URI && !audio.ended && !audio.error) {
             isPlaybackActiveRef.current = true;
             try {
+              audio.loop = false;
               applyPlaybackRateLock(audio, playbackRateRef.current);
               await audio.play();
               applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -2238,7 +2341,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : 0;
       await playChunkRef.current(targetQueueIdx);
     },
-    [applyPlaybackRateLock, playDirectMp3Url, resolveQueueIndexForChapterChunk]
+    [
+      applyPlaybackRateLock,
+      playDirectMp3Url,
+      primeAudioElementInUserGesture,
+      resolveQueueIndexForChapterChunk,
+      setIsBarVisible,
+    ]
   );
 
   const pause = useCallback(() => {
@@ -2262,12 +2371,17 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAudioError(null);
     isAudioModeRef.current = true;
     setIsAudioMode(true);
+    setIsBarVisible(true);
+    if (isDirectMp3Ref.current || !isDeviceFallbackVoice(voiceIdRef.current)) {
+      primeAudioElementInUserGesture(activeNovelRef.current, activeChapterRef.current);
+    }
     if (isDirectMp3Ref.current && activeNovelRef.current && activeChapterRef.current) {
       const audio = audioRef.current;
       const directUrl = resolveChapterAudioUrl(activeChapterRef.current);
-      if (audio && audio.src && !audio.ended && !audio.error) {
+      if (audio && audio.src && audio.src !== SILENT_WAV_DATA_URI && !audio.ended && !audio.error) {
         isPlaybackActiveRef.current = true;
         try {
+          audio.loop = false;
           applyPlaybackRateLock(audio, playbackRateRef.current);
           await audio.play();
           applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -2318,9 +2432,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
     const audio = audioRef.current;
-    if (audio && audio.src && !audio.ended && !audio.error) {
+    if (audio && audio.src && audio.src !== SILENT_WAV_DATA_URI && !audio.ended && !audio.error) {
       isPlaybackActiveRef.current = true;
       try {
+        audio.loop = false;
         applyPlaybackRateLock(audio, playbackRateRef.current);
         await audio.play();
         applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -2349,7 +2464,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } else {
       await playChunkRef.current(activeQueueIndexRef.current);
     }
-  }, [applyPlaybackRateLock, formatVoiceArtistLabel, play, playDirectMp3Url, runSequentialPrefetchQueue]);
+  }, [
+    applyPlaybackRateLock,
+    formatVoiceArtistLabel,
+    play,
+    playDirectMp3Url,
+    primeAudioElementInUserGesture,
+    runSequentialPrefetchQueue,
+    setIsBarVisible,
+  ]);
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -2602,6 +2725,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (!isSavedDisabled || userExplicitAction) {
         setIsBarVisible(true);
+        if (userExplicitAction) {
+          setIsMinimized(false);
+        }
+      }
+
+      if (willActivateAudio && !isAutoAdvance && !isDeviceFallbackVoice(voiceIdRef.current)) {
+        primeAudioElementInUserGesture(novel, chapter);
       }
 
       try {
@@ -2752,6 +2882,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setRetryAttempt(0);
           stopAllAudioOutputs(false);
           backgroundAudioManager.pauseBackgroundPlayback();
+          if (willActivateAudio && (finalChunks?.length || 0) === 0) {
+            setAudioError('Chương này chưa có nội dung văn bản để đọc Audio.');
+          }
         }
       } finally {
         if (inFlightChapterLoadKeyRef.current === chapterRequestKey) {
@@ -2763,6 +2896,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       clearStallWatchdogs,
       formatVoiceArtistLabel,
       playDirectMp3Url,
+      primeAudioElementInUserGesture,
       resetPrefetchAbortController,
       revokeAllBlobUrls,
       setIsBarVisible,
