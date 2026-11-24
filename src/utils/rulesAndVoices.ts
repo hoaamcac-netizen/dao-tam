@@ -190,10 +190,8 @@ export function normalizeEdgeVoiceId(voiceId?: string): string {
 let dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
 
 export async function fetchAvailableEdgeVoices(): Promise<VoiceOption[]> {
-  const env = ((import.meta as any)?.env || {}) as Record<string, string | undefined>;
-  const customTtsUrl = String(env.VITE_NETLIFY_TTS_URL || env.VITE_TTS_API_URL || '').trim();
-  const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname.toLowerCase() : '';
-  if (customTtsUrl || /\.(vercel\.app|netlify\.app|web\.app|firebaseapp\.com)$/i.test(host)) {
+  const customTtsUrl = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
+  if (customTtsUrl) {
     return dynamicEdgeVoices;
   }
   try {
@@ -365,27 +363,13 @@ function playOnlineEdgeSample(voice: VoiceOption, normalizedVoiceId: string) {
       audio.onended = () => {
         if (activeAudioSample === audio) activeAudioSample = null;
       };
-    }).catch(() => {
-      fallbackSpeechSample(voice);
+    }).catch((err) => {
+      console.warn('[VoiceSample] Không thể phát mẫu online cho giọng Neural:', err);
+      if (activeAudioSample === audio) activeAudioSample = null;
     });
   } catch (e) {
-    fallbackSpeechSample(voice);
+    console.warn('[VoiceSample] Lỗi khởi tạo audio mẫu:', e);
   }
-}
-
-function fallbackSpeechSample(voice: VoiceOption) {
-  if (!window.speechSynthesis) return;
-  const utterance = new SpeechSynthesisUtterance(voice.sampleText);
-  utterance.lang = 'vi-VN';
-  utterance.pitch = 1.0;
-  utterance.rate = 1.0;
-
-  const matched = getMatchingBrowserVoice(voice.id);
-  if (matched) {
-    utterance.voice = matched;
-  }
-
-  window.speechSynthesis.speak(utterance);
 }
 
 /**

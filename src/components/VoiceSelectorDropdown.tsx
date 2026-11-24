@@ -62,7 +62,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
             ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
             : 'bg-slate-100 dark:bg-slate-800 border-transparent text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
         }`
-      : `w-full py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-all cursor-pointer border ${
+      : `w-full min-h-[44px] py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-between gap-1.5 transition-all cursor-pointer border ${
           isFallbackActive
             ? 'bg-amber-50/90 dark:bg-amber-950/50 border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200'
             : 'bg-pink-50/80 dark:bg-slate-800 border-pink-100 dark:border-slate-700 text-slate-800 dark:text-slate-100 hover:bg-pink-100/80 dark:hover:bg-slate-700'
@@ -70,7 +70,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
 
   const menuPositionClasses =
     direction === 'up'
-      ? 'absolute bottom-full left-1/2 -translate-x-1/2 w-[calc(100vw-24px)] max-w-[calc(100vw-24px)] sm:left-0 sm:translate-x-0 sm:w-72 mb-2'
+      ? 'absolute bottom-full left-0 w-[min(calc(100vw-24px),18rem)] mb-2'
       : 'fixed left-3 right-3 top-[54px] max-w-[calc(100vw-24px)] mx-auto sm:mx-0 sm:absolute sm:top-full sm:right-0 sm:left-auto sm:w-72 sm:mt-2';
 
   return (
@@ -95,8 +95,8 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
               }`}
             />
           )}
-          <span className="truncate max-w-[90px] sm:max-w-none">
-            {variant === 'readerHeader' ? activeMeta.shortLabel : `Giọng: ${activeMeta.label}`}
+          <span className="truncate">
+            {variant === 'readerHeader' ? activeMeta.shortLabel : activeMeta.shortLabel}
           </span>
         </span>
         <ChevronDown

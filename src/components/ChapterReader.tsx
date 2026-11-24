@@ -438,17 +438,8 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     }
   }, [isCurrentChapterAudio, currentChunkIndex]);
 
-  // Tự động đồng bộ chuyển chương trong UI khi AudioContext tự động nhảy chương kế tiếp
-  useEffect(() => {
-    if (
-      audioContext.activeChapter && 
-      audioContext.isPlaying &&
-      audioContext.activeNovel?.id === novel.id &&
-      (audioContext.activeChapter.id !== chapter.id && Number(audioContext.activeChapter.number) !== Number(chapter.number))
-    ) {
-      onSelectChapter(novel, audioContext.activeChapter);
-    }
-  }, [audioContext.activeChapter, audioContext.isPlaying, novel, chapter.id, chapter.number, onSelectChapter]);
+  // Single Source of Truth: Chuyển chương từ thanh Audio hoặc màn hình khóa được đồng bộ 1 chiều qua sự kiện 'daotam:audio-chapter-changed' tại App.tsx,
+  // tuyệt đối không gọi onSelectChapter ngược trong useEffect tại đây để tránh vòng lặp giật màn hình / nhảy ngược về chương cũ.
 
   const groupedParagraphs = useMemo(() => {
     if ((chunks?.length || 0) === 0) {
@@ -485,25 +476,31 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     }
   }, [isTtsPlaying]);
 
-  // Đồng bộ Audio khi đổi chương (dùng useRef key chặn lặp vô hạn):
-  // TUYỆT ĐỐI KHÔNG phát lại từ đầu nếu AudioContext đã tự chuyển sang đúng chương hiện tại
+  // Đồng bộ Audio 1 chiều khi người dùng đổi chương trên trang đọc (dùng useRef chặn gọi lặp):
+  // Chỉ kích hoạt khi chương trang đọc thực sự khác chương đang nạp trong AudioContext
   useEffect(() => {
     if (!novel?.id || !chapter?.id || !isChapterUnlocked) return;
-    const syncKey = `${novel.id}::${chapter.id}::${isAudioActive}`;
+    const syncKey = `${novel.id}::${chapter.id}::${chapter.number}::${isAudioActive}`;
     if (lastSyncedAudioKeyRef.current === syncKey) return;
     lastSyncedAudioKeyRef.current = syncKey;
 
+    const ctx = audioContextRef.current;
     const isBarSavedVisible = safeGetItem('daotam_audio_bar_visible') === 'true';
+    const isAudioSessionCurrentlyOpen =
+      ctx.isPlaying || ctx.isLoading || (ctx.isBarVisible && (isAudioActive || ctx.isAudioMode));
+    const shouldAutoSyncAudio = isAudioSessionCurrentlyOpen || (isBarSavedVisible && isAudioActive);
+
     const isDifferentChapter =
-      !audioContext.activeChapter ||
-      audioContext.activeNovel?.id !== novel.id ||
-      (audioContext.activeChapter.id !== chapter.id &&
-        Number(audioContext.activeChapter.number) !== Number(chapter.number));
+      !ctx.activeChapter ||
+      ctx.activeNovel?.id !== novel.id ||
+      (ctx.activeChapter.id !== chapter.id &&
+        Number(ctx.activeChapter.number) !== Number(chapter.number));
 
     if (isDifferentChapter) {
       setIsTransitioningChapter(false);
-      if (isBarSavedVisible && isAudioActive) {
-        audioContext.playChapter(novel, chapter, true, safeChapters).catch((err: any) => {
+      if (shouldAutoSyncAudio) {
+        const shouldStartPlaying = ctx.isPlaying || ctx.isLoading || isAudioActive;
+        ctx.playChapter(novel, chapter, shouldStartPlaying, safeChapters, true).catch((err: any) => {
           console.warn('[ChapterReader] Setup audio for chapter error:', err);
         });
       }
@@ -755,7 +752,11 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   return (
     <div
-      className={`reader-container min-h-screen relative transition-colors duration-300 pt-12 pb-36 sm:pb-40 ${
+      className={`reader-container min-h-screen relative transition-colors duration-300 pt-12 ${
+        audioContext.isBarVisible && !audioContext.isMinimized
+          ? 'pb-64 sm:pb-48'
+          : 'pb-36 sm:pb-40'
+      } ${
         isAdmin ? 'select-text' : 'select-none'
       } ${getThemeClasses()}`}
       onContextMenu={

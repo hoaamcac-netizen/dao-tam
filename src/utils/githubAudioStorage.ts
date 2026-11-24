@@ -65,12 +65,14 @@ export function normalizeGitHubRepoInput(raw: string): string {
   return clean;
 }
 
+export const DEFAULT_GITHUB_AUDIO_REPO = 'hoaamcac-netizen/daotam-audio';
+
 export function parseGitHubRepo(input: string): ParsedGitHubRepo {
   const normalized = normalizeGitHubRepoInput(input);
   const match = normalized.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
   if (!match) {
     throw new Error(
-      'Tên kho GitHub không hợp lệ. Vui lòng nhập đúng dạng username/ten-repo (ví dụ: username/daotam-audio).'
+      `Tên kho GitHub không hợp lệ. Vui lòng nhập đúng dạng username/ten-repo (ví dụ: ${DEFAULT_GITHUB_AUDIO_REPO}).`
     );
   }
   return {
@@ -78,6 +80,29 @@ export function parseGitHubRepo(input: string): ParsedGitHubRepo {
     repo: match[2].trim(),
     fullName: `${match[1].trim()}/${match[2].trim()}`,
   };
+}
+
+/**
+ * Tách số chương từ tên file MP3 tải lên hàng loạt:
+ * Hỗ trợ các dạng: Chương_1_..., Chương 1..., Chuong_01..., chuong-12.mp3, Chương.005...
+ * Tự động chuẩn hóa Unicode NFC để tránh lỗi dấu tiếng Việt tổ hợp trên macOS/iOS.
+ */
+export function extractChapterNumberFromMp3Filename(fileName: string): number | null {
+  const normalized = String(fileName || '').normalize('NFC').trim();
+  if (!normalized) return null;
+  const match = normalized.match(/(?:chương|chuong)[\s_\-.]*(\d+)/i);
+  if (!match || !match[1]) return null;
+  const num = parseInt(match[1], 10);
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+export function isValidMp3UploadFile(file: File): boolean {
+  if (!file) return false;
+  const nameLower = (file.name || '').trim().toLowerCase();
+  const typeLower = (file.type || '').trim().toLowerCase();
+  if (nameLower.endsWith('.mp3')) return true;
+  if (typeLower === 'audio/mpeg' || typeLower === 'audio/mp3') return true;
+  return false;
 }
 
 export function saveAdminGitHubConfig(repoInput: string, tokenInput: string): AdminGitHubConfig {
@@ -186,6 +211,20 @@ export function concatMp3Uint8Arrays(chunks: Uint8Array[]): Uint8Array {
   return merged;
 }
 
+export function mergeMp3ChunksToBlob(chunks: Uint8Array[]): Blob {
+  const valid = (chunks || []).filter((c) => c && c.byteLength > 0);
+  if (valid.length === 0) {
+    throw new Error('Không có dữ liệu âm thanh MP3 để ghép nối.');
+  }
+  const normalizedParts: BlobPart[] = valid.map((chunk, index) => {
+    const slice = index === 0 ? chunk : stripLeadingId3v2Tag(chunk);
+    const copy = new Uint8Array(slice.byteLength);
+    copy.set(slice);
+    return copy.buffer;
+  });
+  return new Blob(normalizedParts, { type: 'audio/mpeg' });
+}
+
 async function fetchExistingGitHubFileSha(params: {
   owner: string;
   repo: string;
@@ -221,9 +260,9 @@ async function fetchExistingGitHubFileSha(params: {
       throw err;
     }
     throw new Error(
-      `Lỗi kiểm tra file trên GitHub (${cleanOwner}/${cleanRepo}): ${
+      `Lỗi mạng khi kiểm tra file trên GitHub (${cleanOwner}/${cleanRepo}): ${
         err?.message || 'Không thể kết nối api.github.com'
-      }. Vui lòng kiểm tra kết nối mạng, Tên kho GitHub và GitHub Token.`
+      }.`
     );
   }
 
@@ -233,13 +272,17 @@ async function fetchExistingGitHubFileSha(params: {
 
   if (res.status === 401 || res.status === 403) {
     throw new Error(
-      `Lỗi kiểm tra file trên GitHub (mã lỗi HTTP ${res.status}): GitHub Token (PAT) không hợp lệ, hết hạn hoặc thiếu quyền Contents.`
+      `Lỗi GitHub Token (HTTP ${res.status}): Token không hợp lệ, đã hết hạn hoặc thiếu quyền Contents (Read & Write).`
     );
+  }
+
+  if (res.status === 429) {
+    throw new Error('Lỗi giới hạn tốc độ GitHub (HTTP 429): Đang gửi quá nhiều yêu cầu, vui lòng thử lại sau ít phút.');
   }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Lỗi kiểm tra file trên GitHub (mã lỗi HTTP ${res.status}): ${errText || res.statusText}`);
+    throw new Error(`Lỗi kiểm tra file trên GitHub (HTTP ${res.status}): ${errText || res.statusText}`);
   }
 
   const json = await res.json().catch(() => null);
@@ -251,7 +294,8 @@ export async function uploadMp3ToGitHub(params: {
   token?: string;
   storyId: string;
   chapterId: string;
-  mp3Bytes: Uint8Array;
+  mp3Bytes?: Uint8Array;
+  mp3Blob?: Blob;
   commitMessage?: string;
   signal?: AbortSignal;
   onProgress?: (percent: number, statusText: string) => void;
@@ -262,11 +306,17 @@ export async function uploadMp3ToGitHub(params: {
 
   if (!repoRaw || !token) {
     throw new Error(
-      'Vui lòng nhập đầy đủ Tên kho GitHub và GitHub Token (PAT) trong phần Cài đặt kho lưu trữ GitHub trước khi tải lên.'
+      `Vui lòng nhập đầy đủ Tên kho GitHub (vd: ${DEFAULT_GITHUB_AUDIO_REPO}) và GitHub Token (PAT) trong phần Cài đặt trước khi tải lên.`
     );
   }
 
-  if (!params.mp3Bytes || params.mp3Bytes.byteLength === 0) {
+  let mp3Bytes = params.mp3Bytes;
+  if ((!mp3Bytes || mp3Bytes.byteLength === 0) && params.mp3Blob && params.mp3Blob.size > 0) {
+    const buf = await params.mp3Blob.arrayBuffer();
+    mp3Bytes = new Uint8Array(buf);
+  }
+
+  if (!mp3Bytes || mp3Bytes.byteLength === 0) {
     throw new Error('File MP3 trống hoặc không hợp lệ.');
   }
 
@@ -291,8 +341,8 @@ export async function uploadMp3ToGitHub(params: {
     signal: params.signal,
   });
 
-  params.onProgress?.(92, 'Đang tải file lên GitHub...');
-  const base64Content = uint8ArrayToBase64(params.mp3Bytes);
+  params.onProgress?.(92, 'Đang đẩy lên GitHub...');
+  const base64Content = uint8ArrayToBase64(mp3Bytes);
   const commitMessage =
     params.commitMessage || `Upload audio MP3: ${filePath}`;
 
@@ -323,9 +373,9 @@ export async function uploadMp3ToGitHub(params: {
         throw err;
       }
       throw new Error(
-        `Lỗi đẩy file lên GitHub (${cleanOwner}/${cleanRepo}): ${
+        `Lỗi mạng khi đẩy lên GitHub (${cleanOwner}/${cleanRepo}): ${
           err?.message || 'Không thể kết nối api.github.com'
-        }. Kiểm tra kết nối mạng, dung lượng file MP3 hoặc GitHub Token.`
+        }.`
       );
     }
   };
@@ -334,6 +384,7 @@ export async function uploadMp3ToGitHub(params: {
 
   // Nếu bị xung đột sha (409/422), lấy lại sha mới nhất và thử ghi đè lại 1 lần
   if (putRes.status === 409 || putRes.status === 422) {
+    await sleepWithAbort(300, params.signal).catch(() => {});
     const latestSha = await fetchExistingGitHubFileSha({
       owner: cleanOwner,
       repo: cleanRepo,
@@ -352,15 +403,25 @@ export async function uploadMp3ToGitHub(params: {
     const errMsg = errJson?.message || putRes.statusText || 'Lỗi không xác định';
     if (putRes.status === 401 || putRes.status === 403) {
       throw new Error(
-        `Lỗi đẩy file lên GitHub (mã lỗi HTTP ${putRes.status}): ${errMsg}. Hãy kiểm tra PAT có quyền Contents: Read & Write.`
+        `Lỗi GitHub Token (HTTP ${putRes.status}): ${errMsg}. Hãy kiểm tra PAT có quyền Contents: Read & Write.`
       );
     }
     if (putRes.status === 404) {
       throw new Error(
-        `Lỗi đẩy file lên GitHub (mã lỗi HTTP 404): Không tìm thấy kho "${cleanOwner}/${cleanRepo}" hoặc nhánh "main". Hãy đảm bảo repo đã được tạo và có nhánh main.`
+        `Lỗi GitHub (HTTP 404): Không tìm thấy kho "${cleanOwner}/${cleanRepo}" hoặc nhánh "main".`
       );
     }
-    throw new Error(`Lỗi đẩy file lên GitHub (mã lỗi HTTP ${putRes.status}): ${errMsg}`);
+    if (putRes.status === 409) {
+      throw new Error(
+        `Lỗi xung đột commit GitHub (HTTP 409): File đang được cập nhật đồng thời. Hãy thử lại.`
+      );
+    }
+    if (putRes.status === 429) {
+      throw new Error(
+        `Lỗi giới hạn tốc độ GitHub (HTTP 429): Quá nhiều lượt ghi liên tiếp. Hãy chờ 1 phút rồi tiếp tục.`
+      );
+    }
+    throw new Error(`Lỗi đẩy file lên GitHub (HTTP ${putRes.status}): ${errMsg}`);
   }
 
   const putData = await putRes.json().catch(() => ({}));
@@ -375,6 +436,12 @@ export async function uploadMp3ToGitHub(params: {
   };
 }
 
+/**
+ * Tự tạo file MP3 toàn chương ngay trên trình duyệt Admin:
+ * - Chia nhỏ văn bản chương thành các đoạn <= 400 ký tự theo dấu câu để Netlify không bao giờ bị timeout 10s.
+ * - Gọi API TTS tuần tự từng đoạn theo thứ tự bắt buộc: Netlify chính (retry tối đa 2 lần) -> Vercel dự phòng.
+ * - Ghép toàn bộ dữ liệu nhị phân thành 1 file Blob audio/mpeg duy nhất ngay trên trình duyệt.
+ */
 export async function generateChapterMp3FromText(params: {
   text: string;
   chapterTitle?: string;
@@ -386,7 +453,7 @@ export async function generateChapterMp3FromText(params: {
     totalChunks: number;
     label: string;
   }) => void;
-}): Promise<Uint8Array> {
+}): Promise<Blob> {
   const rawBody = (params.text || '').trim();
   if (!rawBody) {
     throw new Error('Nội dung chương đang trống, không thể tạo file MP3.');
@@ -398,9 +465,21 @@ export async function generateChapterMp3FromText(params: {
       ? `${cleanTitle}.\n\n${rawBody}`
       : rawBody;
 
-  // Chia nội dung thành các đoạn ~420 ký tự theo dấu câu/xuống dòng để tổng hợp nhanh, không quá timeout serverless
-  const chunks = chunkChapterContent(fullText, 360, 460, 320, 440);
-  if (!chunks || chunks.length === 0) {
+  // BẮT BUỘC chia <= 400 ký tự mỗi đoạn theo dấu câu/xuống dòng
+  const rawChunks = chunkChapterContent(fullText, 220, 390, 180, 350);
+  const chunkTexts: string[] = [];
+  for (const ch of rawChunks) {
+    if (ch.text.length <= 400) {
+      chunkTexts.push(ch.text);
+    } else {
+      const subParts = splitTextIntoSpeechChunks(ch.text, 350);
+      for (const part of subParts) {
+        if (part.trim()) chunkTexts.push(part.trim());
+      }
+    }
+  }
+
+  if (chunkTexts.length === 0) {
     throw new Error('Không có câu văn hợp lệ để chuyển thành giọng nói.');
   }
 
@@ -409,17 +488,17 @@ export async function generateChapterMp3FromText(params: {
     ? 'vi-VN-NamMinhNeural'
     : normalizedVoice;
 
-  const audioSegments: Uint8Array[] = [];
-  const total = chunks.length;
+  const mp3Chunks: Uint8Array[] = [];
+  const total = chunkTexts.length;
 
   for (let i = 0; i < total; i++) {
     if (params.signal?.aborted) {
       throw new DOMException('Đã hủy tạo MP3', 'AbortError');
     }
 
-    // Nghỉ 200ms giữa các lần gọi tuần tự để tạo file MP3 nhanh và ổn định
+    // Nghỉ 180ms giữa các đoạn tuần tự để tránh nghẽn serverless
     if (i > 0) {
-      await sleepWithAbort(200, params.signal);
+      await sleepWithAbort(180, params.signal);
     }
 
     const percentBefore = Math.max(2, Math.round((i / total) * 85));
@@ -427,23 +506,25 @@ export async function generateChapterMp3FromText(params: {
       percent: percentBefore,
       currentChunk: i + 1,
       totalChunks: total,
-      label: `Đang tạo đoạn ${i + 1}/${total}...`,
+      label: `Đang tạo ${i + 1}/${total}...`,
     });
 
     try {
       const blob = await fetchTtsAudioBlobWithWatchdog({
-        text: chunks[i].text,
+        text: chunkTexts[i],
         voiceId: synthesisVoice,
         signal: params.signal,
-        timeoutMs: 11000,
+        timeoutMs: 9500,
         maxRetries: 2,
-        retryDelayMs: 650,
-        onRetryAttempt: (attempt) => {
+        retryDelayMs: 550,
+        onRetryAttempt: (_attempt, detail) => {
           params.onProgress?.({
             percent: percentBefore,
             currentChunk: i + 1,
             totalChunks: total,
-            label: `Đoạn ${i + 1}/${total} đang thử lại (lần ${attempt}) qua server TTS dự phòng...`,
+            label: detail
+              ? `Đoạn ${i + 1}/${total}: ${detail}`
+              : `Đoạn ${i + 1}/${total} đang thử lại...`,
           });
         },
       });
@@ -451,7 +532,7 @@ export async function generateChapterMp3FromText(params: {
       if (blob && blob.size > 0) {
         const arrayBuf = await blob.arrayBuffer();
         if (arrayBuf.byteLength > 0) {
-          audioSegments.push(new Uint8Array(arrayBuf));
+          mp3Chunks.push(new Uint8Array(arrayBuf));
         }
       }
     } catch (primaryErr: any) {
@@ -459,10 +540,10 @@ export async function generateChapterMp3FromText(params: {
         throw primaryErr;
       }
 
-      // Dự phòng cấp 2: chia nhỏ chính đoạn bị lỗi thành các câu ngắn ~170 ký tự để cứu dữ liệu
-      const subSegments = splitTextIntoSpeechChunks(chunks[i].text, 170);
+      // Cứu đoạn dài bị timeout bằng cách tách nhỏ ~180 ký tự rồi gọi tuần tự Netlify -> Vercel
+      const subSegments = splitTextIntoSpeechChunks(chunkTexts[i], 180);
       let rescued = false;
-      if (subSegments.length > 0) {
+      if (subSegments.length > 1) {
         try {
           params.onProgress?.({
             percent: percentBefore,
@@ -470,27 +551,31 @@ export async function generateChapterMp3FromText(params: {
             totalChunks: total,
             label: `Đoạn ${i + 1}/${total} đang tách nhỏ để tổng hợp lại...`,
           });
-          await sleepWithAbort(450, params.signal);
+          await sleepWithAbort(350, params.signal);
+          const rescuedParts: Uint8Array[] = [];
           for (let subIdx = 0; subIdx < subSegments.length; subIdx++) {
             if (subIdx > 0) {
-              await sleepWithAbort(200, params.signal);
+              await sleepWithAbort(180, params.signal);
             }
             const subBlob = await fetchTtsAudioBlobWithWatchdog({
               text: subSegments[subIdx],
               voiceId: synthesisVoice,
               signal: params.signal,
-              timeoutMs: 11000,
+              timeoutMs: 9500,
               maxRetries: 2,
-              retryDelayMs: 650,
+              retryDelayMs: 550,
             });
             if (subBlob && subBlob.size > 0) {
               const subBuf = await subBlob.arrayBuffer();
               if (subBuf.byteLength > 0) {
-                audioSegments.push(new Uint8Array(subBuf));
+                rescuedParts.push(new Uint8Array(subBuf));
               }
             }
           }
-          rescued = true;
+          if (rescuedParts.length > 0) {
+            mp3Chunks.push(...rescuedParts);
+            rescued = true;
+          }
         } catch (subErr: any) {
           if (subErr?.name === 'AbortError' || params.signal?.aborted) {
             throw subErr;
@@ -499,10 +584,10 @@ export async function generateChapterMp3FromText(params: {
       }
 
       if (!rescued) {
-        const endpoints = getOrderedTtsEndpoints().join(', ');
-        const detail = primaryErr?.message || 'Không thể kết nối server';
+        const endpoints = getOrderedTtsEndpoints().join(' -> ');
+        const detail = primaryErr?.message || 'Không thể kết nối máy chủ TTS';
         throw new Error(
-          `Lỗi gọi server TTS tại đoạn ${i + 1}/${total}: ${detail} (Đã thử lần lượt: ${endpoints})`
+          `Lỗi tại đoạn ${i + 1}/${total}: ${detail} (Thứ tự gọi: ${endpoints})`
         );
       }
     }
@@ -512,20 +597,21 @@ export async function generateChapterMp3FromText(params: {
       percent: percentAfter,
       currentChunk: i + 1,
       totalChunks: total,
-      label: `Đã xong đoạn ${i + 1}/${total} (${percentAfter}%)`,
+      label: `Đang tạo ${i + 1}/${total}... (${percentAfter}%)`,
     });
   }
 
-  if (audioSegments.length === 0) {
-    throw new Error('Lỗi gọi server TTS: Máy chủ không trả về dữ liệu âm thanh cho chương này.');
+  if (mp3Chunks.length === 0) {
+    throw new Error('Máy chủ TTS không trả về dữ liệu âm thanh MP3 cho chương này.');
   }
 
   params.onProgress?.({
     percent: 87,
     currentChunk: total,
     totalChunks: total,
-    label: `Đang ghép nối ${total} đoạn thành file MP3...`,
+    label: `Đang ghép ${total} đoạn thành 1 file MP3...`,
   });
 
-  return concatMp3Uint8Arrays(audioSegments);
+  return mergeMp3ChunksToBlob(mp3Chunks);
 }
+

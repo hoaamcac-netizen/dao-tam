@@ -1,19 +1,16 @@
 /**
- * Vercel Serverless Function: Edge TTS Audio Streamer (Fallback Server)
+ * Vercel Serverless Function: Edge TTS Audio Streamer
  * Endpoint: /api/tts?text=...&voice=...
  * Supports: vi-VN-HoaiMyNeural (Nữ), vi-VN-NamMinhNeural (Nam)
  * Output: audio/mpeg stream with HTTP caching
  */
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 
-// In-memory cache for synthesized speech segments (LRU buffer cache, max 50 items)
+// In-memory cache for synthesized speech segments (LRU buffer cache, max 40 items)
 const audioBufferCache = new Map<string, Buffer>();
-const MAX_CACHE_ITEMS = 50;
-const VERCEL_HARD_DEADLINE_MS = 9200;
-const EDGE_CONNECT_TIMEOUT_MS = 3000;
-const EDGE_ATTEMPT_TIMEOUT_MS = 4500;
-const EDGE_MAX_ATTEMPTS = 4;
-const EDGE_RETRY_DELAY_MS = 100;
+const MAX_CACHE_ITEMS = 60;
+const VERCEL_EDGE_TTS_TIMEOUT_MS = 8200;
+
 
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -29,14 +26,10 @@ function sanitizeTextForEdgeTts(rawText: string): string {
     .trim();
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: number): Promise<Buffer> {
-  const safeTimeout = Math.max(2200, timeoutMs);
+  const safeTimeout = Math.max(1800, timeoutMs);
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: Math.min(EDGE_CONNECT_TIMEOUT_MS, safeTimeout),
+    connectionTimeoutMs: Math.min(2500, safeTimeout),
     synthesisTimeoutMs: safeTimeout,
   });
 
@@ -114,10 +107,10 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
         audioStream.on('end', () => {
           const fullBuffer = Buffer.concat(chunks);
           chunks.length = 0;
-          if (fullBuffer.length >= 256) {
+          if (fullBuffer.length > 0) {
             finishWithSuccess(fullBuffer);
           } else {
-            finishWithError(new Error('Không nhận được đủ dữ liệu âm thanh từ Edge TTS.'));
+            finishWithError(new Error('Không nhận được dữ liệu âm thanh từ Edge TTS.'));
           }
         });
 
@@ -125,7 +118,7 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
           if (!settled) {
             const fullBuffer = Buffer.concat(chunks);
             chunks.length = 0;
-            if (fullBuffer.length >= 256) {
+            if (fullBuffer.length > 0) {
               finishWithSuccess(fullBuffer);
             } else {
               finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm.'));
@@ -144,43 +137,10 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
   });
 }
 
-async function synthesizeEdgeTtsWithRetry(
-  cleanText: string,
-  voiceCode: string,
-  startedAt: number
-): Promise<Buffer> {
-  let lastError: unknown = null;
-
-  for (let attempt = 1; attempt <= EDGE_MAX_ATTEMPTS; attempt++) {
-    const remainingMs = VERCEL_HARD_DEADLINE_MS - (Date.now() - startedAt);
-    if (remainingMs < 1800) {
-      break;
-    }
-
-    const attemptTimeout = Math.min(EDGE_ATTEMPT_TIMEOUT_MS, remainingMs - 200);
-    try {
-      return await synthesizeOnce(cleanText, voiceCode, attemptTimeout);
-    } catch (err: any) {
-      lastError = err;
-      const afterErrRemaining = VERCEL_HARD_DEADLINE_MS - (Date.now() - startedAt);
-      if (attempt < EDGE_MAX_ATTEMPTS && afterErrRemaining >= 2200) {
-        await delay(EDGE_RETRY_DELAY_MS);
-      } else {
-        break;
-      }
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error('Không thể tổng hợp giọng đọc Microsoft Edge TTS.');
-}
-
 export default async function handler(req: any, res: any) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Expose-Headers', 'X-TTS-Voice, X-TTS-Provider');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -223,15 +183,13 @@ export default async function handler(req: any, res: any) {
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Content-Length', cachedBuffer.length);
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('X-TTS-Voice', voiceCode);
-    res.setHeader('X-TTS-Provider', 'msedge-tts');
     res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
     return res.end(cachedBuffer);
   }
 
-  const startedAt = Date.now();
   try {
-    const fullBuffer = await synthesizeEdgeTtsWithRetry(cleanText, voiceCode, startedAt);
+    // Luôn tổng hợp đúng giọng Microsoft Edge Neural (Nam Minh / Hoài My), tuyệt đối không tự hạ cấp sang giọng máy khác
+    const fullBuffer = await synthesizeOnce(cleanText, voiceCode, VERCEL_EDGE_TTS_TIMEOUT_MS);
 
     if (audioBufferCache.has(cacheKey)) {
       audioBufferCache.delete(cacheKey);
@@ -247,8 +205,6 @@ export default async function handler(req: any, res: any) {
       res.setHeader('Content-Type', 'audio/mpeg');
       res.setHeader('Content-Length', fullBuffer.length);
       res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('X-TTS-Voice', voiceCode);
-      res.setHeader('X-TTS-Provider', 'msedge-tts');
       res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
       res.end(fullBuffer);
     }
@@ -257,8 +213,7 @@ export default async function handler(req: any, res: any) {
     if (!res.headersSent) {
       const msg = String(err?.message || 'Unknown error');
       const isTimeout = msg.includes('Quá thời gian') || msg.includes('timed out');
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(isTimeout ? 504 : 502).json({ error: 'Không thể tổng hợp giọng đọc Edge TTS: ' + msg });
+      res.status(isTimeout ? 504 : 502).json({ error: 'Không thể tổng hợp giọng đọc: ' + msg });
     }
   }
 }

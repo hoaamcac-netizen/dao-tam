@@ -13,7 +13,7 @@
  * ==============================================================================
  */
 
-const CACHE_NAME = 'daotam-static-cache-v3';
+const CACHE_NAME = 'daotam-static-cache-v2';
 
 // Danh sách các tài nguyên tĩnh cơ bản của App Shell
 const PRECACHE_ASSETS = [
@@ -37,7 +37,6 @@ const REALTIME_EXCLUSION_PATTERNS = [
   'google.firestore',
   'channel?VER=',
   '/api/',
-  '/.netlify/functions/',
   '/api/vip',
   '/api/author',
   '/api/user',
@@ -144,23 +143,28 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
-// 4. Khi người dùng nhấn vào thông báo/thanh nổi ngoài màn hình chính, tự động focus lại tab web đang mở
+// 4. Xử lý khi người dùng bấm vào thông báo / thanh điều khiển nền trên điện thoại -> mở & focus đúng tab Đạo Tâm
 self.addEventListener('notificationclick', (event) => {
-  event.notification?.close?.();
-  const targetUrl = (event.notification?.data && event.notification.data.url) || '/';
+  event.notification.close();
+  const targetUrl =
+    (event.notification && event.notification.data && event.notification.data.url) || '/';
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      for (const client of clientList) {
-        if ('focus' in client) {
-          return client.focus();
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        // Ưu tiên focus lại tab Đạo Tâm đang mở sẵn (đúng trang đang đọc truyện)
+        for (const client of clientList) {
+          if (client.url && client.url.startsWith(self.location.origin) && 'focus' in client) {
+            return client.focus();
+          }
         }
-      }
-      if (self.clients.openWindow) {
-        return self.clients.openWindow(targetUrl);
-      }
-      return undefined;
-    })
+        // Nếu chưa có tab nào mở thì mở cửa sổ mới
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(targetUrl);
+        }
+      })
+      .catch(() => {})
   );
 });
 

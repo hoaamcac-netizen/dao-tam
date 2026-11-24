@@ -2380,7 +2380,6 @@ function DaoTamApp() {
     const slugOrId = novelWithChapters.slug || novelWithChapters.id;
     const searchParam = autoPlay ? '?autoPlay=true' : '';
     navigate(`/truyen/${slugOrId}/chuong-${chapter.number}${searchParam}`);
-    setIsShortStoryMode(false);
     setSelectedNovel(novelWithChapters);
     setSelectedChapter(chapter);
     setSelectedCreator(null);
@@ -2393,16 +2392,44 @@ function DaoTamApp() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const selectedNovelRef = useRef<Novel | null>(selectedNovel);
+  const selectedChapterRef = useRef<Chapter | null>(selectedChapter);
+  useEffect(() => {
+    selectedNovelRef.current = selectedNovel;
+    selectedChapterRef.current = selectedChapter;
+  }, [selectedNovel, selectedChapter]);
+
   useEffect(() => {
     const handleSilentAudioChapterChanged = (event: Event) => {
       const detail = (event as CustomEvent<{ novel?: Novel; chapter?: Chapter }>).detail;
       if (!detail?.novel || !detail?.chapter) return;
-      if (selectedNovel?.id === detail.novel.id && selectedChapter) {
-        if (
-          selectedChapter.id !== detail.chapter.id ||
-          Number(selectedChapter.number) !== Number(detail.chapter.number)
-        ) {
-          setSelectedChapter(detail.chapter);
+      const curNovel = selectedNovelRef.current;
+      const curChap = selectedChapterRef.current;
+      if (curNovel && curNovel.id === detail.novel.id && curChap) {
+        const isDifferent =
+          curChap.id !== detail.chapter.id ||
+          Number(curChap.number) !== Number(detail.chapter.number);
+        if (isDifferent) {
+          const matchedFullChapter =
+            (curNovel.chapters || []).find(
+              (c) =>
+                c.id === detail.chapter!.id ||
+                Number(c.number) === Number(detail.chapter!.number)
+            ) || detail.chapter;
+          const mergedChapter: Chapter = {
+            ...matchedFullChapter,
+            ...(detail.chapter.audioUrl ? { audioUrl: detail.chapter.audioUrl } : {}),
+            ...(detail.chapter.content && !matchedFullChapter.content
+              ? { content: detail.chapter.content }
+              : {}),
+          };
+          selectedChapterRef.current = mergedChapter;
+          setSelectedChapter(mergedChapter);
+          const slugOrId = (curNovel.slug && curNovel.slug.trim()) || curNovel.id;
+          const targetPath = `/truyen/${encodeURIComponent(slugOrId)}/chuong-${mergedChapter.number}`;
+          if (window.location.pathname !== targetPath) {
+            navigate(targetPath, { replace: true });
+          }
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }
       }
@@ -2417,7 +2444,7 @@ function DaoTamApp() {
         handleSilentAudioChapterChanged as EventListener
       );
     };
-  }, [selectedNovel?.id, selectedChapter]);
+  }, [navigate]);
 
   // =========================================================================
   // BỘ ĐỒNG BỘ ĐỊA CHỈ URL (REACT ROUTER) - ĐẢM BẢO F5 / COPY LINK KHÔNG VĂNG TRANG CHỦ
@@ -4490,20 +4517,7 @@ function DaoTamApp() {
       {/* THANH NỔI AUDIO MICROSOFT EDGE TTS (CHUẨN HÌNH 1, HỖ TRỢ NGHE KHI TẮT MÀN HÌNH & MEDIA SESSION LOCKSCREEN) */}
       <EdgeTTSFloatingAudioBar
         onOpenReader={(novel, chapter) => {
-          const latestNovel =
-            novels.find((n) => n.id === novel?.id) ||
-            (selectedNovel?.id === novel?.id ? selectedNovel : null);
-          const resolvedNovel: Novel = latestNovel
-            ? {
-                ...latestNovel,
-                chapters:
-                  (latestNovel.chapters?.length || 0) >= (novel?.chapters?.length || 0)
-                    ? latestNovel.chapters
-                    : novel.chapters,
-                coverImage: latestNovel.coverImage || novel?.coverImage,
-              }
-            : novel;
-          handleSelectChapter(resolvedNovel, chapter, false);
+          handleSelectChapter(novel, chapter, false);
         }}
       />
 
