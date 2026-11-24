@@ -1301,7 +1301,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
         {/* CỘT BÊN PHẢI: Toàn bộ thông báo và nội dung chi tiết tương ứng từng mục - Cuộn độc lập & chừa pt-16 tránh Header cố định */}
         <main className="flex-1 h-full bg-slate-50 pt-16 overflow-y-auto text-slate-800">
-          <div className="p-4 sm:p-6 lg:p-8 space-y-6">
+          <div className="p-4 sm:p-6 lg:p-8 pb-40 space-y-6">
           
           {/* Thông báo tương ứng mục đang chọn (Nếu có việc cần xử lý) */}
           {activeTab === 'requests' && pendingTopUpCount > 0 && (
@@ -2313,25 +2313,25 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 {(filteredNovels || []).map((novel) => (
                   <div
                     key={novel.id}
-                    className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 hover:border-pink-300 shadow-xs flex items-center justify-between gap-4 transition-all"
+                    className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 hover:border-pink-300 shadow-xs flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition-all"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-start sm:items-center gap-3 min-w-0 w-full md:flex-1">
                       <img
                         src={novel.coverImage || 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=200&q=80'}
                         alt={novel.title}
                         className="w-12 h-16 object-cover rounded-xl border border-slate-200 flex-shrink-0 shadow-xs"
                       />
-                      <div className="min-w-0">
-                        <h4 className="font-bold text-sm text-slate-900 truncate">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-bold text-sm text-slate-900 line-clamp-2 md:truncate">
                           {novel.title}
                         </h4>
-                        <div className="text-xs text-slate-500 mt-0.5">
+                        <div className="text-xs text-slate-500 mt-1 break-words">
                           Tác giả: <span className="text-pink-600 font-semibold">{novel.author}</span> • {novel.chapters?.length || 0} chương • {(novel.views || 0).toLocaleString()} lượt xem
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
+                    <div className="flex items-center gap-2 flex-wrap w-full md:w-auto md:justify-end pt-2 border-t border-slate-100 md:border-t-0 md:pt-0 shrink-0">
                       <button
                         type="button"
                         onClick={() => setMp3ManagingNovel(novel)}
@@ -2348,7 +2348,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           className="px-3 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
                         >
                           <Edit3 className="w-3.5 h-3.5 text-pink-600" />
-                          Sửa
+                          <span>Sửa</span>
                         </button>
                       )}
 
@@ -2362,14 +2362,14 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           }`}
                         >
                           {novel.isHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                          {novel.isHidden ? 'Hiện truyện' : 'Ẩn truyện'}
+                          <span>{novel.isHidden ? 'Hiện truyện' : 'Ẩn truyện'}</span>
                         </button>
                       )}
 
                       {onDeleteNovel && (
                         <button
                           onClick={() => setConfirmDeleteNovel(novel)}
-                          className="p-2 rounded-xl hover:bg-rose-50 text-slate-400 hover:text-rose-600 cursor-pointer transition"
+                          className="p-2 rounded-xl hover:bg-rose-50 text-slate-400 hover:text-rose-600 cursor-pointer transition ml-auto md:ml-0"
                           title="Xóa truyện"
                         >
                           <Trash2 className="w-4 h-4" />

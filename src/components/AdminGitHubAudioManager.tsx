@@ -97,28 +97,28 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
   };
 
   return (
-    <div className="rounded-2xl bg-white border border-slate-200 shadow-xs overflow-hidden">
-      <div className="px-4 py-3 bg-slate-50/90 border-b border-slate-200 flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0">
+    <div className="rounded-2xl bg-white dark:bg-zinc-900 border border-slate-200 dark:border-slate-700 shadow-xs overflow-hidden">
+      <div className="px-4 py-3 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+          <div className="w-8 h-8 rounded-xl bg-slate-900 dark:bg-zinc-900 text-white flex items-center justify-center shrink-0 border border-slate-700">
             <Github className="w-4 h-4" />
           </div>
           <div className="min-w-0">
-            <h4 className="font-bold text-xs sm:text-sm text-slate-900 truncate">
+            <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
               Cấu hình kho lưu trữ MP3 trên GitHub (Admin)
             </h4>
-            <p className="text-[11px] text-slate-500 truncate">
+            <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
               Chỉ lưu cục bộ trong trình duyệt Admin (localStorage), tuyệt đối không đẩy lên Firestore
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           <span
             className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
               repoInput.trim() && tokenInput.trim()
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                : 'bg-amber-50 text-amber-800 border-amber-200'
+                ? 'bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700'
+                : 'bg-amber-50 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-700'
             }`}
           >
             {repoInput.trim() && tokenInput.trim() ? `Sẵn sàng: ${repoInput.trim()}` : 'Chưa cấu hình đủ'}
@@ -127,7 +127,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
             <button
               type="button"
               onClick={() => setIsCollapsed((prev) => !prev)}
-              className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700 flex items-center gap-1 cursor-pointer"
+              className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-xs font-semibold text-slate-700 dark:text-white flex items-center gap-1 cursor-pointer"
             >
               <span>{isCollapsed ? 'Mở cài đặt' : 'Thu gọn'}</span>
               {isCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
@@ -137,7 +137,7 @@ export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
       </div>
 
       {!isCollapsed && (
-        <form onSubmit={handleSave} className="p-4 space-y-3 bg-white">
+        <form onSubmit={handleSave} className="p-4 space-y-3 bg-white dark:bg-zinc-900">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
@@ -319,8 +319,14 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       });
 
       setProgressPercent(98);
-      setStatusLabel('Đang lưu link MP3 vào Firestore...');
-      await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
+      setStatusLabel('Đang lưu link phát CDN vào Firestore...');
+      try {
+        await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
+      } catch (fsErr: any) {
+        throw new Error(
+          `Đã đẩy MP3 lên GitHub nhưng lưu Firestore thất bại: ${fsErr?.message || 'Lỗi Firestore'}`
+        );
+      }
 
       setJustUploadedAt(Date.now());
       onAudioUrlUpdated(chapter, cdnUrl);
@@ -329,7 +335,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       setTimeout(() => setSuccessMsg(null), 5000);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
-        setErrorMsg(err?.message || 'Lỗi khi tải MP3 lên GitHub.');
+        setErrorMsg(err?.message || 'Lỗi tải MP3 lên GitHub (không xác định).');
       }
     } finally {
       abortControllerRef.current = null;
@@ -392,8 +398,14 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       });
 
       setProgressPercent(98);
-      setStatusLabel('Đang lưu link CDN vào Firestore...');
-      await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
+      setStatusLabel('Đang lưu link phát CDN vào Firestore...');
+      try {
+        await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
+      } catch (fsErr: any) {
+        throw new Error(
+          `Đã đẩy MP3 lên GitHub nhưng lưu Firestore thất bại: ${fsErr?.message || 'Lỗi Firestore'}`
+        );
+      }
 
       setJustUploadedAt(Date.now());
       onAudioUrlUpdated(chapter, cdnUrl);
@@ -730,7 +742,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 pb-32 space-y-4">
           <AdminGitHubConfigCard defaultCollapsed />
 
           <div className="p-3.5 bg-white rounded-2xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

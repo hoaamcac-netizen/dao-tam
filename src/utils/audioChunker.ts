@@ -15,15 +15,15 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 8000;
+export const TTS_FETCH_TIMEOUT_MS = 12000;
 export const TTS_MAX_RETRIES = 2;
-export const TTS_RETRY_DELAY_MS = 1200;
+export const TTS_RETRY_DELAY_MS = 800;
 export const TTS_ACTIVE_SERVER_STORAGE_KEY = 'daotam_active_tts_endpoint';
 export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 350;
 export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 550;
 export const DEFAULT_CHUNK_MIN_LENGTH = 500;
 export const DEFAULT_CHUNK_MAX_LENGTH = 700;
-export const MAX_BLOB_CACHE_ENTRIES = 10;
+export const MAX_BLOB_CACHE_ENTRIES = 6;
 export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
 
 function normalizeTtsEndpoint(rawUrl: string): string {
@@ -97,7 +97,7 @@ export function getTtsEndpointUrl(): string {
   return getOrderedTtsEndpoints()[0] || '/api/tts';
 }
 
-function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
     return Promise.reject(new DOMException('Aborted', 'AbortError'));
   }
@@ -220,14 +220,26 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
   const orderedEndpoints = getOrderedTtsEndpoints();
   let lastError: unknown = null;
 
-  // Khi có nhiều server dự phòng, thử lần lượt toàn bộ danh sách server (mỗi server timeout 8s).
-  if (orderedEndpoints.length > 1) {
+  // Thử lần lượt từng server trong VITE_TTS_API_URL; nếu tất cả server đều lỗi ở 1 lượt,
+  // tự động thử lại tối đa maxRetries lần (mặc định 2 lần) trước khi báo lỗi.
+  for (let round = 0; round <= maxRetries; round++) {
+    if (externalSignal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    if (round > 0) {
+      onRetryAttempt?.(round);
+      await sleepWithAbort(TTS_RETRY_DELAY_MS, externalSignal);
+    }
+
+    let roundHadRetryableError = false;
+
     for (let idx = 0; idx < orderedEndpoints.length; idx++) {
       if (externalSignal?.aborted) {
         throw new DOMException('Aborted', 'AbortError');
       }
 
-      if (idx > 0) {
+      if (round === 0 && idx > 0) {
         onRetryAttempt?.(idx);
       }
 
@@ -247,54 +259,30 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
           throw new DOMException('Aborted', 'AbortError');
         }
         lastError = err;
+        const isSingleNonRetryable =
+          orderedEndpoints.length === 1 &&
+          typeof err?.httpStatus === 'number' &&
+          isNonRetryableSingleServerStatus(err.httpStatus);
+        if (!isSingleNonRetryable) {
+          roundHadRetryableError = true;
+        }
         console.warn(
-          `[TTS Failover] Server #${idx + 1} (${endpointUrl}) lỗi, chuyển server tiếp theo:`,
+          `[TTS Failover] Lượt ${round + 1}, Server #${idx + 1} (${endpointUrl}) lỗi:`,
           err?.message || err
         );
       }
     }
 
-    throw lastError instanceof Error
-      ? lastError
-      : new Error('Tất cả máy chủ giọng đọc đều không phản hồi');
-  }
-
-  // Trường hợp chỉ cấu hình 1 server duy nhất: giữ cơ chế retry nhẹ cho lỗi mạng tạm thời
-  const singleEndpoint = orderedEndpoints[0] || '/api/tts';
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (externalSignal?.aborted) {
-      throw new DOMException('Aborted', 'AbortError');
-    }
-
-    if (attempt > 0) {
-      onRetryAttempt?.(attempt);
-      await sleepWithAbort(TTS_RETRY_DELAY_MS, externalSignal);
-    }
-
-    try {
-      const result = await fetchSingleTtsEndpoint({
-        endpointUrl: singleEndpoint,
-        cleanText,
-        voiceId,
-        externalSignal,
-        timeoutMs,
-      });
-      rememberActiveTtsEndpoint(singleEndpoint);
-      return result.blob;
-    } catch (err: any) {
-      if (err?.name === 'AbortError' || externalSignal?.aborted) {
-        throw new DOMException('Aborted', 'AbortError');
-      }
-      lastError = err;
-      if (typeof err?.httpStatus === 'number' && isNonRetryableSingleServerStatus(err.httpStatus)) {
-        break;
-      }
+    if (!roundHadRetryableError) {
+      break;
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error('Không thể tải âm thanh từ máy chủ giọng đọc');
+  const baseMessage =
+    lastError instanceof Error && lastError.message
+      ? lastError.message
+      : 'Máy chủ giọng đọc không phản hồi';
+  throw new Error(`Lỗi gọi server TTS: ${baseMessage}`);
 }
 
 /**
@@ -1000,16 +988,23 @@ export class AudioStreamer {
       this.audioElement.playbackRate = this.playbackRate;
       this.isPlaying = true;
 
-      // Tải trước song song 4 đoạn kế tiếp
-      const lookahead = [1, 2, 3, 4]
+      // Tải trước TUẦN TỰ tối đa 2 đoạn kế tiếp (xong đoạn này, nghỉ 250ms mới tải đoạn sau)
+      const lookahead = [1, 2]
         .map((offset) => this.chunks[index + offset])
         .filter(Boolean);
       if (lookahead.length > 0 && !signal.aborted) {
-        Promise.allSettled(
-          lookahead.map((nextTarget) =>
-            seamlessAudioCache.fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text)
-          )
-        ).catch(() => {});
+        (async () => {
+          for (const nextTarget of lookahead) {
+            if (signal.aborted || !this.isPlaying) break;
+            try {
+              await sleepWithAbort(250, signal);
+              if (signal.aborted || !this.isPlaying) break;
+              await seamlessAudioCache.fetchAndCache(this.voiceId, nextTarget.text, undefined, signal, chunk.text);
+            } catch {
+              // Bỏ qua lỗi prefetch đơn lẻ để không ảnh hưởng đoạn đang phát
+            }
+          }
+        })();
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;

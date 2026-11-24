@@ -125,14 +125,21 @@ class BackgroundAudioManager {
   }
 
   /**
+   * Đồng bộ trạng thái playbackState ('playing' | 'paused' | 'none') cho MediaSession trên iOS/Android
+   */
+  public setPlaybackState(state: MediaSessionPlaybackState) {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = state;
+      } catch {}
+    }
+  }
+
+  /**
    * Tạm dừng hoặc kết thúc phiên audio nền
    */
   public pauseBackgroundPlayback() {
-    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      try {
-        navigator.mediaSession.playbackState = 'paused';
-      } catch {}
-    }
+    this.setPlaybackState('paused');
 
     if (this.wakeLock) {
       this.wakeLock.release().catch(() => {});
