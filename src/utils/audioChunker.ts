@@ -15,76 +15,151 @@ export interface AudioChunk {
   paraIndex?: number;
 }
 
-export const TTS_FETCH_TIMEOUT_MS = 8500;
+export const TTS_FETCH_TIMEOUT_MS = 15000;
 export const TTS_MAX_RETRIES = 2;
-export const TTS_RETRY_DELAY_MS = 500;
+export const TTS_RETRY_DELAY_MS = 450;
 export const TTS_ACTIVE_SERVER_STORAGE_KEY = 'daotam_active_tts_endpoint';
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 150;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 230;
-export const DEFAULT_CHUNK_MIN_LENGTH = 420;
-export const DEFAULT_CHUNK_MAX_LENGTH = 560;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 110;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 190;
+export const DEFAULT_CHUNK_MIN_LENGTH = 300;
+export const DEFAULT_CHUNK_MAX_LENGTH = 440;
 export const MAX_BLOB_CACHE_ENTRIES = 8;
 export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
 
 const ENDPOINT_COOLDOWN_MS = 90 * 1000;
+const QUOTA_COOLDOWN_MS = 5 * 60 * 1000;
 const deadTtsEndpoints = new Set<string>();
 const cooldownTtsEndpoints = new Map<string, number>();
 
-function isStaticFirebaseHost(): boolean {
-  if (typeof window === 'undefined' || !window.location?.hostname) return false;
-  return /\.(web\.app|firebaseapp\.com)$/i.test(window.location.hostname);
+function getCurrentHostname(): string {
+  if (typeof window === 'undefined' || !window.location?.hostname) return '';
+  return window.location.hostname.toLowerCase();
 }
 
-function normalizeTtsEndpoint(rawUrl: string): string {
+function isStaticFirebaseHost(): boolean {
+  const host = getCurrentHostname();
+  return Boolean(host) && /\.(web\.app|firebaseapp\.com)$/i.test(host);
+}
+
+function isNetlifyHostName(host: string): boolean {
+  return /(^|\.)(netlify\.app|netlify\.live)$/i.test(host);
+}
+
+function isVercelHostName(host: string): boolean {
+  return /(^|\.)(vercel\.app|vercel\.sh|now\.sh)$/i.test(host);
+}
+
+function isNetlifyEndpointUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (lower.includes('/.netlify/functions/')) return true;
+  try {
+    const parsed = new URL(url, typeof window !== 'undefined' ? window.location.origin : 'https://localhost');
+    return isNetlifyHostName(parsed.hostname);
+  } catch {
+    return lower.includes('netlify.app') || lower.includes('netlify.live');
+  }
+}
+
+function isVercelEndpointUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (url === '/api/tts' || url.startsWith('/api/tts?')) {
+    return isVercelHostName(getCurrentHostname());
+  }
+  try {
+    const parsed = new URL(url, typeof window !== 'undefined' ? window.location.origin : 'https://localhost');
+    return isVercelHostName(parsed.hostname);
+  } catch {
+    return lower.includes('vercel.app') || lower.includes('vercel.sh');
+  }
+}
+
+function expandNormalizedTtsEndpoints(rawUrl: string): string[] {
   const clean = rawUrl.trim().replace(/\/+$/, '');
-  if (!clean) return '/api/tts';
+  if (!clean) return [];
   if (
     clean.endsWith('/api/tts') ||
     clean.endsWith('/.netlify/functions/tts') ||
     clean.includes('/api/tts?') ||
     clean.includes('/.netlify/functions/tts?')
   ) {
-    return clean;
+    return [clean];
   }
-  return `${clean}/api/tts`;
+  if (isNetlifyEndpointUrl(clean)) {
+    return [`${clean}/.netlify/functions/tts`, `${clean}/api/tts`];
+  }
+  return [`${clean}/api/tts`];
+}
+
+function getEndpointPriorityTier(url: string): number {
+  // Tier 0: Netlify (luôn ưu tiên số 1 - chỉ chuyển sang dự phòng khác khi Netlify lỗi/hết quota)
+  if (isNetlifyEndpointUrl(url)) return 0;
+  // Tier 2: Vercel (chỉ làm dự phòng cuối cùng khi Netlify lỗi/hết dung lượng)
+  if (isVercelEndpointUrl(url)) return 2;
+  // Tier 1: Server khác (localhost / Cloud Run / custom backend không phải Vercel)
+  return 1;
 }
 
 /**
- * Đọc danh sách các server TTS khả dụng:
- * - Khi chạy trên host có backend/serverless (/api/tts không phải Firebase Hosting tĩnh), ưu tiên '/api/tts' cùng domain trước
- *   để phát âm thanh dưới 3 giây và không bị nghẽn bởi endpoint bên ngoài bị tắt/timeout.
- * - Khi chạy trên Firebase Hosting tĩnh (*.web.app / *.firebaseapp.com), ưu tiên VITE_TTS_API_URL trước.
+ * Đọc danh sách các server TTS khả dụng theo thứ tự ưu tiên tuyệt đối:
+ * 1. Netlify Functions (VITE_NETLIFY_TTS_URL, các link *.netlify.app trong VITE_TTS_API_URL, hoặc cùng domain Netlify)
+ * 2. Máy chủ backend khác (Cloud Run / localhost / custom domain không phải Vercel)
+ * 3. Vercel (VITE_VERCEL_TTS_URL, các link *.vercel.app, hoặc /api/tts khi đang host trên Vercel) — CHỈ dùng khi Netlify hết dung lượng/lỗi.
  */
 export function getTtsEndpointUrls(): string[] {
-  const raw = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
+  const env = ((import.meta as any)?.env || {}) as Record<string, string | undefined>;
+  const netlifyEnv = String(env.VITE_NETLIFY_TTS_URL || '').trim();
+  const mainEnv = String(env.VITE_TTS_API_URL || '').trim();
+  const vercelEnv = String(env.VITE_VERCEL_TTS_URL || '').trim();
+
   const seen = new Set<string>();
-  const externalEndpoints: string[] = [];
+  const netlifyTier: string[] = [];
+  const otherTier: string[] = [];
+  const vercelTier: string[] = [];
 
-  const sameOriginOrigin =
-    typeof window !== 'undefined' && window.location?.origin
-      ? window.location.origin.replace(/\/+$/, '')
-      : '';
-  const sameOriginUrl = sameOriginOrigin ? `${sameOriginOrigin}/api/tts` : '';
+  const pushUnique = (url: string, forceTier?: 0 | 1 | 2) => {
+    const clean = url.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    const tier = forceTier ?? getEndpointPriorityTier(clean);
+    if (tier === 0) netlifyTier.push(clean);
+    else if (tier === 2) vercelTier.push(clean);
+    else otherTier.push(clean);
+  };
 
-  if (raw) {
-    for (const part of raw.split(',')) {
+  const addRawList = (rawList: string, forceTier?: 0 | 1 | 2) => {
+    if (!rawList) return;
+    for (const part of rawList.split(',')) {
       const trimmed = part.trim();
       if (!trimmed) continue;
-      const normalized = normalizeTtsEndpoint(trimmed);
-      if (normalized === '/api/tts' || (sameOriginUrl && normalized === sameOriginUrl)) {
-        continue;
-      }
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
-        externalEndpoints.push(normalized);
+      for (const expanded of expandNormalizedTtsEndpoints(trimmed)) {
+        pushUnique(expanded, forceTier);
       }
     }
+  };
+
+  // 1. Luôn nạp Netlify trước
+  addRawList(netlifyEnv, 0);
+  // 2. Nạp danh sách cấu hình chung (tự động phân loại Netlify trước, Vercel sau)
+  addRawList(mainEnv);
+  // 3. Nạp Vercel dự phòng sau cùng
+  addRawList(vercelEnv, 2);
+
+  // 4. Xử lý endpoint cùng domain hiện tại
+  const currentHost = getCurrentHostname();
+  if (isNetlifyHostName(currentHost)) {
+    pushUnique('/.netlify/functions/tts', 0);
+    pushUnique('/api/tts', 0);
+  } else if (isVercelHostName(currentHost)) {
+    // Đang chạy trên Vercel: chỉ để /api/tts ở cuối cùng sau mọi server Netlify
+    pushUnique('/api/tts', 2);
+  } else if (!isStaticFirebaseHost()) {
+    // Localhost / Cloud Run / custom backend có Express server.ts
+    pushUnique('/api/tts', 1);
+  } else if (netlifyTier.length === 0 && otherTier.length === 0 && vercelTier.length === 0) {
+    pushUnique('/api/tts', 1);
   }
 
-  const ordered = isStaticFirebaseHost()
-    ? [...externalEndpoints, '/api/tts']
-    : ['/api/tts', ...externalEndpoints];
-
+  const ordered = [...netlifyTier, ...otherTier, ...vercelTier];
   return ordered.length > 0 ? ordered : ['/api/tts'];
 }
 
@@ -124,19 +199,37 @@ export function clearActiveTtsEndpoint(onlyIfMatches?: string): void {
 export function getOrderedTtsEndpoints(): string[] {
   const configured = getTtsEndpointUrls();
   const savedActive = getSessionActiveTtsEndpoint();
+  const now = Date.now();
 
-  const withPinned =
-    savedActive && configured.includes(savedActive) && !deadTtsEndpoints.has(savedActive)
-      ? [savedActive, ...configured.filter((url) => url !== savedActive)]
-      : configured;
+  // Xóa các mốc cooldown đã hết hạn
+  for (const [url, until] of cooldownTtsEndpoints.entries()) {
+    if (until <= now) {
+      cooldownTtsEndpoints.delete(url);
+    }
+  }
 
-  const live = withPinned.filter((url) => !deadTtsEndpoints.has(url));
-  const pool = live.length > 0 ? live : withPinned;
+  // Chỉ giữ ghim savedActive nếu không có server ưu tiên cao hơn (như Netlify) đang khỏe mạnh.
+  // Điều này đảm bảo nếu trước đó phải tạm fallback sang Vercel, khi Netlify hồi phục sẽ tự quay lại Netlify ngay.
+  let prioritized = configured;
+  if (savedActive && configured.includes(savedActive) && !deadTtsEndpoints.has(savedActive)) {
+    const savedTier = getEndpointPriorityTier(savedActive);
+    const hasHealthyHigherTier = configured.some(
+      (url) =>
+        getEndpointPriorityTier(url) < savedTier &&
+        !deadTtsEndpoints.has(url) &&
+        !(cooldownTtsEndpoints.get(url) && cooldownTtsEndpoints.get(url)! > now)
+    );
+    if (!hasHealthyHigherTier) {
+      prioritized = [savedActive, ...configured.filter((url) => url !== savedActive)];
+    }
+  }
+
+  const live = prioritized.filter((url) => !deadTtsEndpoints.has(url));
+  const pool = live.length > 0 ? live : prioritized;
   if (live.length === 0) {
     deadTtsEndpoints.clear();
   }
 
-  const now = Date.now();
   const healthy: string[] = [];
   const cooling: string[] = [];
   for (const url of pool) {
@@ -144,7 +237,6 @@ export function getOrderedTtsEndpoints(): string[] {
     if (until > now) {
       cooling.push(url);
     } else {
-      cooldownTtsEndpoints.delete(url);
       healthy.push(url);
     }
   }
@@ -153,7 +245,7 @@ export function getOrderedTtsEndpoints(): string[] {
 }
 
 /**
- * Lấy địa chỉ endpoint TTS ưu tiên hiện tại (từ sessionStorage nếu đã failover, hoặc server ưu tiên).
+ * Lấy địa chỉ endpoint TTS ưu tiên hiện tại (luôn ưu tiên Netlify trước, chỉ fallback sang Vercel khi cần).
  */
 export function getTtsEndpointUrl(): string {
   return getOrderedTtsEndpoints()[0] || '/api/tts';
@@ -177,7 +269,12 @@ export function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> 
 }
 
 function isDeadEndpointStatus(status: number): boolean {
-  return status === 402 || status === 404 || status === 410;
+  // 402 Payment Required / Quota Exceeded, 403 Forbidden/Suspended, 404 Not Found, 410 Gone
+  return status === 402 || status === 403 || status === 404 || status === 410;
+}
+
+function isQuotaOrRateLimitStatus(status: number): boolean {
+  return status === 429 || status === 503;
 }
 
 function isNonRetryableSingleServerStatus(status: number): boolean {
@@ -249,6 +346,7 @@ async function fetchSingleTtsEndpoint(params: {
 
     if (
       response.status === 402 ||
+      response.status === 403 ||
       response.status === 429 ||
       response.status >= 500 ||
       !response.ok
@@ -257,6 +355,8 @@ async function fetchSingleTtsEndpoint(params: {
       err.httpStatus = response.status;
       if (isDeadEndpointStatus(response.status)) {
         err.isDeadEndpoint = true;
+      } else if (isQuotaOrRateLimitStatus(response.status)) {
+        err.isQuotaExceeded = true;
       }
       throw err;
     }
@@ -265,9 +365,9 @@ async function fetchSingleTtsEndpoint(params: {
     const arrayBuffer = await response.arrayBuffer();
     const byteView = new Uint8Array(arrayBuffer);
 
-    if (arrayBuffer.byteLength < 100 || isLikelyHtmlOrTextPayload(byteView, contentType)) {
+    if (arrayBuffer.byteLength < 256 || isLikelyHtmlOrTextPayload(byteView, contentType)) {
       const invalidErr: any = new Error('Dữ liệu âm thanh trả về không hợp lệ');
-      if (contentType.toLowerCase().includes('text/html')) {
+      if (contentType.toLowerCase().includes('text/html') || contentType.toLowerCase().includes('text/plain')) {
         invalidErr.isDeadEndpoint = true;
       }
       throw invalidErr;
@@ -293,10 +393,9 @@ async function fetchSingleTtsEndpoint(params: {
 }
 
 /**
- * Fetch audio TTS hỗ trợ đa server Failover:
+ * Fetch audio TTS hỗ trợ đa server Failover (Netlify chính -> Vercel dự phòng):
  * - Dùng GET (CORS Simple Request) cho đoạn ngắn/trung bình để loại bỏ OPTIONS preflight.
- * - Thử lần lượt từng server (gồm VITE_TTS_API_URL + /api/tts cùng domain dự phòng).
- * - Nếu 1 server lỗi: xóa ghim sessionStorage và xoay vòng server ở lượt thử lại với backoff tăng dần.
+ * - Luôn thử Netlify trước; chỉ khi Netlify lỗi/hết dung lượng mới tự chuyển sang server dự phòng (Vercel).
  */
 export async function fetchTtsAudioBlobWithWatchdog(params: {
   text: string;
@@ -331,7 +430,7 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
 
     if (round > 0) {
       onRetryAttempt?.(round);
-      const backoffMs = Math.min(3500, Math.round(retryDelayMs * Math.pow(1.6, round - 1)));
+      const backoffMs = Math.min(2500, Math.round(retryDelayMs * Math.pow(1.5, round - 1)));
       await sleepWithAbort(backoffMs, externalSignal);
     }
 
@@ -351,7 +450,7 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
       const endpointUrl = orderedEndpoints[idx];
       const attemptTimeoutMs =
         round === 0 && len > 1 && idx < len - 1
-          ? Math.min(timeoutMs, 6500)
+          ? Math.min(timeoutMs, 10500)
           : timeoutMs;
 
       try {
@@ -371,6 +470,8 @@ export async function fetchTtsAudioBlobWithWatchdog(params: {
         clearActiveTtsEndpoint(endpointUrl);
         if (err?.isDeadEndpoint) {
           deadTtsEndpoints.add(endpointUrl);
+        } else if (err?.isQuotaExceeded) {
+          cooldownTtsEndpoints.set(endpointUrl, Date.now() + QUOTA_COOLDOWN_MS);
         } else if (err?.isTimeout || (typeof err?.httpStatus === 'number' && err.httpStatus >= 500)) {
           cooldownTtsEndpoints.set(endpointUrl, Date.now() + ENDPOINT_COOLDOWN_MS);
         }

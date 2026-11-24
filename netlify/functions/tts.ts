@@ -18,21 +18,22 @@ const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Expose-Headers': 'X-TTS-Voice, X-TTS-Provider',
 };
 
-const MAX_CACHE_ITEMS = 40;
+const MAX_CACHE_ITEMS = 50;
 const audioBufferCache = new Map<string, Buffer>();
-const EDGE_TTS_PROBE_TIMEOUT_MS = 1500;
-const EDGE_TTS_COOLDOWN_MS = 3 * 60 * 1000;
-const NETLIFY_HARD_DEADLINE_MS = 8200;
-
-let edgeTtsDegradedUntil = 0;
+const NETLIFY_HARD_DEADLINE_MS = 9200;
+const EDGE_CONNECT_TIMEOUT_MS = 3000;
+const EDGE_ATTEMPT_TIMEOUT_MS = 4500;
+const EDGE_MAX_ATTEMPTS = 4;
+const EDGE_RETRY_DELAY_MS = 100;
 
 /**
- * Bộ lọc làm sạch văn bản cho TTS:
- * - Chỉ giữ lại chữ cái Unicode (\p{L} để giữ đủ tiếng Việt có dấu), chữ số (\p{N}),
+ * Bộ lọc làm sạch văn bản cho Microsoft Edge TTS:
+ * - Giữ chữ cái Unicode (\p{L} đủ tiếng Việt có dấu), chữ số (\p{N}),
  *   khoảng trắng (\s) và dấu câu cơ bản (. , ? ! : ;)
- * - Thay tất cả ký tự lạ (【】, 《》, 「」, —, ***, ~, emoji...) bằng khoảng trắng.
+ * - Loại bỏ HTML và ký tự đặc biệt gây lỗi SSML/XML của Edge TTS.
  */
 function sanitizeTextForEdgeTts(rawText: string): string {
   if (!rawText || typeof rawText !== 'string') return '';
@@ -65,148 +66,14 @@ function normalizeVoiceCode(requestedVoice?: string): string {
   return 'vi-VN-NamMinhNeural';
 }
 
-function stripLeadingId3v2Netlify(buf: Buffer): Buffer {
-  if (buf.length >= 10 && buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) {
-    const flags = buf[5];
-    const hasFooter = (flags & 0x10) !== 0;
-    const tagSize =
-      ((buf[6] & 0x7f) << 21) |
-      ((buf[7] & 0x7f) << 14) |
-      ((buf[8] & 0x7f) << 7) |
-      (buf[9] & 0x7f);
-    const totalHeaderSize = 10 + tagSize + (hasFooter ? 10 : 0);
-    if (totalHeaderSize > 10 && totalHeaderSize < buf.length) {
-      return buf.subarray(totalHeaderSize);
-    }
-  }
-  return buf;
-}
-
-function splitTextForShortTtsSegments(text: string, maxLen = 175): string[] {
-  const clean = text.replace(/\s+/g, ' ').trim();
-  if (!clean) return [];
-  if (clean.length <= maxLen) return [clean];
-
-  const sentences = clean
-    .split(/(?<=[.?!;…])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  const fineUnits: string[] = [];
-  for (const sentence of sentences) {
-    if (sentence.length <= maxLen) {
-      fineUnits.push(sentence);
-      continue;
-    }
-    const clauses = sentence
-      .split(/(?<=[,:])\s+/)
-      .map((c) => c.trim())
-      .filter(Boolean);
-    for (const clause of clauses) {
-      if (clause.length <= maxLen) {
-        fineUnits.push(clause);
-        continue;
-      }
-      const words = clause.split(/\s+/).filter(Boolean);
-      let wordAcc = '';
-      for (const word of words) {
-        if (word.length > maxLen) {
-          if (wordAcc) {
-            fineUnits.push(wordAcc);
-            wordAcc = '';
-          }
-          for (let i = 0; i < word.length; i += maxLen) {
-            fineUnits.push(word.slice(i, i + maxLen));
-          }
-          continue;
-        }
-        const cand = wordAcc ? `${wordAcc} ${word}` : word;
-        if (cand.length <= maxLen) {
-          wordAcc = cand;
-        } else {
-          if (wordAcc) fineUnits.push(wordAcc);
-          wordAcc = word;
-        }
-      }
-      if (wordAcc) fineUnits.push(wordAcc);
-    }
-  }
-
-  const packed: string[] = [];
-  let buf = '';
-  for (const unit of fineUnits) {
-    const cand = buf ? `${buf} ${unit}` : unit;
-    if (cand.length <= maxLen) {
-      buf = cand;
-    } else {
-      if (buf && /[\p{L}\p{N}]/u.test(buf)) packed.push(buf);
-      buf = unit;
-    }
-  }
-  if (buf && /[\p{L}\p{N}]/u.test(buf)) packed.push(buf);
-  return packed;
-}
-
-async function fetchGoogleTranslateMp3Segment(segmentText: string, timeoutMs: number): Promise<Buffer> {
-  const endpoints = [
-    `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodeURIComponent(segmentText)}`,
-    `https://translate.googleapis.com/translate_tts?ie=UTF-8&tl=vi&client=gtx&q=${encodeURIComponent(segmentText)}`,
-  ];
-
-  let lastErr: unknown = null;
-  for (const url of endpoints) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.max(2000, timeoutMs));
-    try {
-      const resp = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          Referer: 'https://translate.google.com/',
-        },
-        signal: controller.signal,
-      });
-      if (!resp.ok) {
-        throw new Error(`Google TTS HTTP ${resp.status}`);
-      }
-      const arrBuf = await resp.arrayBuffer();
-      const buf = Buffer.from(arrBuf);
-      if (buf.length < 256) {
-        throw new Error('Google TTS returned empty audio');
-      }
-      return buf;
-    } catch (err) {
-      lastErr = err;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error('Fallback TTS failed');
-}
-
-async function synthesizeGoogleTtsFallbackBuffer(cleanText: string, startedAt: number): Promise<Buffer> {
-  const segments = splitTextForShortTtsSegments(cleanText, 175);
-  if (segments.length === 0) {
-    throw new Error('Không có nội dung hợp lệ để tổng hợp giọng đọc.');
-  }
-
-  const buffers: Buffer[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const remaining = NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt);
-    if (remaining < 1200) {
-      throw new Error('Quá thời gian xử lý hàm Netlify.');
-    }
-    const segBuf = await fetchGoogleTranslateMp3Segment(segments[i], Math.min(4500, remaining));
-    buffers.push(i === 0 ? segBuf : stripLeadingId3v2Netlify(segBuf));
-  }
-  return Buffer.concat(buffers);
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: number): Promise<Buffer> {
-  const safeTimeout = Math.max(1800, timeoutMs);
+  const safeTimeout = Math.max(2200, timeoutMs);
   const tts = new MsEdgeTTS({
-    connectionTimeoutMs: Math.min(2500, safeTimeout),
+    connectionTimeoutMs: Math.min(EDGE_CONNECT_TIMEOUT_MS, safeTimeout),
     synthesisTimeoutMs: safeTimeout,
   });
 
@@ -285,10 +152,10 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
         audioStream.on('end', () => {
           const fullBuffer = Buffer.concat(chunks);
           chunks.length = 0;
-          if (fullBuffer.length > 0) {
+          if (fullBuffer.length >= 256) {
             finishWithSuccess(fullBuffer);
           } else {
-            finishWithError(new Error('Không nhận được dữ liệu âm thanh từ Edge TTS.'));
+            finishWithError(new Error('Không nhận được đủ dữ liệu âm thanh từ Edge TTS.'));
           }
         });
 
@@ -296,7 +163,7 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
           if (!settled) {
             const fullBuffer = Buffer.concat(chunks);
             chunks.length = 0;
-            if (fullBuffer.length > 0) {
+            if (fullBuffer.length >= 256) {
               finishWithSuccess(fullBuffer);
             } else {
               finishWithError(new Error('Luồng âm thanh Edge TTS đã đóng sớm.'));
@@ -313,6 +180,38 @@ async function synthesizeOnce(cleanText: string, voiceCode: string, timeoutMs: n
         finishWithError(err instanceof Error ? err : new Error(String(err)));
       });
   });
+}
+
+async function synthesizeEdgeTtsWithRetry(
+  cleanText: string,
+  voiceCode: string,
+  startedAt: number
+): Promise<Buffer> {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= EDGE_MAX_ATTEMPTS; attempt++) {
+    const remainingMs = NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt);
+    if (remainingMs < 1800) {
+      break;
+    }
+
+    const attemptTimeout = Math.min(EDGE_ATTEMPT_TIMEOUT_MS, remainingMs - 200);
+    try {
+      return await synthesizeOnce(cleanText, voiceCode, attemptTimeout);
+    } catch (err: any) {
+      lastError = err;
+      const afterErrRemaining = NETLIFY_HARD_DEADLINE_MS - (Date.now() - startedAt);
+      if (attempt < EDGE_MAX_ATTEMPTS && afterErrRemaining >= 2200) {
+        await delay(EDGE_RETRY_DELAY_MS);
+      } else {
+        break;
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Không thể tổng hợp giọng đọc Microsoft Edge TTS.');
 }
 
 function parsePostBody(event: NetlifyEvent): { text?: string; voice?: string } {
@@ -399,6 +298,8 @@ export const handler = async (event: NetlifyEvent): Promise<NetlifyResponse> => 
         ...CORS_HEADERS,
         'Content-Type': 'audio/mpeg',
         'Cache-Control': 'public, max-age=86400',
+        'X-TTS-Voice': voiceCode,
+        'X-TTS-Provider': 'msedge-tts',
       },
       body: cachedBuffer.toString('base64'),
       isBase64Encoded: true,
@@ -407,20 +308,7 @@ export const handler = async (event: NetlifyEvent): Promise<NetlifyResponse> => 
 
   const startedAt = Date.now();
   try {
-    let fullBuffer: Buffer | null = null;
-
-    if (Date.now() >= edgeTtsDegradedUntil) {
-      try {
-        fullBuffer = await synthesizeOnce(cleanText, voiceCode, EDGE_TTS_PROBE_TIMEOUT_MS);
-        edgeTtsDegradedUntil = 0;
-      } catch {
-        edgeTtsDegradedUntil = Date.now() + EDGE_TTS_COOLDOWN_MS;
-      }
-    }
-
-    if (!fullBuffer) {
-      fullBuffer = await synthesizeGoogleTtsFallbackBuffer(cleanText, startedAt);
-    }
+    const fullBuffer = await synthesizeEdgeTtsWithRetry(cleanText, voiceCode, startedAt);
 
     if (audioBufferCache.has(cacheKey)) {
       audioBufferCache.delete(cacheKey);
@@ -438,6 +326,8 @@ export const handler = async (event: NetlifyEvent): Promise<NetlifyResponse> => 
         ...CORS_HEADERS,
         'Content-Type': 'audio/mpeg',
         'Cache-Control': 'public, max-age=86400',
+        'X-TTS-Voice': voiceCode,
+        'X-TTS-Provider': 'msedge-tts',
       },
       body: fullBuffer.toString('base64'),
       isBase64Encoded: true,
@@ -451,8 +341,9 @@ export const handler = async (event: NetlifyEvent): Promise<NetlifyResponse> => 
       headers: {
         ...CORS_HEADERS,
         'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
       },
-      body: JSON.stringify({ error: 'Không thể tổng hợp giọng đọc: ' + msg }),
+      body: JSON.stringify({ error: 'Không thể tổng hợp giọng đọc Edge TTS: ' + msg }),
     };
   }
 };

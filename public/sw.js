@@ -13,7 +13,7 @@
  * ==============================================================================
  */
 
-const CACHE_NAME = 'daotam-static-cache-v2';
+const CACHE_NAME = 'daotam-static-cache-v3';
 
 // Danh sách các tài nguyên tĩnh cơ bản của App Shell
 const PRECACHE_ASSETS = [
@@ -37,6 +37,7 @@ const REALTIME_EXCLUSION_PATTERNS = [
   'google.firestore',
   'channel?VER=',
   '/api/',
+  '/.netlify/functions/',
   '/api/vip',
   '/api/author',
   '/api/user',
@@ -142,3 +143,24 @@ self.addEventListener('fetch', (event) => {
     );
   }
 });
+
+// 4. Khi người dùng nhấn vào thông báo/thanh nổi ngoài màn hình chính, tự động focus lại tab web đang mở
+self.addEventListener('notificationclick', (event) => {
+  event.notification?.close?.();
+  const targetUrl = (event.notification?.data && event.notification.data.url) || '/';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+      return undefined;
+    })
+  );
+});
+

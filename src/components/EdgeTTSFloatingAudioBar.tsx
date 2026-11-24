@@ -80,7 +80,18 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
 
   const [isMounted, setIsMounted] = useState(false);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [coverImgError, setCoverImgError] = useState(false);
   const speedMenuRef = useRef<HTMLDivElement>(null);
+
+  const novelCoverUrl =
+    (typeof activeNovel?.coverImage === 'string' && activeNovel.coverImage.trim()) ||
+    (typeof (activeNovel as any)?.cover === 'string' && (activeNovel as any).cover.trim()) ||
+    (typeof (activeNovel as any)?.thumbnail === 'string' && (activeNovel as any).thumbnail.trim()) ||
+    '';
+
+  useEffect(() => {
+    setCoverImgError(false);
+  }, [novelCoverUrl, activeNovel?.id]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -100,26 +111,42 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
   const activeVoiceMeta = getVoiceDisplayMeta(voiceId);
   const isFallbackVoice = isDeviceFallbackVoice(voiceId);
   const speeds = [0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+  const hasValidCover = Boolean(novelCoverUrl) && !coverImgError;
+
+  const handleReturnToReader = () => {
+    if (onOpenReader && activeNovel && activeChapter) {
+      onOpenReader(activeNovel, activeChapter);
+    }
+  };
 
   if (isMinimized) {
     return (
       <div className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-4 sm:left-auto sm:bottom-5 sm:right-6 z-[90] animate-in fade-in zoom-in-95 duration-200">
-        <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-slate-900/95 dark:bg-slate-950/95 text-white border-2 border-pink-500 shadow-2xl backdrop-blur-md">
+        <div className="flex items-center gap-2.5 px-3 py-2 rounded-full bg-slate-900/95 dark:bg-slate-950/95 text-white border-2 border-pink-500 shadow-2xl backdrop-blur-md">
           <div
-            onClick={() => setIsMinimized(false)}
-            className="flex items-center gap-2 cursor-pointer hover:opacity-90"
-            title="Nhấn để mở rộng trình phát Audio"
+            onClick={handleReturnToReader}
+            className="flex items-center gap-2.5 cursor-pointer hover:opacity-90"
+            title="Nhấn để quay lại chương đang nghe"
           >
             <div
-              className={`w-7 h-7 rounded-full bg-pink-500/20 text-pink-400 flex items-center justify-center ${
-                isPlaying ? 'animate-pulse' : ''
+              className={`w-8 h-8 rounded-full overflow-hidden bg-pink-500/20 text-pink-400 flex items-center justify-center border border-pink-400/60 shrink-0 ${
+                isPlaying ? 'ring-2 ring-pink-400/50' : ''
               }`}
             >
-              <Headphones className="w-3.5 h-3.5" />
+              {hasValidCover ? (
+                <img
+                  src={novelCoverUrl}
+                  alt={activeNovel.title}
+                  onError={() => setCoverImgError(true)}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <Headphones className={`w-3.5 h-3.5 ${isPlaying ? 'animate-pulse' : ''}`} />
+              )}
             </div>
             <div className="text-left max-w-[150px] sm:max-w-[200px]">
               <div className="text-xs font-bold truncate text-pink-300">
-                Chương {activeChapter.number}
+                Chương {activeChapter.number} • {activeNovel.title}
               </div>
               <div className="text-[10px] text-slate-400 truncate">
                 {isDirectMp3
@@ -148,7 +175,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
             type="button"
             onClick={() => setIsMinimized(false)}
             className="p-1 text-slate-400 hover:text-white transition-colors cursor-pointer"
-            title="Mở rộng"
+            title="Mở rộng bảng điều khiển"
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
@@ -215,22 +242,32 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
             </div>
           )}
 
-          <div className="flex items-center gap-2 sm:gap-2.5">
+          <div
+            onClick={handleReturnToReader}
+            className="flex items-center gap-2.5 cursor-pointer group rounded-xl p-1 -m-1 hover:bg-pink-50/70 dark:hover:bg-slate-800/60 transition-colors"
+            title="Nhấn để quay lại trang đọc chương này"
+          >
             <div
-              onClick={() => onOpenReader && onOpenReader(activeNovel, activeChapter)}
-              className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-slate-900 border-2 border-pink-500 flex items-center justify-center text-pink-400 flex-shrink-0 shadow-sm cursor-pointer hover:scale-105 transition-transform ${
+              className={`w-10 h-12 sm:w-11 sm:h-14 rounded-lg overflow-hidden bg-slate-900 border-2 border-pink-500 flex items-center justify-center text-pink-400 flex-shrink-0 shadow-sm group-hover:scale-105 transition-transform ${
                 isPlaying ? 'ring-2 ring-pink-400/40' : ''
               }`}
-              title="Nhấn để vào giao diện đọc chương"
             >
-              <Headphones className={`w-4 h-4 sm:w-5 sm:h-5 ${isPlaying ? 'animate-pulse' : ''}`} />
+              {hasValidCover ? (
+                <img
+                  src={novelCoverUrl}
+                  alt={activeNovel.title}
+                  onError={() => setCoverImgError(true)}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <Headphones className={`w-4 h-4 sm:w-5 sm:h-5 ${isPlaying ? 'animate-pulse' : ''}`} />
+              )}
             </div>
 
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between gap-1.5">
                 <span
-                  onClick={() => onOpenReader && onOpenReader(activeNovel, activeChapter)}
-                  className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate cursor-pointer hover:text-pink-600 dark:hover:text-pink-400"
+                  className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate group-hover:text-pink-600 dark:group-hover:text-pink-400 transition-colors"
                   title={`${activeChapter.title}`}
                 >
                   {activeChapter.title || `Chương ${activeChapter.number}`}
@@ -243,7 +280,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 </span>
               </div>
 
-              <div className="flex items-center justify-between gap-2 text-[10px] sm:text-[11px] leading-tight text-slate-500 dark:text-slate-400">
+              <div className="flex items-center justify-between gap-2 text-[10px] sm:text-[11px] leading-tight text-slate-500 dark:text-slate-400 mt-0.5">
                 <div className="truncate flex-1 min-w-0">
                   {!isDirectMp3 && currentChunkText ? (
                     <span className="text-pink-600 dark:text-pink-300 italic">

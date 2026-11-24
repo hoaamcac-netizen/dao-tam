@@ -2380,6 +2380,7 @@ function DaoTamApp() {
     const slugOrId = novelWithChapters.slug || novelWithChapters.id;
     const searchParam = autoPlay ? '?autoPlay=true' : '';
     navigate(`/truyen/${slugOrId}/chuong-${chapter.number}${searchParam}`);
+    setIsShortStoryMode(false);
     setSelectedNovel(novelWithChapters);
     setSelectedChapter(chapter);
     setSelectedCreator(null);
@@ -4489,7 +4490,20 @@ function DaoTamApp() {
       {/* THANH NỔI AUDIO MICROSOFT EDGE TTS (CHUẨN HÌNH 1, HỖ TRỢ NGHE KHI TẮT MÀN HÌNH & MEDIA SESSION LOCKSCREEN) */}
       <EdgeTTSFloatingAudioBar
         onOpenReader={(novel, chapter) => {
-          handleSelectChapter(novel, chapter, false);
+          const latestNovel =
+            novels.find((n) => n.id === novel?.id) ||
+            (selectedNovel?.id === novel?.id ? selectedNovel : null);
+          const resolvedNovel: Novel = latestNovel
+            ? {
+                ...latestNovel,
+                chapters:
+                  (latestNovel.chapters?.length || 0) >= (novel?.chapters?.length || 0)
+                    ? latestNovel.chapters
+                    : novel.chapters,
+                coverImage: latestNovel.coverImage || novel?.coverImage,
+              }
+            : novel;
+          handleSelectChapter(resolvedNovel, chapter, false);
         }}
       />
 

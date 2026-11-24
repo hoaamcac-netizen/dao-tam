@@ -44,6 +44,24 @@ function resolveChapterAudioUrl(chapter?: Chapter | null): string {
   return '';
 }
 
+function resolveNovelCoverImage(novel?: Novel | null): string {
+  if (!novel) return '';
+  const anyNovel = novel as any;
+  const candidates = [
+    novel.coverImage,
+    anyNovel.cover,
+    anyNovel.novelCover,
+    anyNovel.thumbnail,
+    anyNovel.image,
+  ];
+  for (const item of candidates) {
+    if (typeof item === 'string' && item.trim().length > 0) {
+      return item.trim();
+    }
+  }
+  return '';
+}
+
 function createSilentWavDataUri(): string {
   if (typeof btoa !== 'function') return '';
   const sampleRate = 8000;
@@ -1235,7 +1253,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           title: formatChapterTitleForTTS(chapter),
           artist: novel.title,
           album: `${novel.title} • ${formatVoiceArtistLabel(voiceIdRef.current)}`,
-          coverImage: novel.coverImage,
+          coverImage: resolveNovelCoverImage(novel),
           onPlay: () => {
             resumeRef.current();
           },
@@ -1348,11 +1366,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // Đồng bộ Database 1 lần duy nhất khi tự động chuyển sang chương mới
       syncListeningProgressToDatabase(novel, nextChapter, chunk.chapterChunkIndex);
 
-      // Âm thầm cập nhật URL sang Chương B bằng window.history.pushState mà không làm unmount Player
+      // Chỉ âm thầm cập nhật URL bằng pushState khi người dùng ĐANG ở trong giao diện đọc truyện (/truyen/...),
+      // tránh làm sai lệch URL của trang chủ hoặc màn hình khác khiến bấm thanh nổi không điều hướng lại được.
       if (typeof window !== 'undefined') {
         const slugOrId = (novel.slug && novel.slug.trim()) || novel.id;
         const nextUrl = `/truyen/${encodeURIComponent(slugOrId)}/chuong-${nextChapter.number}`;
-        if (window.location.pathname !== nextUrl) {
+        const currentPath = window.location.pathname || '/';
+        if (currentPath.startsWith('/truyen/') && currentPath !== nextUrl) {
           window.history.pushState(
             {
               novelId: novel.id,
@@ -1362,8 +1382,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             '',
             nextUrl
           );
+          document.title = `${formatChapterTitleForTTS(nextChapter)} - ${novel.title} | Đạo Tâm`;
         }
-        document.title = `${formatChapterTitleForTTS(nextChapter)} - ${novel.title} | Đạo Tâm`;
         window.dispatchEvent(
           new CustomEvent('daotam:audio-chapter-changed', {
             detail: { novel, chapter: nextChapter },
@@ -1508,7 +1528,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               title: formatChapterTitleForTTS(effectiveChapter),
               artist: curNovel.title,
               album: `${curNovel.title} • Giọng máy vi-VN`,
-              coverImage: curNovel.coverImage,
+              coverImage: resolveNovelCoverImage(curNovel),
               onPlay: () => {
                 resumeRef.current();
               },
@@ -1944,7 +1964,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               title: formatChapterTitleForTTS(effectiveChapter),
               artist: curNovel.title,
               album: `${curNovel.title} • ${formatVoiceArtistLabel(currentVoice)}`,
-              coverImage: curNovel.coverImage,
+              coverImage: resolveNovelCoverImage(curNovel),
               onPlay: () => {
                 resumeRef.current();
               },
@@ -1962,9 +1982,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
 
         await audio.play();
-        // Khóa lại playbackRate và MediaSession playbackState = 'playing' ngay sau play()
+        // Khóa lại playbackRate, playbackState và khẳng định lại ảnh bìa truyện trên MediaSession ngay sau play()
         applyPlaybackRateLock(audio, playbackRateRef.current);
         backgroundAudioManager.setPlaybackState('playing');
+        backgroundAudioManager.refreshCurrentMetadata();
         lastMediaAdvanceAtRef.current = Date.now();
         consecutiveChunkErrorsRef.current = 0;
         // Tải trước tuần tự 1-2 đoạn kế tiếp thành Blob URL trong bộ nhớ
@@ -2220,7 +2241,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         title: formatChapterTitleForTTS(chapter),
         artist: novel.title,
         album: `${novel.title} • Audio MP3`,
-        coverImage: novel.coverImage,
+        coverImage: resolveNovelCoverImage(novel),
         onPlay: () => {
           resumeRef.current();
         },
@@ -2251,6 +2272,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!isMp3SessionValid()) return;
         applyPlaybackRateLock(audio, playbackRateRef.current);
         backgroundAudioManager.setPlaybackState('playing');
+        backgroundAudioManager.refreshCurrentMetadata();
         setIsLoading(false);
         setIsPlaying(true);
       } catch (err: any) {
@@ -2300,7 +2322,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 title: formatChapterTitleForTTS(activeChapterRef.current),
                 artist: activeNovelRef.current.title,
                 album: `${activeNovelRef.current.title} • Audio MP3`,
-                coverImage: activeNovelRef.current.coverImage,
+                coverImage: resolveNovelCoverImage(activeNovelRef.current),
                 onPlay: () => resumeRef.current(),
                 onPause: () => pauseRef.current(),
                 onNext: () => playNextChapterRef.current(),
@@ -2315,6 +2337,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   if (a) seekToTimeRef.current((a.currentTime || 0) - 15);
                 },
               });
+              backgroundAudioManager.refreshCurrentMetadata();
               return;
             } catch {}
           }
@@ -2390,7 +2413,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             title: formatChapterTitleForTTS(activeChapterRef.current),
             artist: activeNovelRef.current.title,
             album: `${activeNovelRef.current.title} • Audio MP3`,
-            coverImage: activeNovelRef.current.coverImage,
+            coverImage: resolveNovelCoverImage(activeNovelRef.current),
             onPlay: () => resumeRef.current(),
             onPause: () => pauseRef.current(),
             onNext: () => playNextChapterRef.current(),
@@ -2405,6 +2428,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               if (a) seekToTimeRef.current((a.currentTime || 0) - 15);
             },
           });
+          backgroundAudioManager.refreshCurrentMetadata();
           return;
         } catch {}
       }
@@ -2446,12 +2470,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             title: formatChapterTitleForTTS(activeChapterRef.current),
             artist: activeNovelRef.current.title,
             album: `${activeNovelRef.current.title} • ${formatVoiceArtistLabel(voiceIdRef.current)}`,
-            coverImage: activeNovelRef.current.coverImage,
+            coverImage: resolveNovelCoverImage(activeNovelRef.current),
             onPlay: () => resumeRef.current(),
             onPause: () => pauseRef.current(),
             onNext: () => skipNextRef.current(),
             onPrev: () => skipPrevRef.current(),
           });
+          backgroundAudioManager.refreshCurrentMetadata();
         }
         runSequentialPrefetchQueue(
           activeQueueIndexRef.current,
@@ -2590,10 +2615,28 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isPlaybackActiveRef.current = true;
         isAdvancingChapterRef.current = false;
         setIsPlaying(true);
+        // Giữ nguyên user-gesture audio unlock trên mobile ngay khi đổi sang giọng Nam Minh / Hoài My
+        if (!isDeviceFallbackVoice(normalized)) {
+          primeAudioElementInUserGesture(activeNovelRef.current, activeChapterRef.current);
+        } else if (activeNovelRef.current && activeChapterRef.current) {
+          backgroundAudioManager.updateMetadata(
+            formatChapterTitleForTTS(activeChapterRef.current),
+            activeNovelRef.current.title,
+            resolveNovelCoverImage(activeNovelRef.current),
+            `${activeNovelRef.current.title} • ${formatVoiceArtistLabel(normalized)}`,
+            true
+          );
+        }
         playChunkRef.current(resumeQueueIdx);
       }
     },
-    [resetPrefetchAbortController, revokeAllBlobUrls, stopAllAudioOutputs]
+    [
+      formatVoiceArtistLabel,
+      primeAudioElementInUserGesture,
+      resetPrefetchAbortController,
+      revokeAllBlobUrls,
+      stopAllAudioOutputs,
+    ]
   );
 
   const setPlaybackRate = useCallback(
@@ -2870,8 +2913,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           backgroundAudioManager.updateMetadata(
             formatChapterTitleForTTS(chapter),
             novel.title,
-            novel.coverImage,
-            `${novel.title} • ${formatVoiceArtistLabel(voiceIdRef.current)}`
+            resolveNovelCoverImage(novel),
+            `${novel.title} • ${formatVoiceArtistLabel(voiceIdRef.current)}`,
+            true
           );
           await playChunkRef.current(resumeChunkIdx);
         } else {

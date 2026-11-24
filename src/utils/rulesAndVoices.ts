@@ -190,8 +190,10 @@ export function normalizeEdgeVoiceId(voiceId?: string): string {
 let dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
 
 export async function fetchAvailableEdgeVoices(): Promise<VoiceOption[]> {
-  const customTtsUrl = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
-  if (customTtsUrl) {
+  const env = ((import.meta as any)?.env || {}) as Record<string, string | undefined>;
+  const customTtsUrl = String(env.VITE_NETLIFY_TTS_URL || env.VITE_TTS_API_URL || '').trim();
+  const host = typeof window !== 'undefined' && window.location?.hostname ? window.location.hostname.toLowerCase() : '';
+  if (customTtsUrl || /\.(vercel\.app|netlify\.app|web\.app|firebaseapp\.com)$/i.test(host)) {
     return dynamicEdgeVoices;
   }
   try {
