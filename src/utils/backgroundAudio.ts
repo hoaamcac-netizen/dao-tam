@@ -15,6 +15,9 @@ interface BackgroundMediaOptions {
   onPause?: () => void;
   onNext?: () => void;
   onPrev?: () => void;
+  onSeekTo?: (seekTime: number) => void;
+  onSeekForward?: () => void;
+  onSeekBackward?: () => void;
 }
 
 class BackgroundAudioManager {
@@ -27,6 +30,9 @@ class BackgroundAudioManager {
     onPause?: () => void;
     onNext?: () => void;
     onPrev?: () => void;
+    onSeekTo?: (seekTime: number) => void;
+    onSeekForward?: () => void;
+    onSeekBackward?: () => void;
   } = {};
 
   private ensureAudioContextAlive() {
@@ -45,29 +51,44 @@ class BackgroundAudioManager {
     if (this.handlersRegistered || typeof navigator === 'undefined' || !('mediaSession' in navigator)) {
       return;
     }
-    try {
-      navigator.mediaSession.setActionHandler('play', () => {
-        this.callbacks.onPlay?.();
-      });
-      navigator.mediaSession.setActionHandler('pause', () => {
-        this.callbacks.onPause?.();
-      });
-      navigator.mediaSession.setActionHandler('nexttrack', () => {
+    const safeSetHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {}
+    };
+
+    safeSetHandler('play', () => {
+      this.callbacks.onPlay?.();
+    });
+    safeSetHandler('pause', () => {
+      this.callbacks.onPause?.();
+    });
+    safeSetHandler('nexttrack', () => {
+      this.callbacks.onNext?.();
+    });
+    safeSetHandler('previoustrack', () => {
+      this.callbacks.onPrev?.();
+    });
+    safeSetHandler('seekforward', () => {
+      if (this.callbacks.onSeekForward) {
+        this.callbacks.onSeekForward();
+      } else {
         this.callbacks.onNext?.();
-      });
-      navigator.mediaSession.setActionHandler('previoustrack', () => {
+      }
+    });
+    safeSetHandler('seekbackward', () => {
+      if (this.callbacks.onSeekBackward) {
+        this.callbacks.onSeekBackward();
+      } else {
         this.callbacks.onPrev?.();
-      });
-      navigator.mediaSession.setActionHandler('seekforward', () => {
-        this.callbacks.onNext?.();
-      });
-      navigator.mediaSession.setActionHandler('seekbackward', () => {
-        this.callbacks.onPrev?.();
-      });
-      this.handlersRegistered = true;
-    } catch (e) {
-      console.warn('MediaSession action handler error:', e);
-    }
+      }
+    });
+    safeSetHandler('seekto', (details) => {
+      if (details && typeof details.seekTime === 'number' && Number.isFinite(details.seekTime)) {
+        this.callbacks.onSeekTo?.(details.seekTime);
+      }
+    });
+    this.handlersRegistered = true;
   }
 
   /**
@@ -81,6 +102,9 @@ class BackgroundAudioManager {
       onPause: options.onPause,
       onNext: options.onNext,
       onPrev: options.onPrev,
+      onSeekTo: options.onSeekTo,
+      onSeekForward: options.onSeekForward,
+      onSeekBackward: options.onSeekBackward,
     };
 
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
@@ -126,7 +150,11 @@ class BackgroundAudioManager {
     album = 'Đạo Tâm • Audio'
   ) {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
-    const key = `${title}:::${artist}:::${coverImage || ''}:::${album}`;
+    const validCover =
+      coverImage && (/^https?:\/\//i.test(coverImage) || coverImage.startsWith('/'))
+        ? coverImage
+        : '';
+    const key = `${title}:::${artist}:::${validCover}:::${album}`;
     if (this.lastMetadataKey === key) return;
     this.lastMetadataKey = key;
 
@@ -135,11 +163,11 @@ class BackgroundAudioManager {
         title,
         artist,
         album,
-        artwork: coverImage
+        artwork: validCover
           ? [
-              { src: coverImage, sizes: '96x96', type: 'image/jpeg' },
-              { src: coverImage, sizes: '256x256', type: 'image/jpeg' },
-              { src: coverImage, sizes: '512x512', type: 'image/jpeg' },
+              { src: validCover, sizes: '96x96', type: 'image/jpeg' },
+              { src: validCover, sizes: '256x256', type: 'image/jpeg' },
+              { src: validCover, sizes: '512x512', type: 'image/jpeg' },
             ]
           : [],
       });

@@ -20,6 +20,7 @@ import {
   startAfter,
   getCountFromServer,
   serverTimestamp,
+  deleteField,
   type QueryDocumentSnapshot,
   type DocumentData
 } from 'firebase/firestore';
@@ -2566,7 +2567,7 @@ export async function fetchFullChapterContent(
   chapterId?: string,
   chapterNumber?: number,
   expectedUpdatedAt?: number
-): Promise<{ content: string; wordCount?: number } | null> {
+): Promise<{ content: string; wordCount?: number; audioUrl?: string } | null> {
   if (!novelId) return null;
 
   const saveChapterCache = (text: string) => {
@@ -2625,6 +2626,7 @@ export async function fetchFullChapterContent(
           return {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: data.audioUrl || undefined,
           };
         }
       }
@@ -2639,6 +2641,7 @@ export async function fetchFullChapterContent(
           return {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: data.audioUrl || undefined,
           };
         }
       }
@@ -2658,6 +2661,7 @@ export async function fetchFullChapterContent(
           return {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
+            audioUrl: data.audioUrl || undefined,
           };
         }
       }
@@ -2672,24 +2676,12 @@ export async function fetchFullChapterContent(
  * Tải danh sách truyện từ Firestore (Metadata-Only)
  * Tuyệt đối không tải subcollection hay nội dung text của các chương để giảm 99% dung lượng và số lần đọc Firestore
  */
-export async function fetchNovelsFromFirestore(limitCount: number = 100): Promise<Novel[]> {
+export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<Novel[]> {
   const path = 'novels';
   try {
     const novelsCol = collection(db, path);
-    // Đọc 1 lần bằng getDocs (có limit) thay cho onSnapshot toàn collection
-    let q = query(novelsCol, orderBy('lastChapterUpdatedAt', 'desc'), limit(limitCount));
-    let snapshot;
-    try {
-      snapshot = await getDocs(q);
-    } catch {
-      try {
-        q = query(novelsCol, orderBy('views', 'desc'), limit(limitCount));
-        snapshot = await getDocs(q);
-      } catch {
-        q = query(novelsCol, limit(limitCount));
-        snapshot = await getDocs(q);
-      }
-    }
+    // Tải toàn bộ collection novels không dùng orderBy/limit để Firestore không bỏ sót truyện cũ thiếu trường thời gian
+    const snapshot = await getDocs(novelsCol);
 
     if (snapshot.empty) {
       return [];
@@ -2699,9 +2691,9 @@ export async function fetchNovelsFromFirestore(limitCount: number = 100): Promis
     for (const docSnap of snapshot?.docs || []) {
       const novelData = (docSnap.data() || {}) as Novel;
       
-      // Chỉ giữ mục lục chương siêu nhẹ (id, number, title, slug, isVip, priceXu), tuyệt đối KHÔNG chứa content text dài
-      let rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-      let lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
+      // Chỉ giữ mục lục chương siêu nhẹ (kèm audioUrl nếu có), tuyệt đối KHÔNG chứa content text dài
+      const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
+      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
         id: c.id || `c-${docSnap.id}-${c.number}`,
         number: Number(c.number) || 0,
         title: c.title || `Chương ${c.number}`,
@@ -2711,6 +2703,7 @@ export async function fetchNovelsFromFirestore(limitCount: number = 100): Promis
         priceXu: Number(c.priceXu || 0),
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
+        audioUrl: c.audioUrl || undefined,
         content: '', // KHÔNG BAO GIỜ tải text nội dung trong danh sách truyện
       }));
 
@@ -2722,8 +2715,9 @@ export async function fetchNovelsFromFirestore(limitCount: number = 100): Promis
       const latestChap = (lightweightChapters?.length || 0) > 0 ? lightweightChapters[(lightweightChapters?.length || 0) - 1] : null;
       const latestChapterTitle = novelData.latestChapterTitle || (latestChap?.title ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`) : `Chương ${resolvedTotal}`);
       const latestChapterNumber = Number((novelData as any).latestChapterNumber) || latestChap?.number || resolvedTotal;
-      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolveTimestampMs((novelData as any).createdAt) || 0;
-      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt;
+      const resolvedCreatedAt = resolveTimestampMs((novelData as any).createdAt) || 0;
+      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolvedCreatedAt || 0;
+      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt || 0;
       const resolvedCategories = Array.isArray(novelData.categories)
         ? novelData.categories
         : Array.isArray((novelData as any).genres)
@@ -2739,6 +2733,7 @@ export async function fetchNovelsFromFirestore(limitCount: number = 100): Promis
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
+        createdAt: resolvedCreatedAt,
         lastChapterUpdatedAt: resolvedLastChapterUpdatedAt,
         updatedAt: resolvedUpdatedAt,
         chapters: lightweightChapters,
@@ -2748,7 +2743,11 @@ export async function fetchNovelsFromFirestore(limitCount: number = 100): Promis
       } as Novel);
     }
 
-    novels.sort((a, b) => (b.lastChapterUpdatedAt || b.updatedAt || 0) - (a.lastChapterUpdatedAt || a.updatedAt || 0));
+    novels.sort((a, b) => {
+      const timeB = b.updatedAt || b.createdAt || b.lastChapterUpdatedAt || 0;
+      const timeA = a.updatedAt || a.createdAt || a.lastChapterUpdatedAt || 0;
+      return timeB - timeA;
+    });
     return novels;
   } catch (error) {
     console.warn('Không thể tải truyện từ Firestore, giữ nguyên danh sách hiện tại:', error);
@@ -2792,6 +2791,7 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       priceXu: Number(c.priceXu || 0),
       wordCount: Number(c.wordCount || 0),
       isHidden: Boolean(c.isHidden),
+      audioUrl: c.audioUrl || undefined,
       content: '',
     }));
 
@@ -2803,8 +2803,9 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
     const latestChap = (lightweightChapters?.length || 0) > 0 ? lightweightChapters[(lightweightChapters?.length || 0) - 1] : null;
     const latestChapterTitle = novelData.latestChapterTitle || (latestChap?.title ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`) : `Chương ${resolvedTotal}`);
     const latestChapterNumber = Number((novelData as any).latestChapterNumber) || latestChap?.number || resolvedTotal;
-    const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolveTimestampMs((novelData as any).createdAt) || 0;
-    const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt;
+    const resolvedCreatedAt = resolveTimestampMs((novelData as any).createdAt) || 0;
+    const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolvedCreatedAt || 0;
+    const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt || 0;
     const resolvedCategories = Array.isArray(novelData.categories)
       ? novelData.categories
       : Array.isArray((novelData as any).genres)
@@ -2821,6 +2822,7 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       status: novelData.status || 'Đang ra',
       flowerCount: Number(novelData.flowerCount || 0),
       coinCount: Number(novelData.coinCount || 0),
+      createdAt: resolvedCreatedAt,
       lastChapterUpdatedAt: resolvedLastChapterUpdatedAt,
       updatedAt: resolvedUpdatedAt,
       chapters: lightweightChapters,
@@ -2889,11 +2891,11 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
 /**
  * Tải danh sách truyện ngắn trực tiếp từ Firestore với điều kiện where('isShortStory', '==', true)
  */
-export async function fetchShortStoriesFromFirestore(limitCount: number = 25): Promise<Novel[]> {
+export async function fetchShortStoriesFromFirestore(_limitCount?: number): Promise<Novel[]> {
   const path = 'novels';
   try {
     const novelsCol = collection(db, path);
-    const q = query(novelsCol, where('isShortStory', '==', true), limit(limitCount));
+    const q = query(novelsCol, where('isShortStory', '==', true));
     const snapshot = await getDocs(q);
 
     if (snapshot.empty) {
@@ -2903,8 +2905,8 @@ export async function fetchShortStoriesFromFirestore(limitCount: number = 25): P
     const novels: Novel[] = [];
     for (const docSnap of snapshot?.docs || []) {
       const novelData = (docSnap.data() || {}) as Novel;
-      let rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-      let lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
+      const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
+      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
         id: c.id || `c-${docSnap.id}-${c.number}`,
         number: Number(c.number) || 0,
         title: c.title || `Chương ${c.number}`,
@@ -2914,6 +2916,7 @@ export async function fetchShortStoriesFromFirestore(limitCount: number = 25): P
         priceXu: Number(c.priceXu || 0),
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
+        audioUrl: c.audioUrl || undefined,
         content: '',
       }));
 
@@ -2925,8 +2928,9 @@ export async function fetchShortStoriesFromFirestore(limitCount: number = 25): P
       const latestChap = (lightweightChapters?.length || 0) > 0 ? lightweightChapters[(lightweightChapters?.length || 0) - 1] : null;
       const latestChapterTitle = novelData.latestChapterTitle || (latestChap?.title || `Chương ${resolvedTotal}`);
       const latestChapterNumber = Number((novelData as any).latestChapterNumber) || latestChap?.number || resolvedTotal;
-      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolveTimestampMs((novelData as any).createdAt) || 0;
-      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt;
+      const resolvedCreatedAt = resolveTimestampMs((novelData as any).createdAt) || 0;
+      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolvedCreatedAt || 0;
+      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt || 0;
       const resolvedCategories = Array.isArray(novelData.categories)
         ? novelData.categories
         : Array.isArray((novelData as any).genres)
@@ -2942,6 +2946,7 @@ export async function fetchShortStoriesFromFirestore(limitCount: number = 25): P
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
+        createdAt: resolvedCreatedAt,
         lastChapterUpdatedAt: resolvedLastChapterUpdatedAt,
         updatedAt: resolvedUpdatedAt,
         chapters: lightweightChapters,
@@ -2951,6 +2956,11 @@ export async function fetchShortStoriesFromFirestore(limitCount: number = 25): P
       } as Novel);
     }
 
+    novels.sort((a, b) => {
+      const timeB = b.updatedAt || b.createdAt || b.lastChapterUpdatedAt || 0;
+      const timeA = a.updatedAt || a.createdAt || a.lastChapterUpdatedAt || 0;
+      return timeB - timeA;
+    });
     return novels;
   } catch (error) {
     console.warn('Lỗi khi tải truyện ngắn từ Firestore:', error);
@@ -3077,6 +3087,7 @@ export async function queryNovelsWithFilters(
         priceXu: Number(c.priceXu || 0),
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
+        audioUrl: c.audioUrl || undefined,
         content: '',
       }));
 
@@ -3088,8 +3099,9 @@ export async function queryNovelsWithFilters(
       const latestChap = (lightweightChapters?.length || 0) > 0 ? lightweightChapters[(lightweightChapters?.length || 0) - 1] : null;
       const latestChapterTitle = novelData.latestChapterTitle || (latestChap?.title || `Chương ${resolvedTotal}`);
       const latestChapterNumber = Number((novelData as any).latestChapterNumber) || latestChap?.number || resolvedTotal;
-      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolveTimestampMs((novelData as any).createdAt) || 0;
-      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt;
+      const resolvedCreatedAt = resolveTimestampMs((novelData as any).createdAt) || 0;
+      const resolvedUpdatedAt = resolveTimestampMs(novelData.updatedAt) || resolvedCreatedAt || 0;
+      const resolvedLastChapterUpdatedAt = resolveTimestampMs((novelData as any).lastChapterUpdatedAt) || resolvedUpdatedAt || 0;
       const resolvedCategories = Array.isArray(novelData.categories)
         ? novelData.categories
         : Array.isArray((novelData as any).genres)
@@ -3105,6 +3117,7 @@ export async function queryNovelsWithFilters(
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
+        createdAt: resolvedCreatedAt,
         lastChapterUpdatedAt: resolvedLastChapterUpdatedAt,
         updatedAt: resolvedUpdatedAt,
         chapters: lightweightChapters,
@@ -3479,6 +3492,7 @@ export async function saveNovelWithInitialChaptersBatch(
       publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
       isVip: !!ch.isVip,
       priceXu: ch.priceXu || 0,
+      audioUrl: ch.audioUrl || undefined,
       content: typeof ch.content === 'string' ? ch.content : '',
       updatedAt: nowTs,
     });
@@ -3719,6 +3733,85 @@ export async function toggleHideChapterInFirestore(
 
   await setDoc(doc(db, 'novels', novelId, 'chapters', chNumId), patch, { merge: true });
   safeRemoveItem(`chapter_full_${novelId}_${chapterNumber}`);
+}
+
+/**
+ * Cập nhật hoặc xóa trường audioUrl cho một chương cụ thể trên Firestore:
+ * - Cập nhật cả document chi tiết trong subcollection novels/{novelId}/chapters
+ * - Cập nhật cả mảng mục lục chapters trên root document novels/{novelId} để độc giả tải về ngay
+ */
+export async function updateChapterAudioUrlInFirestore(
+  novelId: string,
+  chapter: Chapter,
+  audioUrl: string | null
+): Promise<void> {
+  if (!novelId || !chapter) return;
+
+  const cleanUrl = typeof audioUrl === 'string' ? audioUrl.trim() : '';
+  const nowTs = Date.now();
+  const subPayload: Record<string, any> = cleanUrl
+    ? { audioUrl: cleanUrl, updatedAt: nowTs }
+    : { audioUrl: deleteField(), updatedAt: nowTs };
+
+  const chNumId = String(chapter.number);
+  const targetDocIds = Array.from(
+    new Set(
+      [chNumId, chapter.id]
+        .map((id) => (id ? String(id).trim() : ''))
+        .filter(Boolean)
+    )
+  );
+
+  // 1. Cập nhật subcollection chapter doc(s)
+  for (let i = 0; i < targetDocIds.length; i++) {
+    const docId = targetDocIds[i];
+    const chRef = doc(db, 'novels', novelId, 'chapters', docId);
+    if (i === 0) {
+      await setDoc(chRef, subPayload, { merge: true });
+    } else {
+      // Chỉ cập nhật thêm doc ID phụ nếu doc đó thực sự tồn tại
+      try {
+        const snap = await getDoc(chRef);
+        if (snap.exists()) {
+          await setDoc(chRef, subPayload, { merge: true });
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Đồng bộ trường audioUrl trong mảng mục lục chapters của root doc novels/{novelId}
+  try {
+    const novelRef = doc(db, 'novels', novelId);
+    const novelSnap = await getDoc(novelRef);
+    if (novelSnap.exists()) {
+      const data = novelSnap.data();
+      if (Array.isArray(data.chapters)) {
+        const updatedChapters = data.chapters.map((c: any) => {
+          const isMatch =
+            (chapter.id && c.id === chapter.id) ||
+            (Number(c.number) > 0 && Number(c.number) === Number(chapter.number));
+          if (!isMatch) return c;
+          const nextEntry: Record<string, any> = { ...c };
+          if (cleanUrl) {
+            nextEntry.audioUrl = cleanUrl;
+          } else {
+            delete nextEntry.audioUrl;
+          }
+          return cleanUndefinedFields(nextEntry);
+        });
+        await setDoc(
+          novelRef,
+          {
+            chapters: updatedChapters,
+            updatedAt: nowTs,
+          },
+          { merge: true }
+        );
+      }
+    }
+  } catch (err) {
+    console.warn('Lỗi đồng bộ audioUrl lên root doc novels:', err);
+  }
 }
 
 /**
@@ -5197,12 +5290,19 @@ export async function fetchStoriesFromFirestore(): Promise<Novel[]> {
           ? existing!.categories
           : [];
 
+        const resolvedCreatedAt = resolveTimestampMs((data as any).createdAt) || existing?.createdAt || 0;
+        const resolvedUpdatedAt = resolveTimestampMs(data.updatedAt) || resolvedCreatedAt || existing?.updatedAt || 0;
+        const resolvedLastChapterUpdatedAt = resolveTimestampMs((data as any).lastChapterUpdatedAt) || resolvedUpdatedAt || existing?.lastChapterUpdatedAt || 0;
+
         novelMap.set(d.id, {
           ...data,
           id: d.id,
           categories: resolvedCategories,
           genres: Array.isArray((data as any).genres) ? (data as any).genres : resolvedCategories,
           status: data.status || existing?.status || 'Đang ra',
+          createdAt: resolvedCreatedAt,
+          updatedAt: resolvedUpdatedAt,
+          lastChapterUpdatedAt: resolvedLastChapterUpdatedAt,
           chapters: resolvedChapters,
           totalChapters: resolvedTotal,
         } as Novel);
@@ -5212,7 +5312,11 @@ export async function fetchStoriesFromFirestore(): Promise<Novel[]> {
     console.warn('Lỗi đọc collection "stories":', err);
   }
 
-  return Array.from(novelMap.values());
+  return Array.from(novelMap.values()).sort((a, b) => {
+    const timeB = b.updatedAt || b.createdAt || b.lastChapterUpdatedAt || 0;
+    const timeA = a.updatedAt || a.createdAt || a.lastChapterUpdatedAt || 0;
+    return timeB - timeA;
+  });
 }
 
 function resolveTimestampMs(val: any): number {

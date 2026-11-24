@@ -29,6 +29,7 @@ export interface LightweightNovelStorage {
   rating?: number;
   flowerCount?: number;
   coinCount?: number;
+  createdAt?: number;
   updatedAt?: number;
   lastChapterUpdatedAt?: number;
   slug?: string;
@@ -153,6 +154,7 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     rating: typeof novel?.rating === 'number' ? novel.rating : 5,
     flowerCount: typeof novel?.flowerCount === 'number' ? novel.flowerCount : 0,
     coinCount: typeof novel?.coinCount === 'number' ? novel.coinCount : 0,
+    createdAt: typeof novel?.createdAt === 'number' ? novel.createdAt : undefined,
     updatedAt: typeof novel?.updatedAt === 'number' ? novel.updatedAt : undefined,
     lastChapterUpdatedAt: typeof novel?.lastChapterUpdatedAt === 'number' ? novel.lastChapterUpdatedAt : (typeof novel?.updatedAt === 'number' ? novel.updatedAt : undefined),
     slug: novel?.slug,
@@ -172,7 +174,10 @@ export function saveNovelsToStorage(novels: any[]): void {
   if (!Array.isArray(novels) || typeof window === 'undefined') return;
   try {
     const minimalNovels: LightweightNovelStorage[] = (novels || []).map(stripNovelForStorage);
-    safeSetItem('dao_tam_novels', JSON.stringify(minimalNovels));
+    const saved = safeSetItem('dao_tam_novels', JSON.stringify(minimalNovels));
+    if (!saved && minimalNovels.length > 150) {
+      safeSetItem('dao_tam_novels', JSON.stringify(minimalNovels.slice(0, 150)));
+    }
   } catch (error) {
     console.warn('[SafeStorage] Không thể chuẩn bị mảng truyện để lưu vào localStorage:', error);
   }

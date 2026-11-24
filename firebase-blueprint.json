@@ -81,6 +81,7 @@
         "wordCount": { "type": "number", "description": "Số lượng từ" },
         "isVip": { "type": "boolean", "description": "Cờ đánh dấu chương VIP" },
         "priceXu": { "type": "number", "description": "Số Xu cần để mở khóa" },
+        "audioUrl": { "type": "string", "description": "Link file MP3 phát trực tiếp cho chương (ví dụ CDN GitHub)" },
         "audioCache": { "type": "object", "description": "Kho lưu URL audio MP3 trên Firebase Cloud Storage theo giọng đọc và chỉ số chunk" }
       },
       "required": ["number", "title", "content", "isVip", "priceXu"]

@@ -59,6 +59,7 @@ export interface Novel {
   genres?: string[];
   description: string;
   translator?: string;
+  createdAt?: number;
   updatedAt: number;
   lastChapterUpdatedAt?: number; // Thời điểm ra/sửa chương gần nhất (chỉ tác giả/admin thêm/sửa chương mới cập nhật)
   lastUpdated: string;

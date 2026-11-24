@@ -71,9 +71,11 @@ import {
   Gift,
   KeyRound,
   GitMerge,
-  RefreshCw
+  RefreshCw,
+  Headphones
 } from 'lucide-react';
 import { DaoTamLogo } from './DaoTamLogo';
+import { AdminGitHubConfigCard, AdminNovelMp3DrawerModal } from './AdminGitHubAudioManager';
 
 interface AdminDashboardModalProps {
   isOpen: boolean;
@@ -109,6 +111,7 @@ interface AdminDashboardModalProps {
   onOpenAdminMessages?: () => void;
   onDonateCoinsSuccess?: (targetUserId: string, amount: number) => void;
   onReloadNovels?: () => Promise<void> | void;
+  onChapterAudioUpdated?: (novelId: string, updatedChapter: Chapter) => void;
 }
 
 export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
@@ -138,8 +141,10 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   onOpenAdminMessages,
   onDonateCoinsSuccess,
   onReloadNovels,
+  onChapterAudioUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<'requests' | 'submissions' | 'payouts' | 'reports' | 'novels' | 'batch' | 'comments' | 'tools' | 'users' | 'support_chat' | 'global_banner'>('requests');
+  const [mp3ManagingNovel, setMp3ManagingNovel] = useState<Novel | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved'>('pending');
   const [reportFilterStatus, setReportFilterStatus] = useState<'all' | 'pending' | 'resolved'>('pending');
@@ -2250,6 +2255,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
              ========================================================================= */}
           {activeTab === 'novels' && (
             <div className="space-y-4">
+              <AdminGitHubConfigCard defaultCollapsed />
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
                 <div className="flex-1 max-w-md relative">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -2324,7 +2331,17 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 flex-shrink-0">
+                    <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setMp3ManagingNovel(novel)}
+                        className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
+                        title="Tải lên hoặc tự tạo file MP3 GitHub cho từng chương"
+                      >
+                        <Headphones className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>MP3 Chương</span>
+                      </button>
+
                       {onOpenEditNovel && (
                         <button
                           onClick={() => onOpenEditNovel(novel)}
@@ -2618,6 +2635,9 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
               <div className="p-4 rounded-2xl bg-pink-50 border border-pink-200 text-xs text-pink-900 leading-relaxed shadow-xs">
                 <strong className="text-pink-700">Khu vực công cụ kỹ thuật dành riêng cho Admin:</strong> Các chức năng này đã được ẩn hoàn toàn khỏi người dùng và độc giả bên ngoài để bảo vệ tính bảo mật và trải nghiệm gọn gàng cho trang web.
               </div>
+
+              {/* Cấu hình kho lưu trữ GitHub MP3 (chỉ hiện trong trang Admin, lưu trong localStorage) */}
+              <AdminGitHubConfigCard />
 
               {/* Cấu hình tỷ lệ nhuận bút */}
               <div className="p-5 sm:p-6 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-4">
@@ -4161,6 +4181,27 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {mp3ManagingNovel && (
+        <AdminNovelMp3DrawerModal
+          novel={mp3ManagingNovel}
+          onClose={() => setMp3ManagingNovel(null)}
+          onChapterAudioUpdated={(novelId, updatedChapter) => {
+            setMp3ManagingNovel((prev) => {
+              if (!prev || prev.id !== novelId) return prev;
+              const nextChaps = Array.isArray(prev.chapters)
+                ? prev.chapters.map((c) =>
+                    c.id === updatedChapter.id || Number(c.number) === Number(updatedChapter.number)
+                      ? { ...c, audioUrl: updatedChapter.audioUrl }
+                      : c
+                  )
+                : prev.chapters;
+              return { ...prev, chapters: nextChaps };
+            });
+            onChapterAudioUpdated?.(novelId, updatedChapter);
+          }}
+        />
       )}
 
     </div>

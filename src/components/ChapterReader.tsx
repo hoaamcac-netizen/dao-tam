@@ -4,6 +4,7 @@ import {
   EDGE_TTS_VOICES, 
   fetchAvailableEdgeVoices, 
   normalizeEdgeVoiceId,
+  isDeviceFallbackVoice,
   checkIsChapterUnlocked,
   formatXu
 } from '../utils/rulesAndVoices';
@@ -213,6 +214,9 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
       fetchFullChapterContent(novel.id, chapter.id, chapter.number, novel.updatedAt)
         .then((res) => {
           if (!isCancelled && res) {
+            if (res.audioUrl && !chapter.audioUrl) {
+              chapter.audioUrl = res.audioUrl;
+            }
             const cleanFetched = getCleanChapterContent(res.content);
             if (cleanFetched) {
               setFullContent(cleanFetched);
@@ -307,19 +311,21 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const prevChapter = currentIndex > 0 ? safeChapters[currentIndex - 1] : null;
   const nextChapter = currentIndex >= 0 && currentIndex < (safeChapters?.length || 0) - 1 ? safeChapters[currentIndex + 1] : null;
 
-  // Quét danh sách giọng Edge TTS tiếng Việt thực tế (chạy 1 lần duy nhất)
+  // KẾT NỐI VÀO SINGLE SOURCE OF TRUTH: useAudio (Microsoft Edge TTS Hoài My & Nam Minh)
+  const audioContext = useAudio();
+
+  // Quét danh sách giọng Edge TTS tiếng Việt thực tế (chỉ gọi khi không ở chế độ Giọng máy và không phát MP3 trực tiếp)
   useEffect(() => {
     if (hasFetchedVoicesRef.current) return;
+    const currentVoice = audioContext.voiceId || readerSettings.selectedVoiceId;
+    if (isDeviceFallbackVoice(currentVoice) || Boolean(chapter?.audioUrl?.trim())) return;
     hasFetchedVoicesRef.current = true;
     fetchAvailableEdgeVoices().then((voices) => {
       if (voices && (voices?.length || 0) > 0) {
         setAvailableVoices(voices);
       }
     });
-  }, []);
-
-  // KẾT NỐI VÀO SINGLE SOURCE OF TRUTH: useAudio (Microsoft Edge TTS Hoài My & Nam Minh)
-  const audioContext = useAudio();
+  }, [audioContext.voiceId, readerSettings.selectedVoiceId, chapter?.audioUrl]);
 
   // Kiểm tra xem luồng Audio đang phát có phải của đúng truyện & chương hiện tại không
   const isCurrentChapterAudio = Boolean(
@@ -369,7 +375,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     safeSetItem('daotam_audio_bar_visible', 'true');
     safeSetItem('daotam_audio_active', 'true');
     audioContext.setIsBarVisible(true);
-    if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
+    if (isCurrentChapterAudio && ((audioContext?.chunks?.length || 0) > 0 || audioContext.isDirectMp3)) {
       await audioContext.play(startIndex);
     } else {
       await audioContext.playChapter(novel, chapter, true, safeChapters, true, {
@@ -385,7 +391,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const toggleTtsPlay = useCallback(() => {
     safeSetItem('daotam_audio_bar_visible', 'true');
     audioContext.setIsBarVisible(true);
-    if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
+    if (isCurrentChapterAudio && ((audioContext?.chunks?.length || 0) > 0 || audioContext.isDirectMp3)) {
       audioContext.togglePlay();
     } else {
       audioContext.playChapter(novel, chapter, true, safeChapters, true);
@@ -562,7 +568,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
       return updated;
     });
     setVoiceId(normalized);
-    if (!isCurrentChapterAudio && isChapterUnlocked && (audioContext.isBarVisible || isAudioActive)) {
+    if (!isCurrentChapterAudio && !chapter?.audioUrl?.trim() && isChapterUnlocked && (audioContext.isBarVisible || isAudioActive)) {
       setIsAudioActive(true);
       safeSetItem('daotam_audio_active', 'true');
       audioContext.playChapter(novel, chapter, true, safeChapters, true).catch(() => {});
@@ -890,13 +896,15 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
           {/* Action buttons */}
           <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
-            {/* Voice Selector Dropdown (Nam Minh / Hoài My / Dự phòng giọng máy) */}
-            <VoiceSelectorDropdown
-              selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
-              onSelectVoice={handleChangeVoice}
-              direction="down"
-              variant="readerHeader"
-            />
+            {/* Voice Selector Dropdown (Nam Minh / Hoài My) - ẩn khi chương dùng file MP3 trực tiếp */}
+            {!(chapter?.audioUrl && chapter.audioUrl.trim()) && (
+              <VoiceSelectorDropdown
+                selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
+                onSelectVoice={handleChangeVoice}
+                direction="down"
+                variant="readerHeader"
+              />
+            )}
 
             {/* Play/Pause Button */}
             <button

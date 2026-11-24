@@ -70,7 +70,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
 
   const menuPositionClasses =
     direction === 'up'
-      ? 'absolute bottom-full left-0 right-0 max-w-[calc(100vw-24px)] sm:left-0 sm:right-auto sm:w-72 mb-2'
+      ? 'absolute bottom-full left-1/2 -translate-x-1/2 w-[calc(100vw-24px)] max-w-[calc(100vw-24px)] sm:left-0 sm:translate-x-0 sm:w-72 mb-2'
       : 'fixed left-3 right-3 top-[54px] max-w-[calc(100vw-24px)] mx-auto sm:mx-0 sm:absolute sm:top-full sm:right-0 sm:left-auto sm:w-72 sm:mt-2';
 
   return (

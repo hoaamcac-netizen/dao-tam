@@ -19,7 +19,21 @@ import {
   ChevronDown,
   AlertCircle,
   Smartphone,
+  SkipBack,
+  SkipForward,
 } from 'lucide-react';
+
+function formatAudioTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
+  const total = Math.floor(seconds);
+  const hrs = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hrs > 0) {
+    return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
 
 interface EdgeTTSFloatingAudioBarProps {
   onOpenReader?: (novel: any, chapter: any) => void;
@@ -32,6 +46,9 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
     activeNovel,
     activeChapter,
     isAudioMode,
+    isDirectMp3,
+    mp3CurrentTime,
+    mp3Duration,
     isPlaying,
     isLoading,
     retryAttempt,
@@ -50,6 +67,9 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
     togglePlay,
     skipNext,
     skipPrev,
+    seekToTime,
+    playNextChapter,
+    playPrevChapter,
     setVoiceId,
     setPlaybackRate,
     setAutoNext,
@@ -102,7 +122,9 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 Chương {activeChapter.number}
               </div>
               <div className="text-[10px] text-slate-400 truncate">
-                {activeVoiceMeta.shortLabel} • Câu {currentChunkIndex + 1}/{totalChunks}
+                {isDirectMp3
+                  ? `MP3 • ${formatAudioTime(mp3CurrentTime)}/${formatAudioTime(mp3Duration)}`
+                  : `${activeVoiceMeta.shortLabel} • Câu ${currentChunkIndex + 1}/${totalChunks}`}
               </div>
             </div>
           </div>
@@ -174,20 +196,20 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>
-              {!isFallbackVoice && (
+              {!isFallbackVoice && !isDirectMp3 && (
                 <button
                   type="button"
                   onClick={() => setVoiceId(DEVICE_FALLBACK_VOICE_ID)}
                   className="self-start inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold text-[11px] shadow-xs transition-colors cursor-pointer"
                 >
                   <Smartphone className="w-3.5 h-3.5 shrink-0" />
-                  <span>Chuyển sang Dự phòng (Giọng máy)</span>
+                  <span>Chuyển sang Giọng máy dự phòng</span>
                 </button>
               )}
             </div>
           )}
 
-          {retryAttempt > 0 && isLoading && (
+          {retryAttempt > 0 && isLoading && !isDirectMp3 && (
             <div className="text-[11px] font-semibold text-pink-600 dark:text-pink-400 text-center">
               Đang thử máy chủ giọng đọc dự phòng (lần {retryAttempt})...
             </div>
@@ -214,14 +236,16 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   {activeChapter.title || `Chương ${activeChapter.number}`}
                 </span>
 
-                <span className="text-[10px] sm:text-[11px] font-bold text-pink-600 dark:text-pink-400 bg-pink-50 dark:bg-pink-950/70 px-1.5 sm:px-2 py-0.5 rounded-full border border-pink-200 dark:border-pink-800 whitespace-nowrap flex-shrink-0">
-                  Câu {totalChunks > 0 ? currentChunkIndex + 1 : 0}/{totalChunks} ({progress}%)
+                <span className="text-[10px] sm:text-[11px] font-bold text-pink-600 dark:text-pink-400 bg-pink-50 dark:bg-pink-950/70 px-1.5 sm:px-2 py-0.5 rounded-full border border-pink-200 dark:border-pink-800 whitespace-nowrap flex-shrink-0 tabular-nums">
+                  {isDirectMp3
+                    ? `${formatAudioTime(mp3CurrentTime)} / ${formatAudioTime(mp3Duration)}`
+                    : `Câu ${totalChunks > 0 ? currentChunkIndex + 1 : 0}/${totalChunks} (${progress}%)`}
                 </span>
               </div>
 
               <div className="flex items-center justify-between gap-2 text-[10px] sm:text-[11px] leading-tight text-slate-500 dark:text-slate-400">
                 <div className="truncate flex-1 min-w-0">
-                  {currentChunkText ? (
+                  {!isDirectMp3 && currentChunkText ? (
                     <span className="text-pink-600 dark:text-pink-300 italic">
                       &quot;{currentChunkText}&quot;
                     </span>
@@ -229,22 +253,62 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                     <span>{activeNovel.title}</span>
                   )}
                 </div>
-                {isAudioMode && bufferedCount > 0 && (
-                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium whitespace-nowrap flex-shrink-0">
-                    Đệm +{bufferedCount}
+                {isDirectMp3 ? (
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold whitespace-nowrap flex-shrink-0">
+                    Audio MP3
                   </span>
+                ) : (
+                  isAudioMode &&
+                  bufferedCount > 0 && (
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium whitespace-nowrap flex-shrink-0">
+                      Đệm +{bufferedCount}
+                    </span>
+                  )
                 )}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-center gap-4 md:gap-6">
+          {isDirectMp3 && (
+            <div className="flex items-center gap-2 pt-0.5">
+              <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 tabular-nums w-10">
+                {formatAudioTime(mp3CurrentTime)}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={mp3Duration > 0 ? mp3Duration : 0}
+                step={0.5}
+                value={Math.min(mp3CurrentTime, mp3Duration || 0)}
+                onChange={(e) => seekToTime(Number(e.target.value))}
+                disabled={mp3Duration <= 0}
+                aria-label="Tua tiến trình phát MP3"
+                className="flex-1 h-1.5 accent-pink-500 cursor-pointer disabled:opacity-40"
+              />
+              <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 tabular-nums w-10 text-right">
+                {formatAudioTime(mp3Duration)}
+              </span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-center gap-3 sm:gap-5">
+            {isDirectMp3 && (
+              <button
+                type="button"
+                onClick={() => playPrevChapter()}
+                className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-pink-600 dark:hover:text-pink-400 transition-colors cursor-pointer"
+                title="Chương trước"
+              >
+                <SkipBack className="w-4 h-4" />
+              </button>
+            )}
+
             <button
               type="button"
               onClick={skipPrev}
-              disabled={currentChunkIndex <= 0}
+              disabled={!isDirectMp3 && currentChunkIndex <= 0}
               className="p-1.5 sm:p-2 text-slate-600 dark:text-slate-300 hover:text-pink-600 dark:hover:text-pink-400 disabled:opacity-40 transition-colors cursor-pointer"
-              title="Lùi về câu trước"
+              title={isDirectMp3 ? 'Lùi 15 giây' : 'Lùi về câu trước'}
             >
               <RotateCcw className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
@@ -267,20 +331,37 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
             <button
               type="button"
               onClick={skipNext}
-              disabled={totalChunks > 0 && currentChunkIndex >= totalChunks - 1 && !autoNext}
+              disabled={!isDirectMp3 && totalChunks > 0 && currentChunkIndex >= totalChunks - 1 && !autoNext}
               className="p-1.5 sm:p-2 text-slate-600 dark:text-slate-300 hover:text-pink-600 dark:hover:text-pink-400 disabled:opacity-40 transition-colors cursor-pointer"
-              title="Tiến sang câu tiếp theo"
+              title={isDirectMp3 ? 'Tua tới 15 giây' : 'Tiến sang câu tiếp theo'}
             >
               <RotateCw className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
+
+            {isDirectMp3 && (
+              <button
+                type="button"
+                onClick={() => playNextChapter()}
+                className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-pink-600 dark:hover:text-pink-400 transition-colors cursor-pointer"
+                title="Chương tiếp theo"
+              >
+                <SkipForward className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
-          <VoiceSelectorDropdown
-            selectedVoiceId={voiceId}
-            onSelectVoice={setVoiceId}
-            direction="up"
-            variant="floatingBar"
-          />
+          {isDirectMp3 ? (
+            <div className="px-2.5 py-1.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/60 text-[11px] text-emerald-700 dark:text-emerald-300 font-medium text-center">
+              Phát trực tiếp từ file MP3 chương • Hỗ trợ tốc độ & nền khóa màn hình
+            </div>
+          ) : (
+            <VoiceSelectorDropdown
+              selectedVoiceId={voiceId}
+              onSelectVoice={setVoiceId}
+              direction="up"
+              variant="floatingBar"
+            />
+          )}
 
           <div className="flex items-center justify-between gap-2 pt-1 border-t border-pink-100/70 dark:border-slate-800 text-[11px] sm:text-xs">
             <div className="relative" ref={speedMenuRef}>

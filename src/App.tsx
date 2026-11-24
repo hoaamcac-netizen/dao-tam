@@ -215,8 +215,21 @@ function DaoTamApp() {
   const deletingNovelIdsRef = useRef<Set<string>>(new Set());
   const [isNovelsLoading, setIsNovelsLoading] = useState(false);
   const [novelsError, setNovelsError] = useState<string | null>(null);
-  // Phân trang danh sách truyện (Tối đa 25 bộ / trang)
+  // Phân trang danh sách truyện (25 bộ/trang trên desktop 5 cột, 27 bộ/trang trên mobile 3 cột)
   const [currentNovelPage, setCurrentNovelPage] = useState<number>(1);
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
+  const novelListTopRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleResize = () => {
+      setIsMobileViewport(window.innerWidth < 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Novel Submissions Queue: Khởi tạo rỗng, đồng bộ Firestore thực
   const [novelSubmissions, setNovelSubmissions] = useState<NovelSubmission[]>([]);
@@ -2744,6 +2757,47 @@ function DaoTamApp() {
     }
   };
 
+  // Đồng bộ tức thì audioUrl của 1 chương vào state của App sau khi Admin tải lên hoặc tạo MP3 GitHub
+  const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
+    const patchChaptersList = (chaps?: Chapter[]) => {
+      if (!Array.isArray(chaps)) return chaps;
+      return chaps.map((c) =>
+        (updatedChapter.id && c.id === updatedChapter.id) ||
+        (Number(c.number) > 0 && Number(c.number) === Number(updatedChapter.number))
+          ? { ...c, audioUrl: updatedChapter.audioUrl }
+          : c
+      );
+    };
+
+    setNovels((prev) => {
+      const next = (prev || []).map((n) =>
+        n.id === novelId
+          ? { ...n, chapters: patchChaptersList(n.chapters) || [], updatedAt: Date.now() }
+          : n
+      );
+      saveNovelsToStorage(next);
+      return next;
+    });
+
+    setSelectedNovel((prev) =>
+      prev && prev.id === novelId
+        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
+        : prev
+    );
+    setEditingNovel((prev) =>
+      prev && prev.id === novelId
+        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
+        : prev
+    );
+    setSelectedChapter((prev) =>
+      prev &&
+      ((updatedChapter.id && prev.id === updatedChapter.id) ||
+        (Number(prev.number) > 0 && Number(prev.number) === Number(updatedChapter.number)))
+        ? { ...prev, audioUrl: updatedChapter.audioUrl }
+        : prev
+    );
+  };
+
   // Mở modal Báo Cáo Vi Phạm Truyện
   const handleOpenReport = (novel: Novel) => {
     setReportingNovel(novel);
@@ -3079,7 +3133,11 @@ function DaoTamApp() {
         return false;
       });
 
-      return searchMatches.sort((a, b) => (b.lastChapterUpdatedAt || b.updatedAt || 0) - (a.lastChapterUpdatedAt || a.updatedAt || 0));
+      return searchMatches.sort(
+        (a, b) =>
+          (b.updatedAt || b.createdAt || b.lastChapterUpdatedAt || 0) -
+          (a.updatedAt || a.createdAt || a.lastChapterUpdatedAt || 0)
+      );
     }
 
     // 2. Phân mục chính: Chọn mục thể loại chính nào thì CHỈ hiện đúng thể loại chính đó! (Khóa chặt, không lẫn Đam Mỹ hay thể loại khác)
@@ -3105,34 +3163,65 @@ function DaoTamApp() {
       list = list.filter((novel) => novel.isShortStory === true);
     }
 
-    // 4. Tab filter & sorting:
-    // - Truyện Hot: Sắp xếp theo lượt xem (views) thực tế, không bị ảnh hưởng bởi tặng hoa
-    // - Mới cập nhật: BẮT BUỘC query/sort dựa trên trường lastChapterUpdatedAt (chỉ cập nhật khi tác giả thêm/sửa chương)
-    // - Truyện full: Lọc truyện hoàn thành và sort theo lastChapterUpdatedAt
+    // 4. Tab filter & sorting (JavaScript phía client để không bỏ sót truyện cũ thiếu timestamp):
+    const getSortTime = (n: Novel) => n.updatedAt || n.createdAt || n.lastChapterUpdatedAt || 0;
     if (currentTab === 'completed') {
       list = list
         .filter((n) => n.status === 'Hoàn thành' || n.status === 'Full')
-        .sort((a, b) => ((b.lastChapterUpdatedAt || b.updatedAt || 0) - (a.lastChapterUpdatedAt || a.updatedAt || 0)));
+        .sort((a, b) => getSortTime(b) - getSortTime(a));
     } else if (currentTab === 'latest') {
-      list = list.sort((a, b) => ((b.lastChapterUpdatedAt || b.updatedAt || 0) - (a.lastChapterUpdatedAt || a.updatedAt || 0)));
+      list = list.sort((a, b) => getSortTime(b) - getSortTime(a));
     } else if (currentTab === 'home') {
       list = list.sort((a, b) => {
         const viewDiff = (b.views || 0) - (a.views || 0);
         if (viewDiff !== 0) return viewDiff;
-        return (b.lastChapterUpdatedAt || b.updatedAt || 0) - (a.lastChapterUpdatedAt || a.updatedAt || 0);
+        return getSortTime(b) - getSortTime(a);
       });
     }
 
     return list;
   }, [novels, selectedMainCategory, selectedGenre, searchQuery, currentTab, isShortStoryMode, user?.role]);
 
-  // Phân trang 25 truyện / trang theo đúng chuẩn và giới hạn Quota Spark:
-  const NOVELS_PER_PAGE = 25;
+  // Phân trang tự động theo màn hình: Desktop 5 cột -> 25 truyện/trang; Mobile 3 cột -> 27 truyện/trang
+  const NOVELS_PER_PAGE = isMobileViewport ? 27 : 25;
   const totalNovelPages = Math.max(1, Math.ceil((filteredAndSortedNovels?.length || 0) / NOVELS_PER_PAGE));
+  const safeCurrentNovelPage = Math.min(currentNovelPage, totalNovelPages);
   const paginatedNovels = useMemo(() => {
-    const start = (currentNovelPage - 1) * NOVELS_PER_PAGE;
+    const start = (safeCurrentNovelPage - 1) * NOVELS_PER_PAGE;
     return (filteredAndSortedNovels || []).slice(start, start + NOVELS_PER_PAGE);
-  }, [filteredAndSortedNovels, currentNovelPage]);
+  }, [filteredAndSortedNovels, safeCurrentNovelPage, NOVELS_PER_PAGE]);
+
+  const paginationDisplayPages = useMemo<(number | 'ellipsis-left' | 'ellipsis-right')[]>(() => {
+    if (totalNovelPages <= 7) {
+      return Array.from({ length: totalNovelPages }, (_, i) => i + 1);
+    }
+    const items: (number | 'ellipsis-left' | 'ellipsis-right')[] = [1];
+    const start = Math.max(2, safeCurrentNovelPage - 1);
+    const end = Math.min(totalNovelPages - 1, safeCurrentNovelPage + 1);
+    if (start > 2) items.push('ellipsis-left');
+    for (let i = start; i <= end; i++) {
+      items.push(i);
+    }
+    if (end < totalNovelPages - 1) items.push('ellipsis-right');
+    items.push(totalNovelPages);
+    return items;
+  }, [totalNovelPages, safeCurrentNovelPage]);
+
+  const handleChangeNovelPage = useCallback((nextPage: number) => {
+    const clamped = Math.max(1, Math.min(totalNovelPages, nextPage));
+    setCurrentNovelPage(clamped);
+    if (novelListTopRef.current) {
+      novelListTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else {
+      window.scrollTo({ top: 380, behavior: 'smooth' });
+    }
+  }, [totalNovelPages]);
+
+  useEffect(() => {
+    if (currentNovelPage > totalNovelPages) {
+      setCurrentNovelPage(totalNovelPages);
+    }
+  }, [currentNovelPage, totalNovelPages]);
 
   // Reset trang về 1 khi chuyển tab hoặc bộ lọc
   useEffect(() => {
@@ -3565,6 +3654,7 @@ function DaoTamApp() {
           <EditNovelModal
             isOpen={true}
             isPageView={true}
+            isAdmin={checkIsAdmin(activeUser.email)}
             onClose={() => {
               if (editingNovel) {
                 navigate(`/truyen/${editingNovel.slug || editingNovel.id}`);
@@ -3576,6 +3666,7 @@ function DaoTamApp() {
             }}
             novel={editingNovel}
             onSaveNovel={handleSaveEditedNovel}
+            onChapterAudioUpdated={handleChapterAudioUpdated}
             genres={genres}
             onAddNewGenre={handleAddNewGenre}
             onHomeClick={handleReturnToHome}
@@ -3707,7 +3798,7 @@ function DaoTamApp() {
             {/* TWO-COLUMN LAYOUT: MAIN CATALOG + TOP 10 HOT TRONG NGÀY RIGHT SIDEBAR */}
             <div className="flex flex-col lg:flex-row items-start gap-8">
               {/* Left Column: Novels Catalog */}
-              <div className="flex-1 min-w-0 w-full">
+              <div ref={novelListTopRef} className="flex-1 min-w-0 w-full scroll-mt-20">
                 {/* Catalog Section Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 mb-6 border-b border-slate-200 dark:border-slate-800">
                   <div className="flex items-center gap-3">
@@ -3770,7 +3861,7 @@ function DaoTamApp() {
                         )}
                       </h2>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
-                        {Math.min(paginatedNovels?.length || 0, 25)} bộ truyện được hiển thị
+                        Hiển thị {paginatedNovels?.length || 0} / {filteredAndSortedNovels?.length || 0} bộ truyện • Trang {safeCurrentNovelPage}/{totalNovelPages}
                       </p>
                     </div>
                   </div>
@@ -3873,9 +3964,9 @@ function DaoTamApp() {
                   </div>
                 ) : (
                   <>
-                    {/* Ép buộc cắt mảng bằng novels.slice(0, 25).map(...) */}
-                    <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2 sm:gap-4">
-                      {(paginatedNovels || []).slice(0, 25).map((novel) => (
+                    {/* Lưới truyện khít màn hình: Mobile 3 cột (27 truyện/trang), Desktop 5 cột (25 truyện/trang) */}
+                    <div className="grid grid-cols-3 md:grid-cols-5 gap-2 sm:gap-4">
+                      {(paginatedNovels || []).map((novel) => (
                         <NovelCard
                           key={novel.id}
                           novel={novel}
@@ -3887,67 +3978,64 @@ function DaoTamApp() {
                       ))}
                     </div>
 
-                    {/* Phân trang 25 truyện / trang chuẩn tone màu hồng */}
-                    {totalNovelPages > 1 && (
-                      <div className="pt-6 pb-2 border-t border-pink-100 dark:border-pink-950/60 flex flex-wrap items-center justify-between gap-3">
-                        <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                          Đang hiển thị <strong className="text-pink-600 dark:text-pink-400 font-bold">{Math.min(paginatedNovels?.length || 0, 25)}</strong> bộ truyện • Trang <strong className="text-pink-600 dark:text-pink-400">{currentNovelPage}</strong>/{totalNovelPages}
-                        </div>
+                    {/* Thanh phân trang thân thiện điện thoại & hiển thị tổng số truyện */}
+                    <div className="pt-6 pb-2 border-t border-pink-100 dark:border-pink-950/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 font-medium text-center sm:text-left">
+                        Đang hiển thị <strong className="text-pink-600 dark:text-pink-400 font-bold">{paginatedNovels?.length || 0}</strong> / Tổng <strong className="text-pink-600 dark:text-pink-400 font-bold">{filteredAndSortedNovels?.length || 0}</strong> truyện • Trang <strong className="text-pink-600 dark:text-pink-400">{safeCurrentNovelPage}</strong>/{totalNovelPages}
+                      </div>
 
-                        <nav aria-label="Điều hướng phân trang" className="flex items-center gap-1.5 flex-wrap">
+                      {totalNovelPages > 1 && (
+                        <nav aria-label="Điều hướng phân trang" className="flex items-center justify-center sm:justify-end gap-1.5 flex-wrap">
                           <button
                             type="button"
-                            onClick={() => {
-                              if (currentNovelPage > 1) {
-                                setCurrentNovelPage((p) => p - 1);
-                                window.scrollTo({ top: 380, behavior: 'smooth' });
-                              }
-                            }}
-                            disabled={currentNovelPage <= 1}
-                            className="px-3 py-1.5 rounded-xl text-xs font-bold transition-all border flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-pink-200 dark:border-pink-900 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-pink-950/40 shadow-xs"
+                            onClick={() => handleChangeNovelPage(safeCurrentNovelPage - 1)}
+                            disabled={safeCurrentNovelPage <= 1}
+                            className="min-h-[40px] px-3 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all border flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-pink-200 dark:border-pink-900 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-pink-950/40 shadow-xs"
                           >
                             <ChevronLeft className="w-4 h-4" />
-                            <span>Trước</span>
+                            <span>Trang trước</span>
                           </button>
 
-                          {Array.from({ length: totalNovelPages }, (_, i) => i + 1).map((pageNum) => {
-                            const isActive = pageNum === currentNovelPage;
+                          {paginationDisplayPages.map((item) => {
+                            if (typeof item !== 'number') {
+                              return (
+                                <span
+                                  key={item}
+                                  className="px-1.5 text-slate-400 dark:text-slate-500 font-bold select-none"
+                                >
+                                  ...
+                                </span>
+                              );
+                            }
+                            const isActive = item === safeCurrentNovelPage;
                             return (
                               <button
-                                key={pageNum}
+                                key={item}
                                 type="button"
-                                onClick={() => {
-                                  setCurrentNovelPage(pageNum);
-                                  window.scrollTo({ top: 380, behavior: 'smooth' });
-                                }}
-                                className={`min-w-[32px] h-8 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
+                                onClick={() => handleChangeNovelPage(item)}
+                                className={`min-w-[40px] min-h-[40px] px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer border ${
                                   isActive
                                     ? 'bg-pink-600 border-pink-600 text-white shadow-md shadow-pink-600/30 scale-105'
                                     : 'bg-white dark:bg-slate-900 border-pink-200 dark:border-pink-900 text-slate-700 dark:text-slate-300 hover:border-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950/40'
                                 }`}
                               >
-                                {pageNum}
+                                {item}
                               </button>
                             );
                           })}
 
                           <button
                             type="button"
-                            onClick={() => {
-                              if (currentNovelPage < totalNovelPages) {
-                                setCurrentNovelPage((p) => p + 1);
-                                window.scrollTo({ top: 380, behavior: 'smooth' });
-                              }
-                            }}
-                            disabled={currentNovelPage >= totalNovelPages}
-                            className="px-3 py-1.5 rounded-xl text-xs font-bold transition-all border flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-pink-200 dark:border-pink-900 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-pink-950/40 shadow-xs"
+                            onClick={() => handleChangeNovelPage(safeCurrentNovelPage + 1)}
+                            disabled={safeCurrentNovelPage >= totalNovelPages}
+                            className="min-h-[40px] px-3 sm:px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all border flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed bg-white dark:bg-slate-900 border-pink-200 dark:border-pink-900 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-pink-950/40 shadow-xs"
                           >
-                            <span>Sau</span>
+                            <span>Trang sau</span>
                             <ChevronRight className="w-4 h-4" />
                           </button>
                         </nav>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </>
                 )}
               </div>
@@ -4052,6 +4140,7 @@ function DaoTamApp() {
           }
         }}
         onReloadNovels={reloadNovels}
+        onChapterAudioUpdated={handleChapterAudioUpdated}
       />
 
       {/* Edit Novel & Chapters (Page View is primary in-web flow) */}
@@ -4059,12 +4148,14 @@ function DaoTamApp() {
         <EditNovelModal
           isOpen={isEditNovelOpen}
           isPageView={false}
+          isAdmin={checkIsAdmin(activeUser.email)}
           onClose={() => {
             setIsEditNovelOpen(false);
             setEditingNovel(null);
           }}
           novel={editingNovel}
           onSaveNovel={handleSaveEditedNovel}
+          onChapterAudioUpdated={handleChapterAudioUpdated}
           genres={genres}
           onAddNewGenre={handleAddNewGenre}
           onHomeClick={handleReturnToHome}

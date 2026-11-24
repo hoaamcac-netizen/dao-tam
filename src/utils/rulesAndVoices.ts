@@ -138,13 +138,14 @@ export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
     shortLabel: 'Hoài My',
     subtitle: 'Giọng chính - Nữ',
   },
-  {
-    id: DEVICE_FALLBACK_VOICE_ID,
-    label: 'Dự phòng (Giọng máy)',
-    shortLabel: 'Giọng máy',
-    subtitle: 'Giọng thiết bị vi-VN, không tốn băng thông',
-  },
 ];
+
+export const DEVICE_FALLBACK_VOICE_META: VoiceSelectorOption = {
+  id: DEVICE_FALLBACK_VOICE_ID,
+  label: 'Giọng máy dự phòng',
+  shortLabel: 'Giọng máy',
+  subtitle: 'Giọng thiết bị vi-VN (không cần mạng)',
+};
 
 export function isDeviceFallbackVoice(voiceId?: string | null): boolean {
   if (!voiceId) return false;
@@ -159,6 +160,9 @@ export function isDeviceFallbackVoice(voiceId?: string | null): boolean {
 
 export function getVoiceDisplayMeta(voiceId?: string | null): VoiceSelectorOption {
   const normalized = normalizeEdgeVoiceId(voiceId || undefined);
+  if (isDeviceFallbackVoice(normalized)) {
+    return DEVICE_FALLBACK_VOICE_META;
+  }
   return (
     VOICE_SELECTOR_OPTIONS.find((opt) => opt.id === normalized) ||
     VOICE_SELECTOR_OPTIONS[1]
@@ -259,7 +263,14 @@ export function getMatchingBrowserVoice(voiceId: string): SpeechSynthesisVoice |
   const viVoices = voices.filter((v) => {
     const lang = (v.lang || '').toLowerCase();
     const name = (v.name || '').toLowerCase();
-    return lang.startsWith('vi') || lang.includes('vn') || name.includes('vietnam') || name.includes('tiếng việt');
+    return (
+      lang.startsWith('vi') ||
+      lang.includes('vn') ||
+      lang === 'vie' ||
+      name.includes('vietnam') ||
+      name.includes('việt') ||
+      name.includes('tiếng việt')
+    );
   });
 
   if (viVoices.length === 0) return null;

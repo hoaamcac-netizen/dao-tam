@@ -1,6 +1,13 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { Novel, Chapter, MainCategory, StoryRole, GenreItem } from '../types';
-import { calculateChapterVip } from '../utils/rulesAndVoices';
+import {
+  EDGE_TTS_VOICES,
+  calculateChapterVip,
+  isDeviceFallbackVoice,
+  normalizeEdgeVoiceId,
+} from '../utils/rulesAndVoices';
+import { useAudio } from '../contexts/AudioContext';
+import { AdminGitHubConfigCard, AdminChapterMp3Actions } from './AdminGitHubAudioManager';
 import { 
   fetchChaptersForNovel, 
   deleteChapterFromFirestore, 
@@ -35,33 +42,43 @@ import {
   Check,
   Loader2,
   Eye,
-  EyeOff
+  EyeOff,
+  Headphones
 } from 'lucide-react';
 
 export interface EditNovelModalProps {
   isOpen: boolean;
   isPageView?: boolean;
+  isAdmin?: boolean;
   onClose: () => void;
   novel: Novel | null;
   genres: GenreItem[];
   onAddNewGenre?: (name: string) => void;
   onSaveNovel: (updatedNovel: Novel) => Promise<void> | void;
+  onChapterAudioUpdated?: (novelId: string, updatedChapter: Chapter) => void;
   onHomeClick?: () => void;
 }
 
 export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   isOpen,
   isPageView = true,
+  isAdmin = false,
   onClose,
   novel,
   genres = [],
   onAddNewGenre,
   onSaveNovel,
+  onChapterAudioUpdated,
   onHomeClick,
 }) => {
   if (!isOpen || !novel) return null;
 
+  const audioContext = useAudio();
   const [activeTab, setActiveTab] = useState<'info' | 'chapters'>('info');
+  const [adminTtsVoiceId, setAdminTtsVoiceId] = useState<string>(() => {
+    const normalized = normalizeEdgeVoiceId(audioContext.voiceId || 'vi-VN-NamMinhNeural');
+    return isDeviceFallbackVoice(normalized) ? 'vi-VN-NamMinhNeural' : normalized;
+  });
 
   // Form states for Novel Metadata with complete null/undefined protection
   const [title, setTitle] = useState(novel.title || '');
@@ -1176,6 +1193,41 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
               </div>
             </div>
 
+            {/* Khung cấu hình GitHub & chọn giọng tạo MP3 (CHỈ HIỆN VỚI ADMIN) */}
+            {isAdmin && (
+              <div className="space-y-3">
+                <AdminGitHubConfigCard defaultCollapsed />
+                <div className="px-4 py-2.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs text-emerald-900 font-semibold">
+                    <Headphones className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      Audio MP3 GitHub: đã có{' '}
+                      <strong className="text-emerald-700">
+                        {(chapters || []).filter((c) => Boolean(c.audioUrl && c.audioUrl.trim())).length}/{chapters?.length || 0}
+                      </strong>{' '}
+                      chương
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                      Giọng tạo MP3:
+                    </label>
+                    <select
+                      value={adminTtsVoiceId}
+                      onChange={(e) => setAdminTtsVoiceId(e.target.value)}
+                      className="bg-white border border-emerald-300 rounded-xl px-2.5 py-1.5 text-xs font-bold text-slate-800 focus:outline-none focus:border-pink-500 cursor-pointer"
+                    >
+                      {EDGE_TTS_VOICES.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name} ({v.tag})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Toolbar: Search, Select All, Batch Set Price, Batch Delete, Add Chapter */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50/70 p-4 rounded-2xl border border-slate-200">
               <div className="flex items-center gap-2 flex-1 max-w-md relative">
@@ -1271,7 +1323,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                   return (
                     <div
                       key={ch.id}
-                      className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+                      className={`p-3.5 rounded-2xl border transition-all ${
                         isChecked
                           ? 'bg-pink-50/50 border-pink-400 shadow-2xs'
                           : ch.isHidden
@@ -1279,95 +1331,125 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                           : 'bg-white border-slate-200 hover:border-pink-300 shadow-2xs'
                       }`}
                     >
-                      <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleSelectChapter(ch.id)}
-                          className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
-                        >
-                          {isChecked ? (
-                            <CheckSquare className="w-4.5 h-4.5 text-pink-600" />
-                          ) : (
-                            <Square className="w-4.5 h-4.5 text-slate-400" />
-                          )}
-                        </button>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-bold text-slate-900 text-sm truncate">
-                              {ch.title}
-                            </span>
-                            {ch.isVip ? (
-                              <span className="bg-amber-100 text-amber-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-amber-300 flex items-center gap-1">
-                                <Lock className="w-2.5 h-2.5" /> VIP ({Number((typeof ch.priceXu === 'number' ? ch.priceXu : 5).toFixed(2))} Xu)
-                              </span>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleSelectChapter(ch.id)}
+                            className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                          >
+                            {isChecked ? (
+                              <CheckSquare className="w-4.5 h-4.5 text-pink-600" />
                             ) : (
-                              <span className="bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-emerald-300">
-                                Miễn Phí
-                              </span>
+                              <Square className="w-4.5 h-4.5 text-slate-400" />
                             )}
-                            {ch.isHidden && (
-                              <span className="bg-amber-100 text-amber-900 font-extrabold px-2 py-0.5 rounded-full text-[10px] border border-amber-400 flex items-center gap-1">
-                                <EyeOff className="w-2.5 h-2.5 text-amber-700" /> Đã ẩn
+                          </button>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-slate-900 text-sm truncate">
+                                {ch.title}
                               </span>
+                              {ch.isVip ? (
+                                <span className="bg-amber-100 text-amber-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-amber-300 flex items-center gap-1">
+                                  <Lock className="w-2.5 h-2.5" /> VIP ({Number((typeof ch.priceXu === 'number' ? ch.priceXu : 5).toFixed(2))} Xu)
+                                </span>
+                              ) : (
+                                <span className="bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-emerald-300">
+                                  Miễn Phí
+                                </span>
+                              )}
+                              {ch.isHidden && (
+                                <span className="bg-amber-100 text-amber-900 font-extrabold px-2 py-0.5 rounded-full text-[10px] border border-amber-400 flex items-center gap-1">
+                                  <EyeOff className="w-2.5 h-2.5 text-amber-700" /> Đã ẩn
+                                </span>
+                              )}
+                              {ch.audioUrl && (
+                                <span className="bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-emerald-300 flex items-center gap-1">
+                                  <Headphones className="w-2.5 h-2.5 text-emerald-700" /> Đã có MP3
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-3 font-medium">
+                              <span>Chương {ch.number}</span>
+                              <span>• {ch.wordCount || ((ch.content || '').split(/\s+/).filter(Boolean)?.length || 0)} từ</span>
+                              <span>• Ngày đăng: {ch.publishedDate || 'Mới'}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {/* Nút Ẩn / Hiện chương nhanh */}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleHideChapter(ch.id)}
+                            className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 cursor-pointer transition ${
+                              ch.isHidden
+                                ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                                : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200'
+                            }`}
+                            title={ch.isHidden ? 'Chương này đang ẩn. Bấm để hiển thị lại cho độc giả' : 'Bấm để ẩn chương này khỏi độc giả'}
+                          >
+                            {ch.isHidden ? <Eye className="w-3.5 h-3.5 text-amber-700" /> : <EyeOff className="w-3.5 h-3.5 text-slate-500" />}
+                            <span className="hidden sm:inline">{ch.isHidden ? 'Hiện' : 'Ẩn'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingChapter({ ...ch });
+                              setIsNewChapter(false);
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
+                            title="Sửa nội dung chương"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>Sửa</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={deletingChapterIds.has(ch.id)}
+                            onClick={() => handleDeleteSingleChapter(ch.id)}
+                            className={`p-1.5 rounded-xl border transition ${
+                              deletingChapterIds.has(ch.id)
+                                ? 'bg-rose-50 text-rose-400 border-rose-200 cursor-not-allowed'
+                                : 'bg-slate-100 hover:bg-rose-600 text-slate-500 hover:text-white border-slate-200 cursor-pointer'
+                            }`}
+                            title={deletingChapterIds.has(ch.id) ? 'Đang xóa...' : 'Xóa chương này'}
+                          >
+                            {deletingChapterIds.has(ch.id) ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
                             )}
-                          </div>
-                          <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-3 font-medium">
-                            <span>Chương {ch.number}</span>
-                            <span>• {ch.wordCount || ((ch.content || '').split(/\s+/).filter(Boolean)?.length || 0)} từ</span>
-                            <span>• Ngày đăng: {ch.publishedDate || 'Mới'}</span>
-                          </div>
+                          </button>
                         </div>
                       </div>
 
-                      {/* Action buttons */}
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {/* Nút Ẩn / Hiện chương nhanh */}
-                        <button
-                          type="button"
-                          onClick={() => handleToggleHideChapter(ch.id)}
-                          className={`px-2.5 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 cursor-pointer transition ${
-                            ch.isHidden
-                              ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
-                              : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-200'
-                          }`}
-                          title={ch.isHidden ? 'Chương này đang ẩn. Bấm để hiển thị lại cho độc giả' : 'Bấm để ẩn chương này khỏi độc giả'}
-                        >
-                          {ch.isHidden ? <Eye className="w-3.5 h-3.5 text-amber-700" /> : <EyeOff className="w-3.5 h-3.5 text-slate-500" />}
-                          <span className="hidden sm:inline">{ch.isHidden ? 'Hiện' : 'Ẩn'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingChapter({ ...ch });
-                            setIsNewChapter(false);
+                      {isAdmin && (
+                        <AdminChapterMp3Actions
+                          novel={novel}
+                          chapter={ch}
+                          preferredVoiceId={adminTtsVoiceId}
+                          onAudioUrlUpdated={(targetChap, nextAudioUrl) => {
+                            const updatedChap: Chapter = {
+                              ...targetChap,
+                              audioUrl: nextAudioUrl,
+                            };
+                            setChapters((prev) =>
+                              (prev || []).map((item) =>
+                                item.id === targetChap.id ||
+                                Number(item.number) === Number(targetChap.number)
+                                  ? { ...item, audioUrl: nextAudioUrl }
+                                  : item
+                              )
+                            );
+                            onChapterAudioUpdated?.(novel.id, updatedChap);
                           }}
-                          className="px-3 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
-                          title="Sửa nội dung chương"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                          <span>Sửa</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={deletingChapterIds.has(ch.id)}
-                          onClick={() => handleDeleteSingleChapter(ch.id)}
-                          className={`p-1.5 rounded-xl border transition ${
-                            deletingChapterIds.has(ch.id)
-                              ? 'bg-rose-50 text-rose-400 border-rose-200 cursor-not-allowed'
-                              : 'bg-slate-100 hover:bg-rose-600 text-slate-500 hover:text-white border-slate-200 cursor-pointer'
-                          }`}
-                          title={deletingChapterIds.has(ch.id) ? 'Đang xóa...' : 'Xóa chương này'}
-                        >
-                          {deletingChapterIds.has(ch.id) ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500" />
-                          ) : (
-                            <Trash2 className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                      </div>
+                        />
+                      )}
                     </div>
                   );
                 })

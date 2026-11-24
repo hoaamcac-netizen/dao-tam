@@ -19,11 +19,11 @@ export const TTS_FETCH_TIMEOUT_MS = 8000;
 export const TTS_MAX_RETRIES = 2;
 export const TTS_RETRY_DELAY_MS = 1200;
 export const TTS_ACTIVE_SERVER_STORAGE_KEY = 'daotam_active_tts_endpoint';
-export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 80;
-export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 120;
-export const DEFAULT_CHUNK_MIN_LENGTH = 400;
-export const DEFAULT_CHUNK_MAX_LENGTH = 500;
-export const MAX_BLOB_CACHE_ENTRIES = 8;
+export const DEFAULT_FIRST_CHUNK_MIN_LENGTH = 350;
+export const DEFAULT_FIRST_CHUNK_MAX_LENGTH = 550;
+export const DEFAULT_CHUNK_MIN_LENGTH = 500;
+export const DEFAULT_CHUNK_MAX_LENGTH = 700;
+export const MAX_BLOB_CACHE_ENTRIES = 10;
 export const SKIPPED_TTS_CHUNK_URL = '__SKIPPED_204__';
 
 function normalizeTtsEndpoint(rawUrl: string): string {
@@ -583,6 +583,81 @@ export function splitTextIntoSpeechChunks(
 
   flushBuffer();
   return chunks;
+}
+
+/**
+ * Chia nhỏ văn bản cho chế độ Giọng máy dự phòng (window.speechSynthesis):
+ * - Mỗi đoạn BẮT BUỘC dưới 180 ký tự (mặc định tối đa 175 ký tự) để tránh lỗi
+ *   trình duyệt Android/iOS tự ngắt âm thanh giữa chừng.
+ * - Ưu tiên tách tại dấu câu kết thúc, tiếp theo dấu phẩy/hai chấm, cuối cùng theo ranh giới từ.
+ */
+export function splitTextForDeviceSpeech(text: string, maxLength: number = 175): string[] {
+  const cleaned = cleanTextForTTS(text);
+  if (!cleaned || !/[\p{L}\p{N}]/u.test(cleaned)) return [];
+
+  const safeMax = Math.max(60, Math.min(178, maxLength));
+  const rawUnits = cleaned
+    .split(/(?<=[.?!;…])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const fineUnits: string[] = [];
+  for (const unit of rawUnits) {
+    if (unit.length <= safeMax) {
+      fineUnits.push(unit);
+      continue;
+    }
+    const clauses = unit
+      .split(/(?<=[,:—–-])\s+/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+    for (const clause of clauses) {
+      if (clause.length <= safeMax) {
+        fineUnits.push(clause);
+        continue;
+      }
+      const words = clause.split(/\s+/).filter(Boolean);
+      let wordAcc = '';
+      for (const word of words) {
+        if (word.length > safeMax) {
+          if (wordAcc) {
+            fineUnits.push(wordAcc);
+            wordAcc = '';
+          }
+          for (let i = 0; i < word.length; i += safeMax) {
+            fineUnits.push(word.slice(i, i + safeMax));
+          }
+          continue;
+        }
+        const candidate = wordAcc ? `${wordAcc} ${word}` : word;
+        if (candidate.length <= safeMax) {
+          wordAcc = candidate;
+        } else {
+          if (wordAcc) fineUnits.push(wordAcc);
+          wordAcc = word;
+        }
+      }
+      if (wordAcc) fineUnits.push(wordAcc);
+    }
+  }
+
+  const result: string[] = [];
+  let buffer = '';
+  for (const item of fineUnits) {
+    const candidate = buffer ? `${buffer} ${item}` : item;
+    if (candidate.length <= safeMax) {
+      buffer = candidate;
+    } else {
+      if (buffer && /[\p{L}\p{N}]/u.test(buffer)) {
+        result.push(buffer);
+      }
+      buffer = item;
+    }
+  }
+  if (buffer && /[\p{L}\p{N}]/u.test(buffer)) {
+    result.push(buffer);
+  }
+  return result;
 }
 
 /**
