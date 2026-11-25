@@ -335,6 +335,71 @@ export function invalidateNovelsCache(): void {
   safeRemoveItem(NOVELS_CACHE_TS_KEY);
 }
 
+export function clearChapterAudioCache(
+  novelId: string,
+  chapters?: Array<{ id?: string; number?: number | string }>
+): void {
+  if (!novelId || typeof window === 'undefined') return;
+
+  try {
+    if (Array.isArray(chapters) && chapters.length > 0) {
+      for (const ch of chapters) {
+        if (!ch) continue;
+        if (ch.number !== undefined && ch.number !== null && String(ch.number).trim() !== '') {
+          const numKey = String(ch.number).trim();
+          safeRemoveItem(`chapter_full_${novelId}_${numKey}`);
+          safeRemoveItem(`chapter_full_ts_${novelId}_${numKey}`);
+          safeSessionRemoveItem(`chapter_full_${novelId}_${numKey}`);
+          safeSessionRemoveItem(`chapter_full_ts_${novelId}_${numKey}`);
+        }
+        if (ch.id && String(ch.id).trim() !== '') {
+          const idKey = String(ch.id).trim();
+          safeRemoveItem(`chapter_full_${novelId}_${idKey}`);
+          safeRemoveItem(`chapter_full_ts_${novelId}_${idKey}`);
+          safeSessionRemoveItem(`chapter_full_${novelId}_${idKey}`);
+          safeSessionRemoveItem(`chapter_full_ts_${novelId}_${idKey}`);
+        }
+      }
+    } else {
+      const localKeys: string[] = [];
+      for (let i = 0; i < (window.localStorage?.length || 0); i++) {
+        const k = window.localStorage.key(i);
+        if (
+          k &&
+          (k.startsWith(`chapter_full_${novelId}_`) || k.startsWith(`chapter_full_ts_${novelId}_`))
+        ) {
+          localKeys.push(k);
+        }
+      }
+      localKeys.forEach((k) => safeRemoveItem(k));
+    }
+
+    const sessionKeys: string[] = [];
+    for (let i = 0; i < (window.sessionStorage?.length || 0); i++) {
+      const k = window.sessionStorage.key(i);
+      if (
+        k &&
+        (k.startsWith(`chapter_full_${novelId}_`) ||
+          k.startsWith(`chapter_full_ts_${novelId}_`) ||
+          k.startsWith(`daotam_chapter_${novelId}_`))
+      ) {
+        sessionKeys.push(k);
+      }
+    }
+    sessionKeys.forEach((k) => safeSessionRemoveItem(k));
+  } catch {}
+
+  invalidateNovelsCache();
+
+  try {
+    window.dispatchEvent(
+      new CustomEvent('daotam:chapter-audio-cache-invalidated', {
+        detail: { novelId, chapters },
+      })
+    );
+  } catch {}
+}
+
 export function isGenresCacheFresh(ttlMs: number = NOVELS_CACHE_TTL_MS): boolean {
   if (typeof window === 'undefined') return false;
   try {

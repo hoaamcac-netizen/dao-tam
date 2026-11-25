@@ -244,6 +244,45 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     };
   }, [novel?.id, chapter?.id, chapter?.number]);
 
+  useEffect(() => {
+    const handleAudioCacheRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ novelId?: string; updatedChapters?: Chapter[] }>).detail;
+      if (!detail || detail.novelId !== novel?.id) return;
+      lastFetchedChapterKeyRef.current = '';
+      if (Array.isArray(detail.updatedChapters) && chapter) {
+        const match = detail.updatedChapters.find(
+          (c) =>
+            (c.id && c.id === chapter.id) ||
+            (Number(c.number) > 0 && Number(c.number) === Number(chapter.number))
+        );
+        if (match) {
+          chapter.audioUrl = match.audioUrl;
+          chapter.audioUrlMale = match.audioUrlMale;
+          chapter.audioUrlFemale = match.audioUrlFemale;
+          setChapterAudioMetaTick((t) => t + 1);
+        }
+      }
+    };
+    window.addEventListener(
+      'daotam:chapter-audio-cache-invalidated',
+      handleAudioCacheRefresh as EventListener
+    );
+    window.addEventListener(
+      'daotam:chapters-audio-synced',
+      handleAudioCacheRefresh as EventListener
+    );
+    return () => {
+      window.removeEventListener(
+        'daotam:chapter-audio-cache-invalidated',
+        handleAudioCacheRefresh as EventListener
+      );
+      window.removeEventListener(
+        'daotam:chapters-audio-synced',
+        handleAudioCacheRefresh as EventListener
+      );
+    };
+  }, [novel?.id, chapter]);
+
   // Nội dung đầy đủ và đoạn trích đọc thử của chương
   const chapterFullContent = useMemo(() => {
     if (fullContent && (fullContent.trim()?.length || 0) > 0) {

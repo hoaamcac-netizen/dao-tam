@@ -40,6 +40,7 @@ export const GUEST_USER: UserProfile = {
   readingHistory: [],
   bookmarks: [],
   purchasedChapters: [],
+  purchasedStories: [],
   unlockedChapters: {},
   unlockedFullBooks: [],
   purchases: [],
@@ -118,6 +119,7 @@ function buildUserProfileFromFirestoreDoc(
     readingHistory: Array.isArray(data.readingHistory) ? data.readingHistory : [],
     bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
     purchasedChapters: extractPurchasedChaptersList(data),
+    purchasedStories: Array.isArray(data.purchasedStories) ? data.purchasedStories : [],
     unlockedChapters: mergedUnlockedChapters,
     unlockedFullBooks: Array.isArray(data.unlockedFullBooks) ? data.unlockedFullBooks : [],
     purchases: Array.isArray(data.purchases) ? data.purchases : [],
@@ -156,6 +158,9 @@ async function applyLegacyRecoveryIfZeroBalance(
     authorEarnedXu: lb.authorEarnedXu > 0 ? lb.authorEarnedXu : profile.authorEarnedXu,
     flowerBalance: Math.max(profile.flowerBalance || 0, lb.flowerBalance),
     purchasedChapters: mergedPurchasedList,
+    purchasedStories: Array.isArray(legacyRecovered.purchasedStories)
+      ? Array.from(new Set([...(profile?.purchasedStories || []), ...legacyRecovered.purchasedStories]))
+      : (profile?.purchasedStories || []),
     unlockedChapters: mergedChapters || {},
     unlockedFullBooks: mergedFullBooks || [],
     readingHistory: Array.isArray(profile?.readingHistory) ? profile.readingHistory : [],
@@ -306,6 +311,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 readingHistory: Array.isArray(liveData.readingHistory) ? liveData.readingHistory : base.readingHistory,
                 bookmarks: Array.isArray(liveData.bookmarks) ? liveData.bookmarks : base.bookmarks,
                 purchasedChapters: livePurchasedList.length > 0 ? livePurchasedList : base.purchasedChapters,
+                purchasedStories: Array.isArray(liveData.purchasedStories)
+                  ? liveData.purchasedStories
+                  : (base.purchasedStories || []),
                 unlockedChapters: mergePurchasedChaptersMaps(base.unlockedChapters, liveUnlocked),
                 unlockedFullBooks: Array.isArray(liveData.unlockedFullBooks)
                   ? liveData.unlockedFullBooks

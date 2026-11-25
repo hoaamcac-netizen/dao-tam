@@ -31,8 +31,8 @@ const AUDIO_PLAYBACK_RATE_STORAGE_KEY = 'daotam_audio_playback_rate';
 const MP3_RESUME_POSITIONS_STORAGE_KEY = 'daotam_mp3_positions';
 const MP3_POSITION_SAVE_THROTTLE_MS = 5000;
 const MP3_POSITION_MAX_ENTRIES = 150;
-const NETWORK_RECOVERY_MAX_RETRIES = 3;
-const NETWORK_RECOVERY_RETRY_DELAY_MS = 2000;
+const NETWORK_RECOVERY_MAX_RETRIES = 1;
+const NETWORK_RECOVERY_RETRY_DELAY_MS = 1000;
 
 export type SleepTimerMode = 'off' | '15' | '30' | '60' | 'end_of_chapter';
 
@@ -111,6 +111,13 @@ function clearMp3SavedPosition(chapterId?: string | null, mp3Url?: string | null
   } catch {}
 }
 
+function isAbortLikeError(err: any): boolean {
+  if (!err) return false;
+  const name = String(err?.name || '');
+  const msg = String(err?.message || '');
+  return name === 'AbortError' || /AbortError|interrupted/i.test(msg);
+}
+
 function isValidAudioUrl(raw?: string | null): string {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   if (!trimmed) return '';
@@ -136,7 +143,8 @@ export function resolveChapterVoiceAudioUrl(
 }
 
 function preloadNextMp3LinkHint(mp3Url: string): void {
-  if (typeof document === 'undefined' || !mp3Url) return;
+  const cleanUrl = (mp3Url || '').trim();
+  if (typeof document === 'undefined' || !cleanUrl) return;
   try {
     const existingId = 'daotam-next-mp3-preload';
     let link = document.getElementById(existingId) as HTMLLinkElement | null;
@@ -145,10 +153,12 @@ function preloadNextMp3LinkHint(mp3Url: string): void {
       link.id = existingId;
       link.rel = 'preload';
       link.as = 'audio';
+      link.removeAttribute('crossorigin');
       document.head.appendChild(link);
     }
-    if (link.href !== mp3Url) {
-      link.href = mp3Url;
+    link.removeAttribute('crossorigin');
+    if (link.href !== cleanUrl) {
+      link.href = cleanUrl;
     }
   } catch {}
 }
@@ -764,6 +774,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!singleAudio || hasInitializedAudioRef.current) return;
     hasInitializedAudioRef.current = true;
 
+    singleAudio.removeAttribute('crossorigin');
     singleAudio.preload = 'auto';
     singleAudio.setAttribute('playsinline', 'true');
     (singleAudio as any).playsInline = true;
@@ -943,6 +954,127 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [applyPlaybackRateLock, clearNetworkRecoveryTimer, clearSleepTimer, saveListeningProgressLocal]);
 
   const makeChapterCacheKey = (novelId: string, chapterId: string) => `${novelId}:::${chapterId}`;
+
+  useEffect(() => {
+    const handleCacheInvalidated = (e: Event) => {
+      const detail = (e as CustomEvent<{ novelId?: string }>).detail;
+      const targetNovelId = detail?.novelId;
+      if (!targetNovelId) return;
+
+      for (const k of Array.from(preparedChaptersRef.current.keys())) {
+        if (k.startsWith(`${targetNovelId}:::`)) {
+          preparedChaptersRef.current.delete(k);
+        }
+      }
+      for (const k of Array.from(preloadPromisesRef.current.keys())) {
+        if (k.startsWith(`${targetNovelId}:::`)) {
+          preloadPromisesRef.current.delete(k);
+        }
+      }
+      directMp3PreloadedForRef.current.clear();
+    };
+
+    const handleChaptersAudioSynced = (e: Event) => {
+      const detail = (e as CustomEvent<{ novelId?: string; updatedChapters?: Chapter[] }>).detail;
+      if (!detail?.novelId || !Array.isArray(detail.updatedChapters)) return;
+      const { novelId: syncedNovelId, updatedChapters } = detail;
+
+      const byId = new Map<string, Chapter>();
+      const byNum = new Map<number, Chapter>();
+      for (const ch of updatedChapters) {
+        if (ch.id) byId.set(ch.id, ch);
+        if (Number(ch.number) > 0) byNum.set(Number(ch.number), ch);
+      }
+
+      if (activeNovelRef.current?.id === syncedNovelId) {
+        const patchList = (list: Chapter[]) =>
+          list.map((c) => {
+            const match = (c.id ? byId.get(c.id) : undefined) || byNum.get(Number(c.number));
+            if (!match) return c;
+            return {
+              ...c,
+              audioUrl: match.audioUrl,
+              audioUrlMale: match.audioUrlMale,
+              audioUrlFemale: match.audioUrlFemale,
+            };
+          });
+
+        const nextList = patchList(chaptersListRef.current || []);
+        chaptersListRef.current = nextList;
+        setChaptersList(nextList);
+
+        const curChap = activeChapterRef.current;
+        if (curChap) {
+          const curMatch =
+            (curChap.id ? byId.get(curChap.id) : undefined) || byNum.get(Number(curChap.number));
+          if (curMatch) {
+            const nextChap: Chapter = {
+              ...curChap,
+              audioUrl: curMatch.audioUrl,
+              audioUrlMale: curMatch.audioUrlMale,
+              audioUrlFemale: curMatch.audioUrlFemale,
+            };
+            activeChapterRef.current = nextChap;
+            setActiveChapter(nextChap);
+            activeAudioSrcRef.current = null;
+            const syncedUrl = resolveChapterVoiceAudioUrl(nextChap, voiceIdRef.current);
+            if (syncedUrl) {
+              isDirectMp3Ref.current = true;
+              setIsDirectMp3(true);
+              queueChunksRef.current = [];
+              setChunks([]);
+              chunksRef.current = [];
+            } else if (isDirectMp3Ref.current) {
+              isDirectMp3Ref.current = false;
+              setIsDirectMp3(false);
+            }
+          }
+        }
+
+        const hasMaleInNext = nextList.some(
+          (c) =>
+            (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+            (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
+        );
+        const hasFemaleInNext = nextList.some(
+          (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
+        );
+        const nextNovel: Novel = {
+          ...activeNovelRef.current,
+          chapters: nextList,
+          hasMaleAudio: nextList.length > 0 ? hasMaleInNext : activeNovelRef.current.hasMaleAudio,
+          hasFemaleAudio:
+            nextList.length > 0 ? hasFemaleInNext : activeNovelRef.current.hasFemaleAudio,
+          hasAudio:
+            nextList.length > 0
+              ? hasMaleInNext || hasFemaleInNext
+              : activeNovelRef.current.hasAudio,
+          updatedAt: Date.now(),
+        };
+        activeNovelRef.current = nextNovel;
+        setActiveNovel(nextNovel);
+      }
+    };
+
+    window.addEventListener(
+      'daotam:chapter-audio-cache-invalidated',
+      handleCacheInvalidated as EventListener
+    );
+    window.addEventListener(
+      'daotam:chapters-audio-synced',
+      handleChaptersAudioSynced as EventListener
+    );
+    return () => {
+      window.removeEventListener(
+        'daotam:chapter-audio-cache-invalidated',
+        handleCacheInvalidated as EventListener
+      );
+      window.removeEventListener(
+        'daotam:chapters-audio-synced',
+        handleChaptersAudioSynced as EventListener
+      );
+    };
+  }, []);
 
   const findNextChapterFor = useCallback((chapter: Chapter): Chapter | null => {
     const list = Array.isArray(chaptersListRef.current) ? chaptersListRef.current : [];
@@ -1493,14 +1625,108 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const audio = audioRef.current;
       if (!audio) return;
 
+      const cleanMp3Url = (mp3Url || '').trim();
       clearNetworkRecoveryTimer();
       stopDeviceSpeechSynthesis();
+
+      const fallbackToDeviceTtsForChapter = async () => {
+        if (sessionNonce !== playbackSessionIdRef.current || !isAudioModeRef.current) return;
+        clearNetworkRecoveryTimer();
+        setNetworkStatusMessage(null);
+        setAudioError(null);
+
+        stopSingleAudioElement(true);
+        activeAudioChapterIdRef.current = null;
+        activeAudioSrcRef.current = null;
+        isDirectMp3Ref.current = false;
+        setIsDirectMp3(false);
+        setMp3CurrentTime(0);
+        setMp3Duration(0);
+
+        setFallbackNotice(
+          `Chương ${chapter.number} không phát được MP3 — tự động chuyển sang Giọng Máy`
+        );
+
+        const fallbackKey = makeChapterCacheKey(novel.id, chapter.id);
+        let parsedChunks = preparedChaptersRef.current.get(fallbackKey);
+
+        if (!parsedChunks || parsedChunks.length === 0) {
+          let textContent = chapter.content || '';
+          if (!textContent.trim()) {
+            setIsLoading(true);
+            try {
+              const fetched = await fetchFullChapterContent(
+                novel.id,
+                chapter.id,
+                chapter.number,
+                novel.updatedAt
+              );
+              if (sessionNonce !== playbackSessionIdRef.current || !isAudioModeRef.current) {
+                return;
+              }
+              if (fetched?.content) {
+                textContent = fetched.content;
+                chapter.content = fetched.content;
+              }
+            } catch {}
+          }
+          if (textContent.trim()) {
+            parsedChunks = buildChapterQueuedChunks(novel.id, chapter, textContent);
+            if (parsedChunks.length > 0) {
+              preparedChaptersRef.current.set(fallbackKey, parsedChunks);
+            }
+          }
+        }
+
+        if (sessionNonce !== playbackSessionIdRef.current || !isAudioModeRef.current) {
+          return;
+        }
+
+        const finalChunks = parsedChunks || [];
+        if (finalChunks.length === 0) {
+          setIsLoading(false);
+          setIsPlaying(false);
+          isPlaybackActiveRef.current = false;
+          backgroundAudioManager.pauseBackgroundPlayback();
+          setIsMinimized(false);
+          setAudioError(
+            'Không thể phát tệp MP3 và chương này chưa có nội dung văn bản để đọc bằng Giọng Máy.'
+          );
+          return;
+        }
+
+        queueChunksRef.current = [...finalChunks];
+        setChunks(finalChunks);
+        chunksRef.current = finalChunks;
+        setCurrentChunkIndex(0);
+        currentChunkIndexRef.current = 0;
+        activeQueueIndexRef.current = 0;
+        isPlaybackActiveRef.current = true;
+        isAdvancingChapterRef.current = false;
+        setIsPlaying(true);
+        setIsLoading(false);
+
+        backgroundAudioManager.updateMetadata(
+          formatChapterTitleForTTS(chapter),
+          `${novel.title} • Giọng Máy`,
+          novel.coverImage,
+          'Đạo Tâm'
+        );
+
+        await playChunkRef.current(0);
+      };
+
+      if (!cleanMp3Url) {
+        await fallbackToDeviceTtsForChapter();
+        return;
+      }
 
       const isSameLoadedSource =
         !options?.forceReload &&
         activeAudioChapterIdRef.current === chapter.id &&
-        activeAudioSrcRef.current === mp3Url &&
+        activeAudioSrcRef.current === cleanMp3Url &&
         Boolean(audio.src) &&
+        audio.readyState >= 1 &&
         !audio.error &&
         !audio.ended;
 
@@ -1532,9 +1758,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       setIsLoading(true);
 
-      const token = `${sessionNonce}:::mp3:::${chapter.id}:::${mp3Url}:::${Date.now()}`;
+      const token = `${sessionNonce}:::mp3:::${chapter.id}:::${cleanMp3Url}:::${Date.now()}`;
       activeChunkTokenRef.current = token;
-      const preloadMarkerKey = `${sessionNonce}:::${chapter.id}:::${mp3Url}`;
+      const preloadMarkerKey = `${sessionNonce}:::${chapter.id}:::${cleanMp3Url}`;
 
       const isMp3SessionValid = () =>
         isDirectMp3Ref.current &&
@@ -1545,7 +1771,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const pendingResumeTime =
         typeof options?.resumeAtSeconds === 'number' && options.resumeAtSeconds > 0
           ? options.resumeAtSeconds
-          : readMp3SavedPosition(chapter.id, mp3Url);
+          : readMp3SavedPosition(chapter.id, cleanMp3Url);
       let hasAppliedResume = isSameLoadedSource;
 
       if (!isSameLoadedSource) {
@@ -1562,7 +1788,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           networkLostTimeRef.current > 0
             ? networkLostTimeRef.current
             : lastKnownMp3TimeRef.current;
-        playDirectMp3Url(novel, chapter, mp3Url, ++playbackSessionIdRef.current, {
+        playDirectMp3Url(novel, chapter, cleanMp3Url, ++playbackSessionIdRef.current, {
           isAutoAdvance: true,
           forceReload: true,
           resumeAtSeconds: resumeAt,
@@ -1577,7 +1803,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             : lastKnownMp3TimeRef.current;
         networkLostTimeRef.current = curT;
         if (curT > 1) {
-          saveMp3Position(chapter.id, curT, mp3Url);
+          saveMp3Position(chapter.id, curT, cleanMp3Url);
         }
 
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -1590,12 +1816,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (networkRetryCountRef.current < NETWORK_RECOVERY_MAX_RETRIES) {
           if (networkRetryTimerRef.current) return;
           networkRetryCountRef.current += 1;
-          const attempt = networkRetryCountRef.current;
           setIsLoading(true);
           setNetworkStatusMessage(
             reason === 'stalled'
-              ? `Mạng chậm, đang kết nối lại (${attempt}/${NETWORK_RECOVERY_MAX_RETRIES})...`
-              : `Mất kết nối, đang thử lại (${attempt}/${NETWORK_RECOVERY_MAX_RETRIES})...`
+              ? 'Mạng chậm, đang tải lại file MP3...'
+              : 'Đang thử tải lại file MP3...'
           );
           networkRetryTimerRef.current = setTimeout(() => {
             networkRetryTimerRef.current = null;
@@ -1605,13 +1830,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return;
         }
 
-        setNetworkStatusMessage(null);
-        setIsLoading(false);
-        setIsPlaying(false);
-        isPlaybackActiveRef.current = false;
-        backgroundAudioManager.pauseBackgroundPlayback();
-        setIsMinimized(false);
-        setAudioError('Không thể phát tiếp tệp MP3 do gián đoạn mạng hoặc liên kết lỗi. Vui lòng nhấn Thử lại.');
+        fallbackToDeviceTtsForChapter().catch(() => {});
       };
 
       const preloadNextAfterMp3 = async () => {
@@ -1685,7 +1904,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const now = Date.now();
         if (cur > 1 && now - lastMp3PosSavedAtRef.current >= MP3_POSITION_SAVE_THROTTLE_MS) {
           lastMp3PosSavedAtRef.current = now;
-          saveMp3Position(chapter.id, cur, mp3Url);
+          saveMp3Position(chapter.id, cur, cleanMp3Url);
         }
         if (now - lastMp3TimeUiUpdateRef.current >= 250) {
           lastMp3TimeUiUpdateRef.current = now;
@@ -1728,7 +1947,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       audio.onended = () => {
         if (!isMp3SessionValid()) return;
         clearNetworkRecoveryTimer();
-        clearMp3SavedPosition(chapter.id, mp3Url);
+        clearMp3SavedPosition(chapter.id, cleanMp3Url);
         lastKnownMp3TimeRef.current = 0;
         updateProgressBarDomNow(100);
 
@@ -1762,10 +1981,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       };
 
       audio.loop = false;
+      audio.removeAttribute('crossorigin');
       if (!isSameLoadedSource) {
         activeAudioChapterIdRef.current = chapter.id;
-        activeAudioSrcRef.current = mp3Url;
-        audio.src = mp3Url;
+        activeAudioSrcRef.current = cleanMp3Url;
+        audio.src = cleanMp3Url;
         audio.load();
       }
       applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -1800,13 +2020,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setIsPlaying(true);
         } catch (err: any) {
           if (!isMp3SessionValid()) return;
-          if (err?.name === 'AbortError' && allowAbortRetry) {
-            await new Promise((r) => setTimeout(r, 80));
-            if (!isMp3SessionValid()) return;
-            await attemptPlay(false);
-            return;
-          }
-          if (err?.name === 'AbortError') {
+          if (isAbortLikeError(err)) {
+            if (allowAbortRetry) {
+              await new Promise((r) => setTimeout(r, 80));
+              if (!isMp3SessionValid()) return;
+              await attemptPlay(false);
+              return;
+            }
             setIsLoading(false);
             return;
           }
@@ -1831,6 +2051,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       formatVoiceArtistLabel,
       preloadChapterForAudio,
       stopDeviceSpeechSynthesis,
+      stopSingleAudioElement,
       updateProgressBarDomNow,
     ]
   );
@@ -1853,13 +2074,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             audio &&
             activeAudioChapterIdRef.current === activeChapterRef.current.id &&
             activeAudioSrcRef.current === directUrl &&
-            audio.src &&
+            Boolean(audio.src) &&
+            audio.readyState >= 1 &&
             !audio.ended &&
             !audio.error
           ) {
             isPlaybackActiveRef.current = true;
             try {
               audio.loop = false;
+              audio.removeAttribute('crossorigin');
               applyPlaybackRateLock(audio, playbackRateRef.current);
               await audio.play();
               applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -1876,7 +2099,19 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 onPrev: () => playPrevChapterRef.current(),
               });
               return;
-            } catch {}
+            } catch (err: any) {
+              if (isAbortLikeError(err)) {
+                setIsLoading(false);
+                return;
+              }
+              if (err?.name === 'NotAllowedError') {
+                setIsLoading(false);
+                setIsPlaying(false);
+                isPlaybackActiveRef.current = false;
+                backgroundAudioManager.pauseBackgroundPlayback();
+                return;
+              }
+            }
           }
           await playDirectMp3Url(
             activeNovelRef.current,
@@ -1950,13 +2185,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audio &&
         activeAudioChapterIdRef.current === activeChapterRef.current.id &&
         activeAudioSrcRef.current === directUrl &&
-        audio.src &&
+        Boolean(audio.src) &&
+        audio.readyState >= 1 &&
         !audio.ended &&
         !audio.error
       ) {
         isPlaybackActiveRef.current = true;
         try {
           audio.loop = false;
+          audio.removeAttribute('crossorigin');
           applyPlaybackRateLock(audio, playbackRateRef.current);
           await audio.play();
           applyPlaybackRateLock(audio, playbackRateRef.current);
@@ -1973,7 +2210,19 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             onPrev: () => playPrevChapterRef.current(),
           });
           return;
-        } catch {}
+        } catch (err: any) {
+          if (isAbortLikeError(err)) {
+            setIsLoading(false);
+            return;
+          }
+          if (err?.name === 'NotAllowedError') {
+            setIsLoading(false);
+            setIsPlaying(false);
+            isPlaybackActiveRef.current = false;
+            backgroundAudioManager.pauseBackgroundPlayback();
+            return;
+          }
+        }
       }
       if (directUrl) {
         await playDirectMp3Url(
@@ -2239,7 +2488,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setNetworkStatusMessage(null);
       resetPrefetchAbortController();
       if (!isAutoAdvance) {
-        stopAllAudioOutputs(true);
+        stopAllAudioOutputs(false);
       } else {
         stopDeviceSpeechSynthesis();
       }
@@ -2295,9 +2544,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
       const effectiveChapter: Chapter = {
         ...chapter,
-        audioUrl: chapter.audioUrl || matchedListChapter?.audioUrl,
-        audioUrlMale: chapter.audioUrlMale || matchedListChapter?.audioUrlMale,
-        audioUrlFemale: chapter.audioUrlFemale || matchedListChapter?.audioUrlFemale,
+        audioUrl: (chapter.audioUrl || matchedListChapter?.audioUrl || '').trim() || undefined,
+        audioUrlMale:
+          (chapter.audioUrlMale || matchedListChapter?.audioUrlMale || '').trim() || undefined,
+        audioUrlFemale:
+          (chapter.audioUrlFemale || matchedListChapter?.audioUrlFemale || '').trim() || undefined,
       };
 
       setAudioError(null);
@@ -2384,6 +2635,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           return;
         }
 
+        stopSingleAudioElement(true);
         activeAudioChapterIdRef.current = null;
         activeAudioSrcRef.current = null;
         isDirectMp3Ref.current = false;

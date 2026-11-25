@@ -120,7 +120,9 @@ import {
   markNotificationsCollectionAsRead,
   purchaseVipItemWithTransaction,
   createWithdrawalWithTransaction,
-  refundRejectedWithdrawalWithTransaction
+  refundRejectedWithdrawalWithTransaction,
+  readLocalSavedNovelsFromStorage,
+  saveLocalSavedStoryIds
 } from './firebase/services';
 import { auth, db, checkIsAdmin } from './firebase/config';
 import { doc, getDoc } from 'firebase/firestore';
@@ -157,6 +159,7 @@ import {
   getCachedNovelsIfFresh,
   isGenresCacheFresh,
   markGenresCacheFresh,
+  clearChapterAudioCache,
 } from './utils/safeStorage';
 import { 
   checkHasActiveBanNotice, 
@@ -558,6 +561,9 @@ function DaoTamApp() {
   // User Profile từ AuthContext (Mặc định user = null, không dùng dữ liệu giả)
   const { user, setUser, loading: isAuthLoading, refreshUserData } = useAuth();
   const activeUser = user || GUEST_USER;
+  const [localSavedIds, setLocalSavedIds] = useState<string[]>(() =>
+    readLocalSavedNovelsFromStorage().map((e) => e.storyId)
+  );
   const pendingTopUpIdsRef = useRef<Set<string>>(new Set());
 
   // 1. ĐỒNG BỘ TRẠNG THÁI KHÓA USER TỪ DUY NHẤT 1 SNAPSHOT TRONG AUTHCONTEXT (0 READS PHỤ)
@@ -1206,13 +1212,22 @@ function DaoTamApp() {
   };
 
   const handleToggleBookmark = (novelId: string) => {
+    const baseBookmarks = Array.from(
+      new Set([
+        ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
+        ...localSavedIds,
+      ])
+    );
+    const exists = baseBookmarks.includes(novelId);
+    const nextBookmarks = exists
+      ? baseBookmarks.filter((id) => id !== novelId)
+      : [...baseBookmarks, novelId];
+
+    setLocalSavedIds(nextBookmarks);
+    saveLocalSavedStoryIds(nextBookmarks);
+
     setUser((prev) => {
       if (!prev) return null;
-      const curBookmarks = Array.isArray(prev.bookmarks) ? prev.bookmarks : [];
-      const exists = curBookmarks.includes(novelId);
-      const nextBookmarks = exists
-        ? curBookmarks.filter((id) => id !== novelId)
-        : [...curBookmarks, novelId];
       const updated = {
         ...prev,
         bookmarks: nextBookmarks,
@@ -1225,9 +1240,19 @@ function DaoTamApp() {
   };
 
   const handleRemoveBookmark = (novelId: string) => {
+    const baseBookmarks = Array.from(
+      new Set([
+        ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
+        ...localSavedIds,
+      ])
+    );
+    const nextBookmarks = baseBookmarks.filter((id) => id !== novelId);
+
+    setLocalSavedIds(nextBookmarks);
+    saveLocalSavedStoryIds(nextBookmarks);
+
     setUser((prev) => {
       if (!prev) return null;
-      const nextBookmarks = (prev.bookmarks || []).filter((id) => id !== novelId);
       const updated = {
         ...prev,
         bookmarks: nextBookmarks,
@@ -2806,18 +2831,33 @@ function DaoTamApp() {
 
   // Đồng bộ tức thì audioUrl / audioUrlMale / audioUrlFemale + cờ hasMaleAudio / hasFemaleAudio của 1 chương vào state của App
   const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
+    clearChapterAudioCache(novelId, [{ id: updatedChapter.id, number: updatedChapter.number }]);
+
+    const cleanUpdatedChapter: Chapter = {
+      ...updatedChapter,
+      audioUrl: typeof updatedChapter.audioUrl === 'string' ? updatedChapter.audioUrl.trim() || undefined : undefined,
+      audioUrlMale:
+        typeof updatedChapter.audioUrlMale === 'string'
+          ? updatedChapter.audioUrlMale.trim() || undefined
+          : undefined,
+      audioUrlFemale:
+        typeof updatedChapter.audioUrlFemale === 'string'
+          ? updatedChapter.audioUrlFemale.trim() || undefined
+          : undefined,
+    };
+
     const mergeAudioFields = (c: Chapter): Chapter => ({
       ...c,
-      audioUrl: updatedChapter.audioUrl,
-      audioUrlMale: updatedChapter.audioUrlMale,
-      audioUrlFemale: updatedChapter.audioUrlFemale,
+      audioUrl: cleanUpdatedChapter.audioUrl,
+      audioUrlMale: cleanUpdatedChapter.audioUrlMale,
+      audioUrlFemale: cleanUpdatedChapter.audioUrlFemale,
     });
 
     const patchChaptersList = (chaps?: Chapter[]) => {
       if (!Array.isArray(chaps)) return chaps;
       return chaps.map((c) =>
-        (updatedChapter.id && c.id === updatedChapter.id) ||
-        (Number(c.number) > 0 && Number(c.number) === Number(updatedChapter.number))
+        (cleanUpdatedChapter.id && c.id === cleanUpdatedChapter.id) ||
+        (Number(c.number) > 0 && Number(c.number) === Number(cleanUpdatedChapter.number))
           ? mergeAudioFields(c)
           : c
       );
@@ -2833,18 +2873,21 @@ function DaoTamApp() {
         (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
       );
       const hasUpdatedMale = Boolean(
-        (updatedChapter.audioUrlMale && updatedChapter.audioUrlMale.trim()) ||
-          (updatedChapter.audioUrl && updatedChapter.audioUrl.trim())
+        (cleanUpdatedChapter.audioUrlMale && cleanUpdatedChapter.audioUrlMale.trim()) ||
+          (cleanUpdatedChapter.audioUrl && cleanUpdatedChapter.audioUrl.trim())
       );
       const hasUpdatedFemale = Boolean(
-        updatedChapter.audioUrlFemale && updatedChapter.audioUrlFemale.trim()
+        cleanUpdatedChapter.audioUrlFemale && cleanUpdatedChapter.audioUrlFemale.trim()
       );
       const hasMaleAudio = chaps.length > 0 ? maleInChaps : Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
       const hasFemaleAudio = chaps.length > 0 ? femaleInChaps : Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
       return {
         hasMaleAudio,
         hasFemaleAudio,
-        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+        hasAudio:
+          chaps.length > 0
+            ? Boolean(hasMaleAudio || hasFemaleAudio)
+            : Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
       };
     };
 
@@ -2863,30 +2906,53 @@ function DaoTamApp() {
       if (!prev || prev.id !== novelId) return prev;
       const patched = patchChaptersList(prev.chapters) || [];
       const flags = deriveVoiceFlags(patched, prev);
-      return { ...prev, ...flags, chapters: patched };
+      return { ...prev, ...flags, chapters: patched, updatedAt: Date.now() };
     });
     setEditingNovel((prev) => {
       if (!prev || prev.id !== novelId) return prev;
       const patched = patchChaptersList(prev.chapters) || [];
       const flags = deriveVoiceFlags(patched, prev);
-      return { ...prev, ...flags, chapters: patched };
+      return { ...prev, ...flags, chapters: patched, updatedAt: Date.now() };
     });
     setSelectedChapter((prev) =>
       prev &&
-      ((updatedChapter.id && prev.id === updatedChapter.id) ||
-        (Number(prev.number) > 0 && Number(prev.number) === Number(updatedChapter.number)))
+      ((cleanUpdatedChapter.id && prev.id === cleanUpdatedChapter.id) ||
+        (Number(prev.number) > 0 && Number(prev.number) === Number(cleanUpdatedChapter.number)))
         ? mergeAudioFields(prev)
         : prev
     );
+
+    try {
+      window.dispatchEvent(
+        new CustomEvent('daotam:chapters-audio-synced', {
+          detail: { novelId, updatedChapters: [cleanUpdatedChapter] },
+        })
+      );
+    } catch {}
   };
 
   const handleBatchChaptersAudioUpdated = (novelId: string, updatedChapters: Chapter[]) => {
     if (!Array.isArray(updatedChapters) || updatedChapters.length === 0) return;
+
+    clearChapterAudioCache(
+      novelId,
+      updatedChapters.map((c) => ({ id: c.id, number: c.number }))
+    );
+
+    const cleanedChapters: Chapter[] = updatedChapters.map((ch) => ({
+      ...ch,
+      audioUrl: typeof ch.audioUrl === 'string' ? ch.audioUrl.trim() || undefined : undefined,
+      audioUrlMale:
+        typeof ch.audioUrlMale === 'string' ? ch.audioUrlMale.trim() || undefined : undefined,
+      audioUrlFemale:
+        typeof ch.audioUrlFemale === 'string' ? ch.audioUrlFemale.trim() || undefined : undefined,
+    }));
+
     const byId = new Map<string, Chapter>();
     const byNumber = new Map<number, Chapter>();
     let batchHasMale = false;
     let batchHasFemale = false;
-    for (const ch of updatedChapters) {
+    for (const ch of cleanedChapters) {
       if (ch.id) byId.set(ch.id, ch);
       if (Number(ch.number) > 0) byNumber.set(Number(ch.number), ch);
       if ((ch.audioUrlMale && ch.audioUrlMale.trim()) || (ch.audioUrl && ch.audioUrl.trim())) {
@@ -2925,7 +2991,10 @@ function DaoTamApp() {
       return {
         hasMaleAudio,
         hasFemaleAudio,
-        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+        hasAudio:
+          chaps.length > 0
+            ? Boolean(hasMaleAudio || hasFemaleAudio)
+            : Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
       };
     };
 
@@ -2944,13 +3013,13 @@ function DaoTamApp() {
       if (!prev || prev.id !== novelId) return prev;
       const patched = patchChaptersList(prev.chapters) || [];
       const flags = deriveBatchFlags(patched, prev);
-      return { ...prev, ...flags, chapters: patched };
+      return { ...prev, ...flags, chapters: patched, updatedAt: Date.now() };
     });
     setEditingNovel((prev) => {
       if (!prev || prev.id !== novelId) return prev;
       const patched = patchChaptersList(prev.chapters) || [];
       const flags = deriveBatchFlags(patched, prev);
-      return { ...prev, ...flags, chapters: patched };
+      return { ...prev, ...flags, chapters: patched, updatedAt: Date.now() };
     });
     setSelectedChapter((prev) => {
       if (!prev) return prev;
@@ -2963,6 +3032,14 @@ function DaoTamApp() {
         audioUrlFemale: matched.audioUrlFemale,
       };
     });
+
+    try {
+      window.dispatchEvent(
+        new CustomEvent('daotam:chapters-audio-synced', {
+          detail: { novelId, updatedChapters: cleanedChapters },
+        })
+      );
+    } catch {}
   };
 
   // Mở modal Báo Cáo Vi Phạm Truyện
@@ -3682,7 +3759,10 @@ function DaoTamApp() {
           <NovelDetail
             novel={selectedNovel}
             savedProgress={(activeUser?.readingHistory || []).find((h) => h.novelId === selectedNovel.id)}
-            isBookmarked={(activeUser?.bookmarks || []).includes(selectedNovel.id)}
+            isBookmarked={
+              (activeUser?.bookmarks || []).includes(selectedNovel.id) ||
+              localSavedIds.includes(selectedNovel.id)
+            }
             onToggleBookmark={handleToggleBookmark}
             onSelectChapter={(novelWithChapters, chapter, autoPlay) => {
               handleSelectChapter(novelWithChapters, chapter, autoPlay);
@@ -3906,6 +3986,10 @@ function DaoTamApp() {
               handleSelectNovel(novel);
             }}
             onRemoveBookmark={handleRemoveBookmark}
+            onOpenLogin={() => {
+              setAuthModalMode('login');
+              setIsAuthModalOpen(true);
+            }}
           />
         ) : activePageView === 'stats' ? (
           /* TRANG THỐNG KÊ SÁNG TÁC & LƯỢT ĐỌC (HÌNH 7 - DẠNG TRANG) */
@@ -3932,6 +4016,10 @@ function DaoTamApp() {
             }}
             onBackToHome={handleReturnToHome}
             onOpenTopUp={() => setIsTopUpOpen(true)}
+            onOpenLogin={() => {
+              setAuthModalMode('login');
+              setIsAuthModalOpen(true);
+            }}
           />
         ) : (
           /* HOME CATALOG SCREEN WITH CONTINUE READING BANNER & TOP 10 HOT TRONG NGÀY RIGHT SIDEBAR */

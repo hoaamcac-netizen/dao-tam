@@ -84,6 +84,7 @@ function probeAudioUrlMetadata(url: string, timeoutMs = 8000): Promise<boolean> 
 
     let settled = false;
     const probe = new Audio();
+    probe.removeAttribute('crossorigin');
     probe.preload = 'metadata';
 
     const finish = (ok: boolean) => {
@@ -185,10 +186,12 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   };
 
   const handleTogglePreview = (voice: VoiceKey, url: string) => {
-    if (!url) return;
+    const cleanUrl = (url || '').trim();
+    if (!cleanUrl) return;
 
     if (!previewAudioRef.current) {
       previewAudioRef.current = new Audio();
+      previewAudioRef.current.removeAttribute('crossorigin');
       previewAudioRef.current.onended = () => setPreviewVoice(null);
       previewAudioRef.current.onerror = () => {
         setPreviewVoice(null);
@@ -199,6 +202,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     }
 
     const audioEl = previewAudioRef.current;
+    audioEl.removeAttribute('crossorigin');
     if (previewVoice === voice) {
       audioEl.pause();
       setPreviewVoice(null);
@@ -207,11 +211,15 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
 
     setErrorMsg(null);
     audioEl.pause();
-    audioEl.src = url;
+    audioEl.src = cleanUrl;
+    audioEl.load();
     audioEl
       .play()
       .then(() => setPreviewVoice(voice))
       .catch((err) => {
+        if (err?.name === 'AbortError' || /AbortError|interrupted/i.test(String(err?.message || ''))) {
+          return;
+        }
         setPreviewVoice(null);
         setErrorMsg(`Không thể nghe thử: ${err?.message || 'Đường dẫn chưa sẵn sàng'}`);
       });

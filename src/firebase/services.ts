@@ -60,6 +60,7 @@ import {
   trimChapterCacheEntries,
   saveNovelsToStorage,
   invalidateNovelsCache,
+  clearChapterAudioCache,
 } from '../utils/safeStorage';
 import { isGeneratedFallbackContent } from '../utils/chapterContentGenerator';
 import { invalidateGlobalBannerCache, type GlobalBannerConfig } from '../components/GlobalBanner';
@@ -512,6 +513,8 @@ export async function recoverLegacyUserDataByEmail(
     let maxFlowers = 0;
     let mergedChapters: Record<string, string[]> = {};
     const mergedFullBooks = new Set<string>();
+    const mergedPurchasedStories: Array<string | Record<string, any>> = [];
+    const seenPurchasedStoryKeys = new Set<string>();
     const mergedPurchases: any[] = [];
     const seenPurchaseKeys = new Set<string>();
 
@@ -530,6 +533,17 @@ export async function recoverLegacyUserDataByEmail(
       if (Array.isArray(raw.unlockedFullBooks)) {
         raw.unlockedFullBooks.forEach((id: any) => {
           if (id) mergedFullBooks.add(String(id));
+        });
+      }
+      if (Array.isArray(raw.purchasedStories)) {
+        raw.purchasedStories.forEach((entry: any) => {
+          const key = typeof entry === 'string'
+            ? entry.trim()
+            : String(entry?.storyId || entry?.novelId || entry?.bookId || entry?.id || '').trim();
+          if (key && !seenPurchasedStoryKeys.has(key)) {
+            seenPurchasedStoryKeys.add(key);
+            mergedPurchasedStories.push(entry);
+          }
         });
       }
       if (Array.isArray(raw.purchases)) {
@@ -551,6 +565,7 @@ export async function recoverLegacyUserDataByEmail(
       flowerBalance: maxFlowers,
       unlockedChapters: mergedChapters,
       unlockedFullBooks: Array.from(mergedFullBooks),
+      purchasedStories: mergedPurchasedStories,
       purchases: mergedPurchases,
     };
   } catch (err) {
@@ -611,6 +626,8 @@ export async function registerWithEmail(
           lastDailyRewardTimestamp: parseNumericValue(existingData.lastDailyRewardTimestamp),
           readingHistory: Array.isArray(existingData.readingHistory) ? existingData.readingHistory : [],
           bookmarks: Array.isArray(existingData.bookmarks) ? existingData.bookmarks : [],
+          purchasedChapters: extractPurchasedChaptersList(existingData),
+          purchasedStories: Array.isArray(existingData.purchasedStories) ? existingData.purchasedStories : [],
           unlockedChapters: extractPurchasedChaptersMap(existingData),
           unlockedFullBooks: Array.isArray(existingData.unlockedFullBooks) ? existingData.unlockedFullBooks : [],
           purchases: Array.isArray(existingData.purchases) ? existingData.purchases : [],
@@ -712,6 +729,8 @@ export async function loginWithEmail(email: string, password: string): Promise<U
           lastDailyRewardTimestamp: parseNumericValue(data.lastDailyRewardTimestamp),
           readingHistory: Array.isArray(data.readingHistory) ? data.readingHistory : [],
           bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
+          purchasedChapters: extractPurchasedChaptersList(data),
+          purchasedStories: Array.isArray(data.purchasedStories) ? data.purchasedStories : [],
           unlockedChapters: extractPurchasedChaptersMap(data),
           unlockedFullBooks: Array.isArray(data.unlockedFullBooks) ? data.unlockedFullBooks : [],
           purchases: Array.isArray(data.purchases) ? data.purchases : [],
@@ -831,6 +850,7 @@ export async function loginDirectlyWithEmail(email: string, displayName?: string
         readingHistory: Array.isArray(data.readingHistory) ? data.readingHistory : [],
         bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
         purchasedChapters: extractPurchasedChaptersList(data),
+        purchasedStories: Array.isArray(data.purchasedStories) ? data.purchasedStories : [],
         unlockedChapters: mergedChapters,
         unlockedFullBooks: mergedFullBooks,
         purchases: mergedPurchases,
@@ -1171,6 +1191,7 @@ export async function syncUserProfile(firebaseUser: FirebaseUser): Promise<UserP
         readingHistory: Array.isArray(data.readingHistory) ? data.readingHistory : [],
         bookmarks: Array.isArray(data.bookmarks) ? data.bookmarks : [],
         purchasedChapters: extractPurchasedChaptersList(data),
+        purchasedStories: Array.isArray(data.purchasedStories) ? data.purchasedStories : [],
         unlockedChapters: mergedUnlockedChapters,
         unlockedFullBooks: mergedFullBooks,
         purchases: mergedPurchases,
@@ -3937,7 +3958,7 @@ export async function toggleHideChapterInFirestore(
   const patch = { isHidden, updatedAt: Date.now() };
 
   await setDoc(doc(db, 'novels', novelId, 'chapters', chNumId), patch, { merge: true });
-  safeRemoveItem(`chapter_full_${novelId}_${chapterNumber}`);
+  clearChapterAudioCache(novelId, [{ number: chapterNumber }]);
 }
 
 /**
@@ -4045,13 +4066,8 @@ export async function updateChapterAudioUrlInFirestore(
         await setDoc(novelRef, nextFlags, { merge: true });
       }
     }
-    // Xóa cache chi tiết chương này để lần mở tới nhận link MP3 mới nhất
-    if (chapter.number !== undefined) {
-      safeRemoveItem(`chapter_full_${novelId}_${chapter.number}`);
-    }
-    if (chapter.id) {
-      safeRemoveItem(`chapter_full_${novelId}_${chapter.id}`);
-    }
+    // Xóa cache chi tiết chương này và cache danh sách truyện để trang đọc nhận link MP3 mới nhất ngay lập tức
+    clearChapterAudioCache(novelId, [{ id: chapter.id, number: chapter.number }]);
   } catch (err) {
     console.warn('Lỗi đồng bộ liên kết audio lên mục lục truyện:', err);
   }
@@ -4208,15 +4224,11 @@ export async function batchUpdateChapterAudioLinksInFirestore(
     }
   }
 
-  // Xóa cache chi tiết của các chương vừa đổi link để trình phát đọc link mới
-  for (const item of validItems) {
-    if (item.chapter.number !== undefined) {
-      safeRemoveItem(`chapter_full_${novelId}_${item.chapter.number}`);
-    }
-    if (item.chapter.id) {
-      safeRemoveItem(`chapter_full_${novelId}_${item.chapter.id}`);
-    }
-  }
+  // Xóa cache chi tiết của các chương vừa đổi link & làm mới cache truyện để trình phát đọc link mới ngay lập tức
+  clearChapterAudioCache(
+    novelId,
+    validItems.map((item) => ({ id: item.chapter.id, number: item.chapter.number }))
+  );
 }
 
 /**
@@ -6580,6 +6592,377 @@ export interface PurchasedStorySummary {
   lastPurchasedAt: number;
   purchaseBadgeType: 'full_book' | 'single_chapters';
   novel?: Novel;
+}
+
+export interface LocalSavedNovelRecord {
+  storyId: string;
+  storyTitle?: string;
+  storyAuthor?: string;
+  storyCoverImage?: string;
+  storySlug?: string;
+  savedAt?: number;
+}
+
+const LOCAL_SAVED_NOVELS_KEY = 'daotam_saved_novels';
+const LOCAL_BOOKMARKS_LEGACY_KEY = 'daotam_bookmarks';
+
+/**
+ * Đọc danh sách ID / metadata truyện đã lưu cục bộ từ localStorage (0 Reads)
+ */
+export function readLocalSavedNovelsFromStorage(): LocalSavedNovelRecord[] {
+  const seen = new Map<string, LocalSavedNovelRecord>();
+  const keys = [LOCAL_SAVED_NOVELS_KEY, LOCAL_BOOKMARKS_LEGACY_KEY];
+
+  for (const key of keys) {
+    const raw = safeGetItem(key);
+    if (!raw) continue;
+    const parsed = safeJsonParse<any[]>(raw, []);
+    if (!Array.isArray(parsed)) continue;
+
+    for (const item of parsed) {
+      if (typeof item === 'string' || typeof item === 'number') {
+        const id = String(item).trim();
+        if (id && !seen.has(id)) {
+          seen.set(id, { storyId: id });
+        }
+      } else if (item && typeof item === 'object') {
+        const id = String(item.storyId || item.novelId || item.id || '').trim();
+        if (id && !seen.has(id)) {
+          seen.set(id, {
+            storyId: id,
+            storyTitle: item.storyTitle || item.title,
+            storyAuthor: item.storyAuthor || item.author,
+            storyCoverImage: item.storyCoverImage || item.coverImage,
+            storySlug: item.storySlug || item.slug,
+            savedAt: Number(item.savedAt || item.updatedAt || 0) || undefined,
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(seen.values());
+}
+
+/**
+ * Lưu danh sách ID truyện đã lưu cục bộ vào localStorage (0 Writes Firestore)
+ */
+export function saveLocalSavedStoryIds(storyIds: string[]): void {
+  const uniqueIds = Array.from(
+    new Set((Array.isArray(storyIds) ? storyIds : []).map((id) => String(id || '').trim()).filter(Boolean))
+  );
+  safeSetItem(LOCAL_SAVED_NOVELS_KEY, JSON.stringify(uniqueIds));
+}
+
+/**
+ * Gom nhóm toàn bộ truyện đã mua từ dữ liệu tài khoản users/{uid} đã tải sẵn
+ * VÀ khớp ID với danh sách truyện đã lưu trong cache (0 Firestore Reads).
+ */
+export function aggregateUserPurchasedNovelsFromCache(
+  user: UserProfile | null | undefined,
+  cachedNovels: Novel[] = []
+): PurchasedStorySummary[] {
+  if (!user || !user.isLoggedIn || !user.id || user.id === 'guest') return [];
+
+  const existingNovelsMap = new Map<string, Novel>();
+  const existingNovelsLowerMap = new Map<string, Novel>();
+  const registerNovelToLookup = (n: Novel) => {
+    if (!n) return;
+    if (n.id) {
+      existingNovelsMap.set(n.id, n);
+      existingNovelsLowerMap.set(String(n.id).trim().toLowerCase(), n);
+    }
+    if (n.slug) {
+      existingNovelsMap.set(n.slug, n);
+      existingNovelsLowerMap.set(String(n.slug).trim().toLowerCase(), n);
+    }
+  };
+
+  // Fallback đọc danh sách truyện từ cache localStorage (0 Reads)
+  const localCachedRaw = safeGetItem('dao_tam_novels');
+  const localCachedNovels = localCachedRaw ? safeJsonParse<Novel[]>(localCachedRaw, []) : [];
+  if (Array.isArray(localCachedNovels)) {
+    localCachedNovels.forEach(registerNovelToLookup);
+  }
+  if (Array.isArray(cachedNovels)) {
+    cachedNovels.forEach(registerNovelToLookup);
+  }
+
+  const findCachedNovel = (key: string): Novel | undefined => {
+    const clean = String(key || '').trim();
+    if (!clean) return undefined;
+    return existingNovelsMap.get(clean) || existingNovelsLowerMap.get(clean.toLowerCase());
+  };
+
+  const rawPurchases: any[] = Array.isArray(user.purchases) ? [...user.purchases] : [];
+  const userUnlockedFullBooks: string[] = Array.isArray(user.unlockedFullBooks)
+    ? user.unlockedFullBooks.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+
+  const userUnlockedChapters = extractPurchasedChaptersMap({
+    purchasedChapters: user.purchasedChapters,
+    unlockedChapters: user.unlockedChapters,
+  });
+
+  const legacyGrantedFullIds = new Set<string>();
+  const legacyEntries = userUnlockedChapters['__legacy__'] || [];
+  delete userUnlockedChapters['__legacy__'];
+
+  const storyIdsSet = new Set<string>();
+  const purchasedStoriesMetaMap = new Map<
+    string,
+    {
+      title?: string;
+      author?: string;
+      coverImage?: string;
+      slug?: string;
+      isFull?: boolean;
+      purchasedAt?: number;
+      pricePaid?: number;
+      chapterIds: string[];
+      chapterNumbers: number[];
+    }
+  >();
+
+  const toCanonicalStoryId = (rawId: string): string => {
+    const clean = String(rawId || '').trim();
+    if (!clean) return '';
+    const matched = findCachedNovel(clean);
+    return matched?.id || clean;
+  };
+
+  rawPurchases.forEach((p) => {
+    const rawId = p?.storyId || p?.novelId || p?.bookId;
+    const cId = toCanonicalStoryId(String(rawId || ''));
+    if (cId) storyIdsSet.add(cId);
+  });
+
+  userUnlockedFullBooks.forEach((rawId) => {
+    const cId = toCanonicalStoryId(rawId);
+    if (cId) storyIdsSet.add(cId);
+  });
+
+  const normalizedUnlockedByCanonical: Record<string, string[]> = {};
+  Object.entries(userUnlockedChapters || {}).forEach(([rawId, chaps]) => {
+    if (!Array.isArray(chaps) || chaps.length === 0) return;
+    const cId = toCanonicalStoryId(rawId);
+    if (!cId) return;
+    storyIdsSet.add(cId);
+    const prev = normalizedUnlockedByCanonical[cId] || [];
+    normalizedUnlockedByCanonical[cId] = Array.from(new Set([...prev, ...chaps.map((c) => String(c))]));
+  });
+
+  for (const entry of legacyEntries) {
+    const cleanEntry = String(entry || '').trim();
+    if (!cleanEntry) continue;
+    const cId = toCanonicalStoryId(cleanEntry);
+    if (!cId) continue;
+    storyIdsSet.add(cId);
+    legacyGrantedFullIds.add(cId);
+  }
+
+  // Hỗ trợ thêm trường purchasedStories nếu có trên users/{uid}
+  const rawPurchasedStories = Array.isArray((user as any).purchasedStories)
+    ? ((user as any).purchasedStories as Array<string | Record<string, any>>)
+    : [];
+
+  for (const item of rawPurchasedStories) {
+    if (typeof item === 'string' || typeof item === 'number') {
+      const cId = toCanonicalStoryId(String(item));
+      if (cId) storyIdsSet.add(cId);
+    } else if (item && typeof item === 'object') {
+      const rawId = item.storyId || item.novelId || item.bookId || item.id;
+      const cId = toCanonicalStoryId(String(rawId || ''));
+      if (!cId) continue;
+      storyIdsSet.add(cId);
+      const existingMeta = purchasedStoriesMetaMap.get(cId) || {
+        chapterIds: [],
+        chapterNumbers: [],
+      };
+      const chIds = Array.isArray(item.purchasedChapterIds)
+        ? item.purchasedChapterIds.map((c: any) => String(c))
+        : item.chapterId
+        ? [String(item.chapterId)]
+        : [];
+      const chNums = Array.isArray(item.purchasedChapterNumbers)
+        ? item.purchasedChapterNumbers.map((n: any) => Number(n)).filter((n: number) => !Number.isNaN(n))
+        : typeof item.chapterNumber === 'number'
+        ? [item.chapterNumber]
+        : [];
+      purchasedStoriesMetaMap.set(cId, {
+        title: existingMeta.title || item.storyTitle || item.novelTitle || item.title,
+        author: existingMeta.author || item.storyAuthor || item.authorName || item.author,
+        coverImage: existingMeta.coverImage || item.storyCoverImage || item.coverImage,
+        slug: existingMeta.slug || item.storySlug || item.slug,
+        isFull:
+          Boolean(existingMeta.isFull) ||
+          Boolean(item.isFullStoryBought) ||
+          item.type === 'full_book',
+        purchasedAt: Math.max(
+          existingMeta.purchasedAt || 0,
+          Number(item.purchasedAt || item.updatedAt || item.createdAt || 0)
+        ),
+        pricePaid: (existingMeta.pricePaid || 0) + (Number(item.pricePaid || item.totalSpentXu || 0) || 0),
+        chapterIds: Array.from(new Set([...existingMeta.chapterIds, ...chIds])),
+        chapterNumbers: Array.from(new Set([...existingMeta.chapterNumbers, ...chNums])),
+      });
+    }
+  }
+
+  if (storyIdsSet.size === 0) return [];
+
+  const summaries: PurchasedStorySummary[] = [];
+
+  for (const storyId of storyIdsSet) {
+    const novel = findCachedNovel(storyId);
+    const storyMeta = purchasedStoriesMetaMap.get(storyId);
+    const storyPurchases = rawPurchases.filter((p) => {
+      const pRaw = String(p?.storyId || p?.novelId || p?.bookId || '').trim();
+      if (!pRaw) return false;
+      return (
+        pRaw === storyId ||
+        toCanonicalStoryId(pRaw) === storyId ||
+        (novel?.slug ? pRaw === novel.slug : false)
+      );
+    });
+
+    const unlockedListForCheck = normalizedUnlockedByCanonical[storyId] || [];
+
+    const isFullStoryBought =
+      legacyGrantedFullIds.has(storyId) ||
+      Boolean(storyMeta?.isFull) ||
+      unlockedListForCheck.includes('all') ||
+      unlockedListForCheck.includes('*') ||
+      userUnlockedFullBooks.some((id) => id === storyId || toCanonicalStoryId(id) === storyId || (novel?.slug ? id === novel.slug : false)) ||
+      storyPurchases.some((p) => p?.type === 'full_book' || p?.isFullStoryBought === true);
+
+    const totalChapters =
+      novel?.totalChapters ||
+      (Array.isArray(novel?.chapters) ? novel.chapters.length : 0) ||
+      storyPurchases.length ||
+      storyMeta?.chapterIds.length ||
+      1;
+
+    const freeChaptersCount = totalChapters >= 200 ? 50 : 30;
+    let totalVipChapters = Math.max(0, totalChapters - freeChaptersCount);
+
+    if (typeof (novel as any)?.totalVipChapters === 'number' && (novel as any).totalVipChapters > 0) {
+      totalVipChapters = (novel as any).totalVipChapters;
+    } else if (Array.isArray(novel?.chapters)) {
+      const explicitVips = novel.chapters.filter(
+        (c) => c.isVip || (typeof c.number === 'number' && c.number > freeChaptersCount)
+      );
+      if (explicitVips.length > 0) {
+        totalVipChapters = explicitVips.length;
+      }
+    }
+
+    const purchasedChapterIdsSet = new Set<string>(storyMeta?.chapterIds || []);
+    const purchasedChapterNumsSet = new Set<number>(storyMeta?.chapterNumbers || []);
+    const purchasedVipChaptersSet = new Set<number | string>();
+
+    (storyMeta?.chapterNumbers || []).forEach((num) => {
+      if (num > freeChaptersCount) {
+        purchasedVipChaptersSet.add(num);
+      }
+    });
+
+    storyPurchases.forEach((p) => {
+      if (p.chapterId) purchasedChapterIdsSet.add(String(p.chapterId));
+      if (typeof p.chapterNumber === 'number') {
+        purchasedChapterNumsSet.add(p.chapterNumber);
+        if (p.chapterNumber > freeChaptersCount) {
+          purchasedVipChaptersSet.add(p.chapterNumber);
+        }
+      } else if (p.chapterId) {
+        const numMatch = String(p.chapterId).match(/(\d+)/);
+        if (numMatch) {
+          const num = parseInt(numMatch[1], 10);
+          purchasedChapterNumsSet.add(num);
+          if (num > freeChaptersCount) {
+            purchasedVipChaptersSet.add(num);
+          }
+        } else {
+          purchasedVipChaptersSet.add(String(p.chapterId));
+        }
+      }
+    });
+
+    unlockedListForCheck.forEach((chId) => {
+      if (chId === 'all' || chId === '*') return;
+      purchasedChapterIdsSet.add(chId);
+      const numMatch = chId.match(/(\d+)/);
+      if (numMatch) {
+        const num = parseInt(numMatch[1], 10);
+        purchasedChapterNumsSet.add(num);
+        if (num > freeChaptersCount) {
+          purchasedVipChaptersSet.add(num);
+        }
+      } else {
+        purchasedVipChaptersSet.add(chId);
+      }
+    });
+
+    const totalSpentXu =
+      storyPurchases.reduce((acc, p) => acc + (Number(p.pricePaid) || 0), 0) ||
+      (storyMeta?.pricePaid || 0);
+    const lastPurchasedAt =
+      Math.max(
+        storyPurchases.reduce(
+          (max, p) => Math.max(max, Number(p.purchasedAt || p.createdAt || 0)),
+          0
+        ),
+        storyMeta?.purchasedAt || 0
+      ) || 0;
+
+    const purchasedVipChaptersCount = Math.max(
+      purchasedVipChaptersSet.size,
+      purchasedChapterIdsSet.size
+    );
+
+    const isCompletedVip =
+      isFullStoryBought ||
+      (totalVipChapters > 0 && purchasedVipChaptersCount >= totalVipChapters);
+
+    const purchaseBadgeType: 'full_book' | 'single_chapters' = isCompletedVip
+      ? 'full_book'
+      : 'single_chapters';
+
+    summaries.push({
+      storyId,
+      storyTitle:
+        novel?.title ||
+        storyPurchases[0]?.novelTitle ||
+        storyMeta?.title ||
+        `Bộ truyện #${storyId}`,
+      storyAuthor:
+        novel?.author ||
+        storyPurchases[0]?.authorName ||
+        storyMeta?.author ||
+        'Đang cập nhật',
+      storyEditor: novel?.editor,
+      storyCoverImage:
+        novel?.coverImage ||
+        storyMeta?.coverImage ||
+        'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=300&q=80',
+      storySlug: novel?.slug || storyMeta?.slug,
+      storyMainCategory: novel?.mainCategory,
+      totalChapters,
+      freeChaptersCount,
+      totalVipChapters,
+      isFullStoryBought,
+      purchasedChapterIds: Array.from(purchasedChapterIdsSet),
+      purchasedChapterNumbers: Array.from(purchasedChapterNumsSet),
+      purchasedVipChaptersCount,
+      totalSpentXu,
+      lastPurchasedAt,
+      purchaseBadgeType,
+      novel,
+    });
+  }
+
+  summaries.sort((a, b) => b.lastPurchasedAt - a.lastPurchasedAt);
+  return summaries;
 }
 
 /**

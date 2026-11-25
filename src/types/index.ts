@@ -296,6 +296,7 @@ export interface UserProfile {
   interestedNovels?: string[]; // Mảng ID các truyện được quan tâm (Mục 2)
   followingNovels?: string[]; // Mảng ID các truyện đang theo dõi (Mục 3)
   purchasedChapters?: string[] | Record<string, string[]>;
+  purchasedStories?: Array<string | Record<string, any>>;
   unlockedChapters: Record<string, string[]>;
   unlockedFullBooks: string[];
   purchases: PurchaseHistoryItem[];

@@ -1,25 +1,24 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  BookOpen, 
-  Crown, 
-  Sparkles, 
-  Search, 
-  ArrowLeft, 
-  Coins, 
-  Layers, 
-  CheckCircle2, 
-  Clock, 
-  ExternalLink,
-  Loader2,
+import React, { useState, useMemo } from 'react';
+import {
+  BookOpen,
+  Crown,
+  Sparkles,
+  Search,
+  ArrowLeft,
+  Coins,
   Bookmark,
-  Library
+  Library,
+  CheckCircle2,
+  LogIn,
 } from 'lucide-react';
 import { Novel, UserProfile } from '../types';
-import { 
-  fetchUserPurchasedNovelsAggregated, 
-  PurchasedStorySummary 
+import {
+  aggregateUserPurchasedNovelsFromCache,
+  readLocalSavedNovelsFromStorage,
+  PurchasedStorySummary,
 } from '../firebase/services';
 import { formatXu } from '../utils/rulesAndVoices';
+import { safeGetItem, safeJsonParse } from '../utils/safeStorage';
 
 interface UserPurchasedNovelsPageProps {
   user: UserProfile;
@@ -27,22 +26,26 @@ interface UserPurchasedNovelsPageProps {
   onSelectNovel: (novel: Novel) => void;
   onBackToHome: () => void;
   onOpenTopUp?: () => void;
+  onOpenLogin?: () => void;
 }
+
+interface LibraryCardItem extends PurchasedStorySummary {
+  isPurchased: boolean;
+  isSavedLocal: boolean;
+}
+
+const DEFAULT_COVER =
+  'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=300&q=80';
 
 /**
  * ==============================================================================
  * TRANG TỦ TRUYỆN CỦA BẠN (ROUTE: /tu-truyen-cua-ban)
  * ==============================================================================
- * - BẮT BUỘC là Trang (Page) riêng biệt, TUYỆT ĐỐI KHÔNG dùng giao diện Popup/Modal.
- * - Retroactive Aggregation: Gom nhóm tất cả giao dịch mua chương / mua trọn bộ từ Firestore.
- * - FIX LOGIC CHƯƠNG VIP & PHÂN LOẠI NHÃN:
- *   + Trường hợp 1: User đã mua gói trọn bộ (isFullStoryBought == true).
- *   + Trường hợp 2: User mua gom từng chương lẻ, và tổng số chương lẻ đã mua BẰNG VỚI
- *     tổng số chương VIP (chương tính phí) của bộ truyện đó (purchasedChapters.length === story.totalVipChapters
- *     hoặc tổng số chương - số chương free). Tuyệt đối không đếm chương free vào điều kiện này.
- *     => Cả 2 trường hợp này đều hiển thị nhãn: 'Mua Trọn Bộ' (Text vàng, nền đỏ/hồng pastel).
- *   + Trường hợp 3: User mua chương lẻ nhưng chưa mua hết toàn bộ số chương VIP
- *     => Hiển thị nhãn: 'Mua Chương Lẻ' (dùng màu xám nhạt hoặc xanh pastel).
+ * - Kết hợp danh sách truyện lưu cục bộ VỚI toàn bộ truyện đã mua chương VIP / trọn bộ
+ *   lấy trực tiếp từ dữ liệu tài khoản đã tải sẵn (0 lượt đọc thêm).
+ * - Khớp ID với danh sách truyện đã lưu trong bộ nhớ đệm để hiển thị đầy đủ ảnh bìa,
+ *   tên truyện và nhãn "Đã mua".
+ * - Khi chưa đăng nhập, hiển thị thông báo rõ ràng kèm nút "Đăng nhập ngay".
  * ==============================================================================
  */
 export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = ({
@@ -51,43 +54,126 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
   onSelectNovel,
   onBackToHome,
   onOpenTopUp,
+  onOpenLogin,
 }) => {
-  const [purchasedStories, setPurchasedStories] = useState<PurchasedStorySummary[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [filterType, setFilterType] = useState<'all' | 'full_book' | 'single_chapters'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'full_book' | 'single_chapters' | 'saved'>('all');
 
-  // Nạp và tổng hợp dữ liệu giao dịch từ Firestore (Retroactive Aggregation)
-  useEffect(() => {
-    let isMounted = true;
-    async function loadData() {
-      if (!user?.id || user.id === 'guest') {
-        setIsLoading(false);
-        return;
+  const isLoggedIn = Boolean(user?.isLoggedIn && user?.id && user.id !== 'guest');
+
+  // Tổng hợp trực tiếp từ dữ liệu tài khoản đã nạp + danh sách lưu cục bộ (0 lượt đọc thêm)
+  const libraryItems = useMemo<LibraryCardItem[]>(() => {
+    // 1. Kho tra cứu truyện từ props + bộ nhớ đệm cục bộ
+    const lookup = new Map<string, Novel>();
+    const lowerLookup = new Map<string, Novel>();
+    const registerNovel = (n: Novel) => {
+      if (!n) return;
+      if (n.id) {
+        lookup.set(n.id, n);
+        lowerLookup.set(String(n.id).trim().toLowerCase(), n);
       }
-      setIsLoading(true);
-      try {
-        const summaries = await fetchUserPurchasedNovelsAggregated(user.id, novels);
-        if (isMounted) {
-          setPurchasedStories(Array.isArray(summaries) ? summaries : []);
-        }
-      } catch (err) {
-        console.warn('Lỗi khi nạp tủ truyện đã mua:', err);
-      } finally {
-        if (isMounted) setIsLoading(false);
+      if (n.slug) {
+        lookup.set(n.slug, n);
+        lowerLookup.set(String(n.slug).trim().toLowerCase(), n);
+      }
+    };
+
+    const cachedRaw = safeGetItem('dao_tam_novels');
+    const cachedList = cachedRaw ? safeJsonParse<Novel[]>(cachedRaw, []) : [];
+    if (Array.isArray(cachedList)) cachedList.forEach(registerNovel);
+    if (Array.isArray(novels)) novels.forEach(registerNovel);
+
+    const findCachedNovel = (idOrSlug: string): Novel | undefined => {
+      const clean = String(idOrSlug || '').trim();
+      if (!clean) return undefined;
+      return lookup.get(clean) || lowerLookup.get(clean.toLowerCase());
+    };
+
+    // 2. Lấy toàn bộ truyện đã mua từ dữ liệu tài khoản (purchasedChapters / unlockedChapters / unlockedFullBooks / purchases / purchasedStories)
+    const purchasedSummaries = isLoggedIn
+      ? aggregateUserPurchasedNovelsFromCache(user, novels)
+      : [];
+
+    const mergedMap = new Map<string, LibraryCardItem>();
+    for (const item of purchasedSummaries) {
+      mergedMap.set(item.storyId, {
+        ...item,
+        isPurchased: true,
+        isSavedLocal: false,
+      });
+    }
+
+    // 3. Kết hợp danh sách truyện lưu cục bộ (localStorage) + bookmarks trên tài khoản
+    const localSavedEntries = readLocalSavedNovelsFromStorage();
+    const accountBookmarkIds = isLoggedIn && Array.isArray(user?.bookmarks) ? user.bookmarks : [];
+
+    for (const bId of accountBookmarkIds) {
+      const cleanId = String(bId || '').trim();
+      if (!cleanId) continue;
+      if (!localSavedEntries.some((e) => e.storyId === cleanId)) {
+        localSavedEntries.push({ storyId: cleanId });
       }
     }
 
-    loadData();
-    return () => {
-      isMounted = false;
-    };
-  }, [user?.id, user?.purchases, user?.unlockedFullBooks, user?.unlockedChapters, novels]);
+    for (const localEntry of localSavedEntries) {
+      const matchedNovel = findCachedNovel(localEntry.storyId);
+      const canonicalId = matchedNovel?.id || localEntry.storyId;
+      if (!canonicalId) continue;
+
+      const existing = mergedMap.get(canonicalId);
+      if (existing) {
+        existing.isSavedLocal = true;
+        continue;
+      }
+
+      const totalChapters =
+        matchedNovel?.totalChapters ||
+        (Array.isArray(matchedNovel?.chapters) ? matchedNovel.chapters.length : 0) ||
+        0;
+
+      mergedMap.set(canonicalId, {
+        storyId: canonicalId,
+        storyTitle: matchedNovel?.title || localEntry.storyTitle || `Bộ truyện #${canonicalId}`,
+        storyAuthor: matchedNovel?.author || localEntry.storyAuthor || 'Đang cập nhật',
+        storyEditor: matchedNovel?.editor,
+        storyCoverImage: matchedNovel?.coverImage || localEntry.storyCoverImage || DEFAULT_COVER,
+        storySlug: matchedNovel?.slug || localEntry.storySlug,
+        storyMainCategory: matchedNovel?.mainCategory,
+        totalChapters,
+        freeChaptersCount: totalChapters >= 200 ? 50 : 30,
+        totalVipChapters: 0,
+        isFullStoryBought: false,
+        purchasedChapterIds: [],
+        purchasedChapterNumbers: [],
+        purchasedVipChaptersCount: 0,
+        totalSpentXu: 0,
+        lastPurchasedAt: localEntry.savedAt || 0,
+        purchaseBadgeType: 'single_chapters',
+        novel: matchedNovel,
+        isPurchased: false,
+        isSavedLocal: true,
+      });
+    }
+
+    return Array.from(mergedMap.values()).sort((a, b) => {
+      if (a.isPurchased !== b.isPurchased) return a.isPurchased ? -1 : 1;
+      return (b.lastPurchasedAt || 0) - (a.lastPurchasedAt || 0);
+    });
+  }, [
+    isLoggedIn,
+    user?.id,
+    user?.purchases,
+    user?.unlockedFullBooks,
+    user?.unlockedChapters,
+    user?.purchasedChapters,
+    (user as any)?.purchasedStories,
+    user?.bookmarks,
+    novels,
+  ]);
 
   // Bộ lọc tìm kiếm & phân loại
   const filteredStories = useMemo(() => {
-    return (purchasedStories || []).filter((item) => {
-      // 1. Text Search
+    return (libraryItems || []).filter((item) => {
       if (searchTerm.trim()) {
         const term = searchTerm.toLowerCase();
         const match =
@@ -97,74 +183,116 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
         if (!match) return false;
       }
 
-      // 2. Filter Type
       if (filterType === 'full_book') {
-        return item.purchaseBadgeType === 'full_book';
+        return item.isPurchased && item.purchaseBadgeType === 'full_book';
       }
       if (filterType === 'single_chapters') {
-        return item.purchaseBadgeType === 'single_chapters';
+        return item.isPurchased && item.purchaseBadgeType === 'single_chapters';
+      }
+      if (filterType === 'saved') {
+        return !item.isPurchased && item.isSavedLocal;
       }
       return true;
     });
-  }, [purchasedStories, searchTerm, filterType]);
+  }, [libraryItems, searchTerm, filterType]);
 
   // Thống kê tổng hợp
   const stats = useMemo(() => {
-    const safePurchased = purchasedStories || [];
-    const totalStories = safePurchased?.length || 0;
-    const fullBookCount = safePurchased.filter((s) => s.purchaseBadgeType === 'full_book')?.length || 0;
-    const singleChaptersCount = safePurchased.filter((s) => s.purchaseBadgeType === 'single_chapters')?.length || 0;
-    const totalXuSpent = safePurchased.reduce((acc, s) => acc + s.totalSpentXu, 0);
-    return { totalStories, fullBookCount, singleChaptersCount, totalXuSpent };
-  }, [purchasedStories]);
+    const safeList = libraryItems || [];
+    const purchasedList = safeList.filter((s) => s.isPurchased);
+    const totalPurchased = purchasedList.length;
+    const fullBookCount = purchasedList.filter((s) => s.purchaseBadgeType === 'full_book').length;
+    const singleChaptersCount = purchasedList.filter((s) => s.purchaseBadgeType === 'single_chapters').length;
+    const savedOnlyCount = safeList.filter((s) => !s.isPurchased && s.isSavedLocal).length;
+    return { totalPurchased, fullBookCount, singleChaptersCount, savedOnlyCount };
+  }, [libraryItems]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-pink-50/70 via-slate-50 to-pink-50/40 dark:from-[#180a14] dark:via-slate-950 dark:to-[#180a14] text-slate-900 dark:text-slate-100 transition-colors pb-16">
-      
+    <div className="min-h-screen overflow-x-hidden bg-gradient-to-b from-pink-50/70 via-slate-50 to-pink-50/40 dark:from-[#180a14] dark:via-slate-950 dark:to-[#180a14] text-slate-900 dark:text-slate-100 transition-colors pb-16">
       {/* 1. Header Trang Tủ truyện của bạn */}
       <div className="sticky top-0 z-30 backdrop-blur-md bg-white/90 dark:bg-slate-950/90 border-b border-pink-100 dark:border-pink-950/60 shadow-xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={onBackToHome}
-              className="p-2 rounded-xl bg-pink-50 hover:bg-pink-100 dark:bg-pink-950/40 dark:hover:bg-pink-900/60 text-pink-700 dark:text-pink-300 border border-pink-200 dark:border-pink-800 transition cursor-pointer"
+              className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl bg-pink-50 hover:bg-pink-100 dark:bg-pink-950/40 dark:hover:bg-pink-900/60 text-pink-700 dark:text-pink-300 border border-pink-200 dark:border-pink-800 transition cursor-pointer shrink-0"
               title="Quay lại Trang Chủ"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
-            <div>
-              <h1 className="text-xl sm:text-2xl font-black text-black dark:text-black title-tu-truyen flex items-center gap-2">
-                <Library className="w-6 h-6 text-pink-600 shrink-0" />
-                <span className="text-black dark:text-black font-black">Tủ truyện của bạn</span>
+            <div className="min-w-0">
+              <h1 className="text-lg sm:text-2xl font-black text-black dark:text-black title-tu-truyen flex items-center gap-2 truncate">
+                <Library className="w-5 h-5 sm:w-6 sm:h-6 text-pink-600 shrink-0" />
+                <span className="text-black dark:text-black font-black truncate">Tủ truyện của bạn</span>
               </h1>
-              <p className="text-xs text-slate-900 dark:text-slate-800 font-medium">
-                Tất cả tác phẩm bạn đã sở hữu trọn bộ hoặc mở khóa chương VIP
+              <p className="text-xs text-slate-700 dark:text-slate-300 font-medium line-clamp-1">
+                Tất cả tác phẩm bạn đã sở hữu trọn bộ, mở khóa chương VIP hoặc lưu đọc lại
               </p>
             </div>
           </div>
 
-          {/* Số dư ví Xu & Nút Nạp Xu */}
-          <div className="flex items-center gap-2 self-end sm:self-auto">
-            <div className="badge-vi-cua-ban flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-pink-100/90 dark:bg-pink-100 border border-pink-200 dark:border-pink-300 text-xs font-bold text-black dark:text-black">
-              <Coins className="w-3.5 h-3.5 text-amber-500" />
-              <span className="text-black dark:text-black font-bold">Ví của bạn: {formatXu(user?.xuBalance || 0)} Xu</span>
-            </div>
-            {onOpenTopUp && (
-              <button
-                type="button"
-                onClick={onOpenTopUp}
-                className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white text-xs font-bold shadow-xs hover:shadow-md transition cursor-pointer"
-              >
-                + Nạp Xu
-              </button>
+          {/* Số dư ví Xu & Nút Nạp Xu / Đăng nhập */}
+          <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+            {isLoggedIn ? (
+              <>
+                <div className="badge-vi-cua-ban flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-xl bg-pink-100/90 dark:bg-pink-100 border border-pink-200 dark:border-pink-300 text-xs font-bold text-black dark:text-black">
+                  <Coins className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span className="text-black dark:text-black font-bold">
+                    Ví của bạn: {formatXu(user?.xuBalance || 0)} Xu
+                  </span>
+                </div>
+                {onOpenTopUp && (
+                  <button
+                    type="button"
+                    onClick={onOpenTopUp}
+                    className="px-3.5 py-2 min-h-[40px] rounded-xl bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white text-xs font-bold shadow-xs hover:shadow-md transition cursor-pointer"
+                  >
+                    + Nạp Xu
+                  </button>
+                )}
+              </>
+            ) : (
+              onOpenLogin && (
+                <button
+                  type="button"
+                  onClick={onOpenLogin}
+                  className="px-4 py-2 min-h-[44px] rounded-xl bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white text-xs font-bold shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                >
+                  <LogIn className="w-4 h-4 shrink-0" />
+                  <span>Đăng nhập ngay</span>
+                </button>
+              )
             )}
           </div>
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
-        
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-5 sm:pt-6 space-y-5 sm:space-y-6">
+        {/* Banner nhắc đăng nhập khi chưa đăng nhập nhưng đã có truyện lưu cục bộ */}
+        {!isLoggedIn && (libraryItems?.length || 0) > 0 && (
+          <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/50 text-amber-600 dark:text-amber-300 flex items-center justify-center shrink-0">
+                <LogIn className="w-5 h-5" />
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-amber-900 dark:text-amber-200 leading-relaxed">
+                Vui lòng đăng nhập tài khoản để đồng bộ lại toàn bộ truyện và chương VIP bạn đã mua.
+              </p>
+            </div>
+            {onOpenLogin && (
+              <button
+                type="button"
+                onClick={onOpenLogin}
+                className="px-4 py-2.5 min-h-[44px] rounded-xl bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white text-xs font-bold shadow-sm transition cursor-pointer shrink-0 flex items-center justify-center gap-1.5"
+              >
+                <LogIn className="w-4 h-4" />
+                <span>Đăng nhập ngay</span>
+              </button>
+            )}
+          </div>
+        )}
+
         {/* 2. Hàng Thống kê tổng quan */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
           <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs">
@@ -173,7 +301,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
               <span>Tổng Truyện Đã Mua</span>
             </div>
             <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-slate-100">
-              {stats.totalStories} <span className="text-xs font-bold text-slate-400">bộ</span>
+              {stats.totalPurchased} <span className="text-xs font-bold text-slate-400">bộ</span>
             </div>
           </div>
 
@@ -199,25 +327,26 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
         </div>
 
         {/* 3. Thanh công cụ tìm kiếm và lọc phân loại */}
-        <div className="bg-white dark:bg-slate-900 border border-pink-100 dark:border-slate-800 rounded-2xl p-4 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-          {/* Ô tìm kiếm */}
+        <div className="bg-white dark:bg-slate-900 border border-pink-100 dark:border-slate-800 rounded-2xl p-3.5 sm:p-4 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
           <div className="relative flex-1 max-w-md">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder="Tìm kiếm tác phẩm đã mua..."
+              placeholder="Tìm kiếm tác phẩm trong tủ truyện..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 rounded-xl border border-pink-200/80 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800 text-xs focus:outline-none focus:ring-2 focus:ring-pink-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
+              className="w-full min-h-[42px] pl-9 pr-4 py-2 rounded-xl border border-pink-200/80 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800 text-xs focus:outline-none focus:ring-2 focus:ring-pink-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
             />
           </div>
 
-          {/* Nút lọc phân loại */}
           <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap py-0.5 scrollbar-none">
             {[
-              { id: 'all', label: 'Tất cả', count: purchasedStories?.length || 0 },
+              { id: 'all', label: 'Tất cả', count: libraryItems?.length || 0 },
               { id: 'full_book', label: 'Mua Trọn Bộ', count: stats.fullBookCount },
               { id: 'single_chapters', label: 'Mua Chương Lẻ', count: stats.singleChaptersCount },
+              ...(stats.savedOnlyCount > 0
+                ? [{ id: 'saved', label: 'Đã lưu', count: stats.savedOnlyCount }]
+                : []),
             ].map((tab) => {
               const isActive = filterType === tab.id;
               return (
@@ -225,7 +354,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                   key={tab.id}
                   type="button"
                   onClick={() => setFilterType(tab.id as any)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 ${
+                  className={`px-3.5 py-2 min-h-[40px] rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shrink-0 ${
                     isActive
                       ? 'bg-pink-600 text-white font-extrabold shadow-sm shadow-pink-600/30 ring-2 ring-pink-400/40'
                       : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700'
@@ -234,7 +363,9 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                   <span>{tab.label}</span>
                   <span
                     className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
-                      isActive ? 'bg-white/25 text-white' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
+                      isActive
+                        ? 'bg-white/25 text-white'
+                        : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
                     }`}
                   >
                     {tab.count}
@@ -245,39 +376,64 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
           </div>
         </div>
 
-        {/* 4. Nội dung danh sách truyện dạng Grid Layout */}
-        {isLoading ? (
-          <div className="py-24 flex flex-col items-center justify-center space-y-3 text-slate-400">
-            <Loader2 className="w-8 h-8 animate-spin text-pink-600" />
-            <p className="text-xs font-semibold text-pink-600 dark:text-pink-400">
-              Đang tổng hợp dữ liệu giao dịch từ hệ thống...
-            </p>
-          </div>
-        ) : (filteredStories?.length || 0) === 0 ? (
-          <div className="text-center py-20 bg-white dark:bg-slate-900 rounded-3xl border border-pink-200/60 dark:border-slate-800 p-8 shadow-xs max-w-xl mx-auto">
+        {/* 4. Nội dung danh sách truyện dạng Grid Layout hoặc Gợi ý đăng nhập */}
+        {(filteredStories?.length || 0) === 0 ? (
+          <div className="text-center py-14 sm:py-20 bg-white dark:bg-slate-900 rounded-3xl border border-pink-200/60 dark:border-slate-800 p-6 sm:p-8 shadow-xs max-w-xl mx-auto">
             <div className="w-16 h-16 rounded-3xl bg-pink-50 dark:bg-pink-950/50 flex items-center justify-center mx-auto mb-4 border border-pink-200 dark:border-pink-800 text-pink-600">
-              <Library className="w-8 h-8" />
+              {!isLoggedIn ? <LogIn className="w-8 h-8" /> : <Library className="w-8 h-8" />}
             </div>
-            <h3 className="text-base font-black text-slate-800 dark:text-slate-200 mb-1">
-              {(purchasedStories?.length || 0) === 0
-                ? 'Tủ truyện của bạn hiện đang trống'
-                : 'Không tìm thấy bộ truyện nào phù hợp'}
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-6 leading-relaxed">
-              {(purchasedStories?.length || 0) === 0
-                ? 'Khi bạn mở khóa chương VIP hoặc mua trọn bộ tác phẩm, tất cả quyền đọc trọn đời sẽ được lưu trữ an toàn và hiển thị đầy đủ tại đây.'
-                : 'Hãy thử xóa từ khóa tìm kiếm hoặc chuyển sang bộ lọc "Tất cả".'}
-            </p>
-            <button
-              type="button"
-              onClick={onBackToHome}
-              className="px-5 py-2.5 bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white rounded-xl text-xs font-bold shadow-md shadow-pink-500/20 transition cursor-pointer"
-            >
-              Khám Phá Truyện Hay Ngay
-            </button>
+
+            {!isLoggedIn && (libraryItems?.length || 0) === 0 ? (
+              <>
+                <h3 className="text-base font-black text-slate-800 dark:text-slate-100 mb-2">
+                  Đồng bộ Tủ Truyện của bạn
+                </h3>
+                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 mb-6 leading-relaxed">
+                  Vui lòng đăng nhập tài khoản để đồng bộ lại toàn bộ truyện và chương VIP bạn đã mua.
+                </p>
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  {onOpenLogin && (
+                    <button
+                      type="button"
+                      onClick={onOpenLogin}
+                      className="w-full sm:w-auto px-6 py-2.5 min-h-[44px] bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white rounded-xl text-xs font-bold shadow-md shadow-pink-500/20 transition cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <LogIn className="w-4 h-4" />
+                      <span>Đăng nhập ngay</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onBackToHome}
+                    className="w-full sm:w-auto px-5 py-2.5 min-h-[44px] bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold transition cursor-pointer"
+                  >
+                    Khám Phá Truyện Hay Ngay
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="text-base font-black text-slate-800 dark:text-slate-200 mb-1">
+                  {(libraryItems?.length || 0) === 0
+                    ? 'Tủ truyện của bạn hiện đang trống'
+                    : 'Không tìm thấy bộ truyện nào phù hợp'}
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-6 leading-relaxed">
+                  {(libraryItems?.length || 0) === 0
+                    ? 'Khi bạn mở khóa chương VIP, mua trọn bộ hoặc lưu truyện yêu thích, tất cả tác phẩm sẽ được hiển thị đầy đủ tại đây.'
+                    : 'Hãy thử xóa từ khóa tìm kiếm hoặc chuyển sang bộ lọc "Tất cả".'}
+                </p>
+                <button
+                  type="button"
+                  onClick={onBackToHome}
+                  className="px-5 py-2.5 min-h-[44px] bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white rounded-xl text-xs font-bold shadow-md shadow-pink-500/20 transition cursor-pointer"
+                >
+                  Khám Phá Truyện Hay Ngay
+                </button>
+              </>
+            )}
           </div>
         ) : (
-          /* Giao diện Grid Layout chuẩn chỉnh */
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4.5">
             {(filteredStories || []).map((item) => {
               const matchedNovel =
@@ -288,7 +444,6 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                 if (matchedNovel) {
                   onSelectNovel(matchedNovel);
                 } else {
-                  // Fallback: Tạo novel tạm từ summary
                   const fallbackNovel: Novel = {
                     id: item.storyId,
                     title: item.storyTitle,
@@ -330,8 +485,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         loading="lazy"
                         onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).src =
-                            'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=300&q=80';
+                          (e.currentTarget as HTMLImageElement).src = DEFAULT_COVER;
                         }}
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-transparent opacity-80 group-hover:opacity-60 transition-opacity" />
@@ -343,16 +497,39 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                         </span>
                       </div>
 
-                      {/* Huy hiệu số chương VIP đã mua */}
+                      {/* Nhãn Đã mua / Đã lưu nổi bật góc phải ảnh bìa */}
+                      <div className="absolute top-2 right-2">
+                        {item.isPurchased ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/95 text-white shadow-sm backdrop-blur-md border border-emerald-300/40">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>Đã mua</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-purple-600/90 text-white shadow-sm backdrop-blur-md border border-purple-300/40">
+                            <Bookmark className="w-3 h-3" />
+                            <span>Đã lưu</span>
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Huy hiệu tiến độ VIP đã mua */}
                       <div className="absolute bottom-2 left-2 right-2">
                         <div className="text-[10px] text-white/90 font-medium truncate drop-shadow-md">
-                          {item.purchaseBadgeType === 'full_book' ? (
-                            <span className="text-amber-300 font-bold flex items-center gap-1">
-                              <Crown className="w-3 h-3 text-amber-300" />
-                              <span>Sở hữu trọn đời</span>
-                            </span>
+                          {item.isPurchased ? (
+                            item.purchaseBadgeType === 'full_book' ? (
+                              <span className="text-amber-300 font-bold flex items-center gap-1">
+                                <Crown className="w-3 h-3 text-amber-300 shrink-0" />
+                                <span>Sở hữu trọn đời</span>
+                              </span>
+                            ) : item.totalVipChapters > 0 ? (
+                              <span>
+                                Đã mua: {item.purchasedVipChaptersCount}/{item.totalVipChapters}c VIP
+                              </span>
+                            ) : (
+                              <span>Đã mở khóa VIP</span>
+                            )
                           ) : (
-                            <span>Đã mua: {item.purchasedVipChaptersCount}/{item.totalVipChapters}c VIP</span>
+                            <span className="text-purple-200 font-semibold">Truyện đã lưu</span>
                           )}
                         </div>
                       </div>
@@ -377,27 +554,22 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                     </div>
                   </div>
 
-                  {/* 3. THẺ NHÃN (BADGE/TAG) Ở DƯỚI CÙNG THEO YÊU CẦU BẮT BUỘC:
-                      - Trường hợp 1: User đã mua gói trọn bộ (isFullStoryBought == true).
-                      - Trường hợp 2: User mua gom từng chương lẻ, và tổng số chương lẻ đã mua BẰNG VỚI
-                        tổng số chương VIP của bộ truyện đó (purchasedChapters.length === story.totalVipChapters
-                        hoặc tổng số chương - số chương free). Tuyệt đối không đếm chương free vào điều kiện này.
-                        => Cả 2 trường hợp này đều hiển thị nhãn: 'Mua Trọn Bộ' (Text vàng, nền đỏ/hồng pastel).
-                      - Trường hợp 3: User mua chương lẻ nhưng chưa mua hết toàn bộ số chương VIP
-                        => Hiển thị nhãn: 'Mua Chương Lẻ' (dùng màu xám nhạt hoặc xanh pastel).
-                  */}
+                  {/* Nhãn trạng thái dưới cùng thẻ */}
                   <div className="p-3 pt-0">
-                    {item.purchaseBadgeType === 'full_book' ? (
-                      /* Trường hợp 1 & 2: Mua Trọn Bộ (Text vàng, nền đỏ/hồng pastel) */
-                      <div className="w-full text-center py-1.5 px-2 rounded-xl text-xs font-black bg-rose-100 text-amber-700 dark:bg-rose-950/80 dark:text-amber-300 border border-rose-300 dark:border-rose-800 shadow-2xs flex items-center justify-center gap-1.5">
+                    {!item.isPurchased ? (
+                      <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-bold bg-purple-50 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-200 dark:border-purple-800 shadow-2xs flex items-center justify-center gap-1.5">
+                        <Bookmark className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                        <span className="truncate">Đã lưu trong tủ</span>
+                      </div>
+                    ) : item.purchaseBadgeType === 'full_book' ? (
+                      <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-black bg-rose-100 text-amber-700 dark:bg-rose-950/80 dark:text-amber-300 border border-rose-300 dark:border-rose-800 shadow-2xs flex items-center justify-center gap-1.5">
                         <Sparkles className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />
-                        <span className="truncate">Mua Trọn Bộ</span>
+                        <span className="truncate">Đã mua • Trọn Bộ</span>
                       </div>
                     ) : (
-                      /* Trường hợp 3: Mua Chương Lẻ (màu xám nhạt hoặc xanh pastel) */
-                      <div className="w-full text-center py-1.5 px-2 rounded-xl text-xs font-bold bg-sky-50 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200 dark:border-sky-800 shadow-2xs flex items-center justify-center gap-1.5">
+                      <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-bold bg-sky-50 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200 dark:border-sky-800 shadow-2xs flex items-center justify-center gap-1.5">
                         <BookOpen className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                        <span className="truncate">Mua Chương Lẻ</span>
+                        <span className="truncate">Đã mua • Chương Lẻ</span>
                       </div>
                     )}
                   </div>
