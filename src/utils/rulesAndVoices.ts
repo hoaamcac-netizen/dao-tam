@@ -190,23 +190,25 @@ export function getNovelVoiceAvailability(
   extraChapters?: Chapter[] | null,
   currentChapter?: Chapter | null
 ): NovelAudioVoiceAvailability {
-  const chaptersToScan: Chapter[] = [];
-  if (Array.isArray(extraChapters)) chaptersToScan.push(...extraChapters);
-  if (Array.isArray(novel?.chapters)) chaptersToScan.push(...novel.chapters);
-  if (currentChapter) chaptersToScan.push(currentChapter);
+  let hasMaleMp3 = Boolean(novel?.hasMaleAudio);
+  let hasFemaleMp3 = Boolean(novel?.hasFemaleAudio);
 
-  let hasMaleMp3 = false;
-  let hasFemaleMp3 = false;
+  if (!hasMaleMp3 || !hasFemaleMp3) {
+    const chaptersToScan: Chapter[] = [];
+    if (currentChapter) chaptersToScan.push(currentChapter);
+    if (Array.isArray(extraChapters)) chaptersToScan.push(...extraChapters);
+    if (Array.isArray(novel?.chapters)) chaptersToScan.push(...novel.chapters);
 
-  for (const ch of chaptersToScan) {
-    if (!ch) continue;
-    if (!hasMaleMp3 && (isValidVoiceMp3Url(ch.audioUrlMale) || isValidVoiceMp3Url(ch.audioUrl))) {
-      hasMaleMp3 = true;
+    for (const ch of chaptersToScan) {
+      if (!ch) continue;
+      if (!hasMaleMp3 && (isValidVoiceMp3Url(ch.audioUrlMale) || isValidVoiceMp3Url(ch.audioUrl))) {
+        hasMaleMp3 = true;
+      }
+      if (!hasFemaleMp3 && isValidVoiceMp3Url(ch.audioUrlFemale)) {
+        hasFemaleMp3 = true;
+      }
+      if (hasMaleMp3 && hasFemaleMp3) break;
     }
-    if (!hasFemaleMp3 && isValidVoiceMp3Url(ch.audioUrlFemale)) {
-      hasFemaleMp3 = true;
-    }
-    if (hasMaleMp3 && hasFemaleMp3) break;
   }
 
   const availableVoiceIds: string[] = [];

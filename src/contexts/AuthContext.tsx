@@ -15,7 +15,7 @@ import {
 } from '../firebase/services';
 import { UserProfile } from '../types';
 import { DaoTamLogo } from '../components/DaoTamLogo';
-import { safeRemoveItem } from '../utils/safeStorage';
+import { safeRemoveItem, safeGetItem, safeJsonParse } from '../utils/safeStorage';
 import { clearLocalBanFlags } from '../services/antiCrawlerRateLimiter';
 
 export const GUEST_USER: UserProfile = {
@@ -238,6 +238,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!profile.isBanned) {
           clearLocalBanFlags();
           effectiveFbUser.getIdToken(true).catch(() => {});
+        }
+
+        if (!profile.readingHistory || profile.readingHistory.length === 0) {
+          const localHist = safeJsonParse<any[]>(safeGetItem('daotam_reading_history'), []);
+          if (Array.isArray(localHist) && localHist.length > 0) {
+            profile.readingHistory = localHist;
+          }
         }
 
         // BẮT BUỘC đẩy dữ liệu vào Global State để Header và toàn bộ UI re-render ngay lập tức

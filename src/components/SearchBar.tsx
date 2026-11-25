@@ -234,21 +234,21 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
     setSearchLabel(`"${term}"`);
 
     try {
-      // 1. Chuẩn bị kho dữ liệu truyện đầy đủ (kết hợp cache, props và Firestore nếu chưa có)
+      // 1. Chuẩn bị kho dữ liệu truyện đầy đủ (ưu tiên props đã tải sẵn & cache để tốn 0 Reads)
       let combinedNovels: Novel[] = [];
 
-      if (memoryNovelsCache && (memoryNovelsCache?.length || 0) > 0) {
+      if ((initialNovels?.length || 0) > 0) {
+        const novelMap = new Map<string, Novel>();
+        (SAMPLE_NOVELS || []).forEach((n) => novelMap.set(n.id, n));
+        (initialNovels || []).forEach((n) => novelMap.set(n.id, n));
+        combinedNovels = Array.from(novelMap.values());
+        memoryNovelsCache = combinedNovels;
+      } else if (memoryNovelsCache && (memoryNovelsCache?.length || 0) > 0) {
         combinedNovels = memoryNovelsCache;
       } else {
         const novelMap = new Map<string, Novel>();
-
-        // Thêm dữ liệu mẫu sẵn có
         (SAMPLE_NOVELS || []).forEach((n) => novelMap.set(n.id, n));
 
-        // Thêm dữ liệu từ props (App state)
-        (initialNovels || []).forEach((n) => novelMap.set(n.id, n));
-
-        // Tải thêm từ Firestore với giới hạn an toàn limit(100) để bảo vệ Quota Spark
         try {
           const novelsCol = collection(db, 'novels');
           const snap = await getDocs(query(novelsCol, limit(100)));
@@ -258,8 +258,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
           });
         } catch (fsErr) {
           handleFirestoreError(fsErr, OperationType.LIST, 'novels');
-          console.warn('[SearchBar] Không thể tải thêm từ Firestore, sử dụng kho truyện hiện tại:', fsErr);
-          // Vẫn tiếp tục tìm kiếm trên dữ liệu cục bộ thay vì báo lỗi đứt đoạn
+          console.warn('[SearchBar] Không thể tải thêm dữ liệu, sử dụng kho truyện hiện tại:', fsErr);
         }
 
         combinedNovels = Array.from(novelMap.values());

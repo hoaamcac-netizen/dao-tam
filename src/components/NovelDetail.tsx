@@ -382,11 +382,11 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {onOpenBatchUpload && (
               <button
                 onClick={() => onOpenBatchUpload(novel)}
-                className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shadow-sm"
+                className="min-h-[40px] px-3 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shadow-sm"
               >
                 <BookOpen className="w-3.5 h-3.5" /> Đăng Nhiều Chương
               </button>
@@ -395,7 +395,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
             {onOpenEditNovel && (
               <button
                 onClick={() => onOpenEditNovel(novel)}
-                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shadow-sm"
+                className="min-h-[40px] px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold flex items-center gap-1.5 cursor-pointer shadow-sm"
               >
                 <Edit3 className="w-3.5 h-3.5" /> Chỉnh Sửa Truyện
               </button>
@@ -404,7 +404,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
             {onToggleHideNovel && (
               <button
                 onClick={() => onToggleHideNovel(novel.id)}
-                className={`px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer ${
+                className={`min-h-[40px] px-3 py-2 rounded-lg font-semibold flex items-center gap-1.5 cursor-pointer ${
                   novel.isHidden
                     ? 'bg-purple-600 hover:bg-purple-500 text-white'
                     : 'bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200'
@@ -418,7 +418,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
             {onDeleteNovel && (
               <button
                 onClick={() => setShowDeleteConfirm(true)}
-                className="px-3 py-1.5 rounded-lg bg-rose-100 dark:bg-rose-950/70 hover:bg-rose-600 text-rose-700 hover:text-white dark:text-rose-300 font-semibold flex items-center gap-1.5 cursor-pointer"
+                className="min-h-[40px] px-3 py-2 rounded-lg bg-rose-100 dark:bg-rose-950/70 hover:bg-rose-600 text-rose-700 hover:text-white dark:text-rose-300 font-semibold flex items-center gap-1.5 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" /> Xóa
               </button>
@@ -671,7 +671,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                       audio.setIsMinimized(false);
                       audio.playChapter({ ...novel, chapters: activeChapters }, targetAudioChapter, true, activeChapters, true);
                     }}
-                    className={`px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md transition-all hover:scale-102 cursor-pointer border border-white/40 ${
+                    className={`min-h-[44px] px-4 sm:px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md transition-all hover:scale-102 cursor-pointer border border-white/40 ${
                       audio.isPlaying && (audio.activeChapter?.id === targetAudioChapter.id || Number(audio.activeChapter?.number) === Number(targetAudioChapter.number))
                         ? 'bg-gradient-to-r from-pink-600 via-rose-500 to-pink-600 text-white shadow-pink-500/30 ring-2 ring-pink-400'
                         : 'bg-gradient-to-r from-yellow-400 to-amber-500 hover:from-yellow-300 hover:to-amber-400 text-slate-900 shadow-amber-500/25'
@@ -691,7 +691,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {firstChapter ? (
                   <button
                     onClick={() => onSelectChapter({ ...novel, chapters: activeChapters }, firstChapter)}
-                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md shadow-pink-500/20 transition-all hover:scale-102 cursor-pointer"
+                    className="min-h-[44px] px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md shadow-pink-500/20 transition-all hover:scale-102 cursor-pointer"
                   >
                     <BookOpen className="w-4 h-4" />
                     <span>Đọc chương đầu</span>
@@ -699,7 +699,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 ) : (
                   <button
                     disabled
-                    className="px-5 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-300 font-extrabold text-xs sm:text-sm flex items-center gap-2 cursor-not-allowed"
+                    className="min-h-[44px] px-4 sm:px-5 py-2.5 rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-400 dark:text-slate-300 font-extrabold text-xs sm:text-sm flex items-center gap-2 cursor-not-allowed"
                   >
                     <BookOpen className="w-4 h-4" />
                     <span>{isLoadingChapters ? 'Đang tải...' : 'Chưa có chương'}</span>
@@ -710,7 +710,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {nextChapter && (
                   <button
                     onClick={() => onSelectChapter({ ...novel, chapters: activeChapters }, nextChapter)}
-                    className="px-4 py-2.5 rounded-xl border-2 border-pink-500 hover:border-pink-600 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-slate-800 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
+                    className="min-h-[44px] px-4 py-2.5 rounded-xl border-2 border-pink-500 hover:border-pink-600 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-slate-800 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
                   >
                     <span>⏩ Đọc {savedProgress ? `tiếp C${savedProgress.chapterNumber}` : 'tiếp theo'}</span>
                   </button>
@@ -719,7 +719,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Theo dõi */}
                 <button
                   onClick={() => onToggleBookmark(novel.id)}
-                  className={`px-3.5 py-2.5 rounded-xl border-2 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  className={`min-h-[44px] px-3.5 py-2.5 rounded-xl border-2 text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
                     isBookmarked
                       ? 'bg-pink-600 border-pink-600 text-white shadow-sm'
                       : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white hover:border-pink-500 hover:text-pink-600 dark:hover:text-pink-400'
@@ -732,7 +732,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Danh mục */}
                 <button
                   onClick={scrollToChapters}
-                  className="px-3.5 py-2.5 rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white hover:border-pink-500 hover:text-pink-600 dark:hover:text-pink-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
+                  className="min-h-[44px] px-3.5 py-2.5 rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white hover:border-pink-500 hover:text-pink-600 dark:hover:text-pink-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
                 >
                   <List className="w-4 h-4" />
                   <span>Danh mục</span>
@@ -741,7 +741,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Đề cử hoa - Thêm biểu tượng hình hoa trước nút chia sẻ */}
                 <button
                   onClick={() => onOpenNominate && onOpenNominate(novel)}
-                  className="px-4 py-2.5 rounded-xl border-2 border-pink-500 bg-pink-50 dark:bg-slate-800 hover:bg-pink-100 dark:hover:bg-slate-700 text-pink-700 dark:text-pink-300 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:scale-102"
+                  className="min-h-[44px] px-4 py-2.5 rounded-xl border-2 border-pink-500 bg-pink-50 dark:bg-slate-800 hover:bg-pink-100 dark:hover:bg-slate-700 text-pink-700 dark:text-pink-300 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:scale-102"
                   title="Tặng hoa đề cử tác phẩm"
                 >
                   <span className="text-base">🌸</span>
@@ -752,7 +752,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {onOpenDonateNovel && (
                   <button
                     onClick={() => onOpenDonateNovel(novel)}
-                    className="px-4 py-2.5 rounded-xl border-2 border-rose-500 bg-rose-50 dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-slate-700 text-rose-700 dark:text-pink-300 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:scale-102"
+                    className="min-h-[44px] px-4 py-2.5 rounded-xl border-2 border-rose-500 bg-rose-50 dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-slate-700 text-rose-700 dark:text-pink-300 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:scale-102"
                     title="Gửi tặng Xu ủng hộ người đăng truyện"
                   >
                     <span className="text-base">🎁</span>
@@ -763,7 +763,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Chia sẻ */}
                 <button
                   onClick={handleShare}
-                  className="px-3.5 py-2.5 rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white hover:border-pink-500 hover:text-pink-600 dark:hover:text-pink-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
+                  className="min-h-[44px] px-3.5 py-2.5 rounded-xl border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white hover:border-pink-500 hover:text-pink-600 dark:hover:text-pink-400 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
                   title="Chia sẻ truyện hoặc sao chép liên kết"
                 >
                   <Share2 className="w-4 h-4" />
@@ -774,7 +774,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {onOpenReport && (
                   <button
                     onClick={() => onOpenReport(novel)}
-                    className="p-2.5 rounded-xl border-2 border-rose-300 text-rose-600 hover:bg-rose-50 text-xs transition-colors cursor-pointer ml-auto"
+                    className="min-w-[44px] min-h-[44px] p-2.5 rounded-xl border-2 border-rose-300 text-rose-600 hover:bg-rose-50 text-xs transition-colors cursor-pointer ml-auto flex items-center justify-center"
                     title="Báo cáo vi phạm truyện"
                   >
                     <Flag className="w-4 h-4" />

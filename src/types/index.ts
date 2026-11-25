@@ -66,6 +66,8 @@ export interface Novel {
   lastChapterUpdatedAt?: number; // Thời điểm ra/sửa chương gần nhất (chỉ tác giả/admin thêm/sửa chương mới cập nhật)
   lastUpdated: string;
   hasAudio: boolean;
+  hasMaleAudio?: boolean;
+  hasFemaleAudio?: boolean;
   flowerCount?: number; // Số hoa được bạn đọc và BQT đề cử
   coinCount?: number; // Tổng số xu được bạn đọc donate
   fullBookPriceXu: number;

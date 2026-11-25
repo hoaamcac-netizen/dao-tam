@@ -1,6 +1,14 @@
 import { getDoc, doc } from 'firebase/firestore';
 import { auth, db, checkIsAdmin } from '../firebase/config';
-import { safeGetItem, safeSetItem, safeRemoveItem } from '../utils/safeStorage';
+import {
+  safeGetItem,
+  safeSetItem,
+  safeRemoveItem,
+  safeSessionGetItem,
+  safeSessionSetItem,
+  safeSessionRemoveItem,
+  safeJsonParse,
+} from '../utils/safeStorage';
 
 /**
  * ==============================================================================
@@ -43,14 +51,14 @@ export function getTempLockRemainingMs(): number {
   if (typeof window === 'undefined') return 0;
   try {
     const raw =
-      sessionStorage.getItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY) ||
+      safeSessionGetItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY) ||
       safeGetItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY);
     if (!raw) return 0;
     const lockUntil = parseInt(raw, 10);
     if (Number.isNaN(lockUntil)) return 0;
     const remaining = lockUntil - Date.now();
     if (remaining <= 0) {
-      sessionStorage.removeItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY);
+      safeSessionRemoveItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY);
       safeRemoveItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY);
       return 0;
     }
@@ -89,28 +97,21 @@ export async function recordChapterAccessAndCheckRateLimit(
 
   // 3. Lấy danh sách timestamp truy cập trong vòng 60 giây gần nhất
   let timestamps: number[] = [];
-  try {
-    const raw =
-      sessionStorage.getItem(RATE_LIMIT_CONFIG.STORAGE_KEY) ||
-      safeGetItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        timestamps = parsed.filter(
-          (ts) => typeof ts === 'number' && now - ts < RATE_LIMIT_CONFIG.WINDOW_MS
-        );
-      }
-    }
-  } catch {
-    timestamps = [];
+  const raw =
+    safeSessionGetItem(RATE_LIMIT_CONFIG.STORAGE_KEY) ||
+    safeGetItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
+  const parsed = safeJsonParse<unknown[]>(raw, []);
+  if (Array.isArray(parsed)) {
+    timestamps = parsed.filter(
+      (ts): ts is number => typeof ts === 'number' && now - ts < RATE_LIMIT_CONFIG.WINDOW_MS
+    );
   }
 
   timestamps.push(now);
 
-  try {
-    sessionStorage.setItem(RATE_LIMIT_CONFIG.STORAGE_KEY, JSON.stringify(timestamps));
-    safeSetItem(RATE_LIMIT_CONFIG.STORAGE_KEY, JSON.stringify(timestamps));
-  } catch {}
+  const serialized = JSON.stringify(timestamps);
+  safeSessionSetItem(RATE_LIMIT_CONFIG.STORAGE_KEY, serialized);
+  safeSetItem(RATE_LIMIT_CONFIG.STORAGE_KEY, serialized);
 
   // 4. KIỂM TRA NGƯỠNG MỚI (60 chương / 60 giây): chỉ áp dụng khóa tạm thời 1 phút + Toast
   if (timestamps.length > RATE_LIMIT_CONFIG.MAX_CHAPTERS_WINDOW) {
@@ -119,13 +120,10 @@ export async function recordChapterAccessAndCheckRateLimit(
     );
 
     const lockUntil = now + RATE_LIMIT_CONFIG.TEMP_LOCK_DURATION_MS;
-    try {
-      sessionStorage.setItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY, String(lockUntil));
-      safeSetItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY, String(lockUntil));
-      // Xóa bộ đếm cũ để sau 1 phút người dùng đọc lại bình thường
-      sessionStorage.removeItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
-      safeRemoveItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
-    } catch {}
+    safeSessionSetItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY, String(lockUntil));
+    safeSetItem(RATE_LIMIT_CONFIG.TEMP_LOCK_UNTIL_KEY, String(lockUntil));
+    safeSessionRemoveItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
+    safeRemoveItem(RATE_LIMIT_CONFIG.STORAGE_KEY);
 
     return {
       isBanned: false,
@@ -154,10 +152,8 @@ export const RATE_LIMIT_BAN_STORAGE_KEYS = [
 export function clearLocalBanFlags(): void {
   if (typeof window === 'undefined') return;
   for (const key of RATE_LIMIT_BAN_STORAGE_KEYS) {
-    try {
-      localStorage.removeItem(key);
-      sessionStorage.removeItem(key);
-    } catch {}
+    safeRemoveItem(key);
+    safeSessionRemoveItem(key);
   }
 }
 

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { safeSessionGetItem, safeSessionSetItem } from '../utils/safeStorage';
 import { 
   Download, 
   Smartphone, 
@@ -27,11 +28,7 @@ export const PWAInstallPrompt: React.FC<PWAInstallPromptProps> = () => {
   } = usePWAInstall();
 
   const [isDismissed, setIsDismissed] = useState(() => {
-    try {
-      return sessionStorage.getItem('pwa_prompt_dismissed') === 'true';
-    } catch {
-      return false;
-    }
+    return safeSessionGetItem('pwa_prompt_dismissed') === 'true';
   });
 
   const [showIOSModal, setShowIOSModal] = useState(false);
@@ -43,9 +40,7 @@ export const PWAInstallPrompt: React.FC<PWAInstallPromptProps> = () => {
 
   const handleDismiss = () => {
     setIsDismissed(true);
-    try {
-      sessionStorage.setItem('pwa_prompt_dismissed', 'true');
-    } catch {}
+    safeSessionSetItem('pwa_prompt_dismissed', 'true');
   };
 
   const handleInstallClick = async () => {

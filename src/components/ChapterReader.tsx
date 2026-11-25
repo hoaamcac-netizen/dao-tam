@@ -9,7 +9,7 @@ import {
 } from '../utils/rulesAndVoices';
 import { useAudio } from '../contexts/AudioContext';
 import { fetchFullChapterContent } from '../firebase/services';
-import { safeSetItem, safeGetItem } from '../utils/safeStorage';
+import { safeSetItem, safeGetItem, safeSessionGetItem, safeSessionSetItem } from '../utils/safeStorage';
 import { FONT_FAMILY_OPTIONS, resolveReaderFontCss } from '../hooks/useReaderSettings';
 import { AudioChunk, chunkChapterContent } from '../utils/audioChunker';
 import { CommentsSection } from './CommentsSection';
@@ -17,7 +17,6 @@ import { VoiceSelectorDropdown } from './VoiceSelectorDropdown';
 import { checkIsAdmin } from '../firebase/config';
 import { 
   recordChapterAccessAndCheckRateLimit, 
-  subscribeUserBanStatus,
   BAN_MESSAGE,
   TEMP_LOCK_TOAST_MESSAGE
 } from '../services/antiCrawlerRateLimiter';
@@ -120,18 +119,8 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const isAdmin = checkIsAdmin(user?.email);
 
   // LỚP 3: STATE THÔNG BÁO BANNER VÀNG (CHỈ KHI ADMIN KHÓA) VÀ TOAST TẠM THỜI (1 PHÚT)
-  const [rateLimitBanNotice, setRateLimitBanNotice] = useState<string | null>(() =>
-    user?.isBanned || user?.isLocked ? BAN_MESSAGE : null
-  );
+  const rateLimitBanNotice = user?.isBanned || user?.isLocked ? BAN_MESSAGE : null;
   const [rateLimitToast, setRateLimitToast] = useState<string | null>(null);
-
-  // 1. ĐỒNG BỘ REAL-TIME TRẠNG THÁI KHÓA USER TRỰC TIẾP TỪ FIRESTORE
-  useEffect(() => {
-    const unsub = subscribeUserBanStatus(user?.id, (isBanned) => {
-      setRateLimitBanNotice(isBanned ? BAN_MESSAGE : null);
-    });
-    return () => unsub();
-  }, [user?.id]);
 
   const sentenceRefs = useRef<(HTMLSpanElement | null)[]>([]);
   const shouldAutoPlayRef = useRef<boolean>(false);
@@ -557,7 +546,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   useEffect(() => {
     if (!novel?.id || !chapter?.id) return;
     const cooldownKey = `google_engaged_view_${novel.id}_${chapter.id}`;
-    const previousEngagedTimestamp = sessionStorage.getItem(cooldownKey);
+    const previousEngagedTimestamp = safeSessionGetItem(cooldownKey);
 
     // Nếu trong phiên này đã từng được tính view (trong 30 phút qua) thì không tính lặp
     if (previousEngagedTimestamp) {
@@ -578,9 +567,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         if (activeSeconds >= 10 && !hasCounted) {
           hasCounted = true;
           clearInterval(interval);
-          try {
-            sessionStorage.setItem(cooldownKey, Date.now().toString());
-          } catch (e) {}
+          safeSessionSetItem(cooldownKey, Date.now().toString());
           if (onRecordRealView) {
             onRecordRealView(novel.id);
           }
@@ -791,7 +778,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   return (
     <div
-      className={`reader-container min-h-screen relative transition-colors duration-300 pt-12 ${
+      className={`reader-container min-h-screen relative transition-colors duration-300 pt-14 ${
         audioContext.isBarVisible && !audioContext.isMinimized
           ? 'pb-64 sm:pb-48'
           : 'pb-36 sm:pb-40'
@@ -863,15 +850,15 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         style={{ width: `${scrollProgress}%` }}
       />
 
-      {/* Floating Reader Top Bar (Gọn nhẹ h-12 py-1 ôm sát nội dung trên Mobile) */}
-      <div className="fixed top-0 left-0 right-0 z-40 backdrop-blur-md bg-white/95 dark:bg-slate-900/95 shadow-[0_2px_12px_-4px_rgba(0,0,0,0.08)] dark:shadow-md dark:shadow-black/40 px-2 sm:px-4 py-1">
-        <div className="max-w-4xl mx-auto h-10 sm:h-11 flex items-center justify-between gap-1 sm:gap-2 flex-nowrap">
+      {/* Floating Reader Top Bar */}
+      <div className="fixed top-0 left-0 right-0 z-40 backdrop-blur-md bg-white/95 dark:bg-slate-900/95 shadow-[0_2px_12px_-4px_rgba(0,0,0,0.08)] dark:shadow-md dark:shadow-black/40 px-1.5 sm:px-4 py-1">
+        <div className="max-w-4xl mx-auto min-h-[44px] flex items-center justify-between gap-1 sm:gap-2 flex-nowrap">
           <button
             onClick={onBackToNovel}
-            className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-white p-1.5 sm:px-2.5 sm:py-1 rounded-lg bg-slate-100 dark:bg-slate-800 transition-colors cursor-pointer flex-shrink-0"
+            className="min-w-[36px] min-h-[40px] flex items-center justify-center gap-1 text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-white px-2 sm:px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 transition-colors cursor-pointer flex-shrink-0"
             title="Quay lại mục lục"
           >
-            <ArrowLeft className="w-3.5 h-3.5" />
+            <ArrowLeft className="w-4 h-4" />
             <span className="hidden sm:inline">Mục lục</span>
           </button>
 
@@ -889,7 +876,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                 }
               }}
               disabled={!prevChapter}
-              className={`p-1 sm:p-1.5 rounded-lg text-xs transition-colors flex-shrink-0 ${
+              className={`min-w-[34px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
                 prevChapter
                   ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-blue-600 hover:text-white cursor-pointer'
                   : 'bg-slate-100/50 dark:bg-slate-800/40 text-slate-400 dark:text-slate-600 cursor-not-allowed'
@@ -901,11 +888,11 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
             <button
               onClick={() => setShowChapterDrawer(true)}
-              className="flex items-center gap-1 px-2 sm:px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-blue-600 dark:text-cyan-400 font-semibold cursor-pointer max-w-[92px] sm:max-w-xs truncate"
+              className="min-h-[40px] flex items-center gap-1 px-2 sm:px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs text-blue-600 dark:text-cyan-400 font-semibold cursor-pointer max-w-[90px] sm:max-w-xs truncate"
               title="Mục lục chương nhanh"
             >
               <List className="w-3.5 h-3.5 text-blue-600 dark:text-cyan-400 flex-shrink-0" />
-              <span className="truncate">Chương {chapter.number}</span>
+              <span className="truncate">Ch.{chapter.number}</span>
               {chapter.isVip && !isChapterUnlocked && (
                 <Lock className="w-3 h-3 text-rose-500 flex-shrink-0 ml-0.5" />
               )}
@@ -923,7 +910,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                 }
               }}
               disabled={!nextChapter}
-              className={`p-1 sm:p-1.5 rounded-lg text-xs transition-colors flex-shrink-0 ${
+              className={`min-w-[34px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
                 nextChapter
                   ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-blue-600 hover:text-white cursor-pointer'
                   : 'bg-slate-100/50 dark:bg-slate-800/40 text-slate-400 dark:text-slate-600 cursor-not-allowed'
@@ -965,7 +952,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                   }
                 }
               }}
-              className={`p-1.5 sm:px-3 sm:py-1 rounded-lg text-xs flex items-center gap-1 transition-all cursor-pointer shadow-sm ${
+              className={`min-w-[36px] min-h-[40px] px-2 sm:px-3 py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 transition-all cursor-pointer shadow-sm ${
                 isTtsPlaying || isTransitioningChapter
                   ? 'bg-gradient-to-r from-pink-600 to-rose-500 text-white font-bold shadow-pink-500/25'
                   : 'bg-pink-600 hover:bg-pink-500 text-white font-semibold'
@@ -987,23 +974,23 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {/* Settings */}
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className={`p-1.5 rounded-lg text-xs transition-colors cursor-pointer ${
+              className={`min-w-[36px] min-h-[40px] p-1.5 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-center ${
                 showSettings
                   ? 'bg-blue-600 text-white'
                   : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600'
               }`}
               title="Cài đặt đọc"
             >
-              <Sliders className="w-3.5 h-3.5" />
+              <Sliders className="w-4 h-4" />
             </button>
 
             {/* Manual Save */}
             <button
               onClick={handleManualSave}
-              className="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer"
+              className="hidden sm:flex min-w-[38px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer items-center justify-center"
               title="Lưu tiến trình đọc"
             >
-              <Bookmark className="w-3.5 h-3.5" />
+              <Bookmark className="w-4 h-4" />
             </button>
 
             {/* Share / Copy direct link */}
@@ -1026,20 +1013,20 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                   setTimeout(() => setDrmWarning(null), 3000);
                 }
               }}
-              className="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer"
+              className="min-w-[36px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer flex items-center justify-center"
               title="Chia sẻ / Sao chép link chương truyện"
             >
-              <Share2 className="w-3.5 h-3.5" />
+              <Share2 className="w-4 h-4" />
             </button>
 
             {/* Report */}
             {onOpenReport && (
               <button
                 onClick={() => onOpenReport(novel)}
-                className="p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-xs transition-colors cursor-pointer"
+                className="hidden sm:flex min-w-[38px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-xs transition-colors cursor-pointer items-center justify-center"
                 title="Báo cáo vi phạm"
               >
-                <Flag className="w-3.5 h-3.5" />
+                <Flag className="w-4 h-4" />
               </button>
             )}
           </div>
@@ -1465,14 +1452,14 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
         {/* Bottom Navigation */}
         <div className="mt-12 pt-8 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-start">
+          <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-between sm:justify-start">
             {prevChapter ? (
               <button
                 onClick={() => onSelectChapter(novel, prevChapter)}
-                className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                className="min-h-[44px] px-3.5 sm:px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
               >
                 <ChevronLeft className="w-4 h-4" />
-                Chương trước
+                <span>Chương trước</span>
               </button>
             ) : (
               <div />
@@ -1480,7 +1467,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
             <button
               onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-              className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all cursor-pointer shadow-sm"
+              className="min-h-[44px] px-3.5 sm:px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition-all cursor-pointer shadow-sm"
             >
               Lên đầu trang
             </button>
@@ -1488,9 +1475,9 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {nextChapter ? (
               <button
                 onClick={() => onSelectChapter(novel, nextChapter)}
-                className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                className="min-h-[44px] px-3.5 sm:px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-blue-600 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
               >
-                Chương sau
+                <span>Chương sau</span>
                 <ChevronRight className="w-4 h-4" />
               </button>
             ) : (

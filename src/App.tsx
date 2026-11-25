@@ -148,10 +148,18 @@ import {
 } from 'lucide-react';
 import { AuthProvider, useAuth, GUEST_USER } from './contexts/AuthContext';
 import { AudioProvider, useAudio } from './contexts/AudioContext';
-import { safeSetItem, safeGetItem, saveNovelsToStorage } from './utils/safeStorage';
+import {
+  safeSetItem,
+  safeGetItem,
+  safeRemoveItem,
+  safeJsonParse,
+  saveNovelsToStorage,
+  getCachedNovelsIfFresh,
+  isGenresCacheFresh,
+  markGenresCacheFresh,
+} from './utils/safeStorage';
 import { 
   checkHasActiveBanNotice, 
-  subscribeUserBanStatus, 
   clearLocalBanFlags, 
   BAN_MESSAGE 
 } from './services/antiCrawlerRateLimiter';
@@ -552,15 +560,8 @@ function DaoTamApp() {
   const activeUser = user || GUEST_USER;
   const pendingTopUpIdsRef = useRef<Set<string>>(new Set());
 
-  // 1. ĐỒNG BỘ REAL-TIME TRẠNG THÁI KHÓA USER TRỰC TIẾP TỪ FIRESTORE
-  const [isAccountBanned, setIsAccountBanned] = useState<boolean>(() => Boolean(activeUser?.isBanned));
-
-  useEffect(() => {
-    const unsub = subscribeUserBanStatus(activeUser?.id, (banned) => {
-      setIsAccountBanned(banned);
-    });
-    return () => unsub();
-  }, [activeUser?.id]);
+  // 1. ĐỒNG BỘ TRẠNG THÁI KHÓA USER TỪ DUY NHẤT 1 SNAPSHOT TRONG AUTHCONTEXT (0 READS PHỤ)
+  const isAccountBanned = Boolean(activeUser?.isBanned || activeUser?.isLocked);
 
   // Author Withdrawal Requests: Khởi tạo rỗng, đồng bộ Firestore thực
   const [withdrawalRequests, setWithdrawalRequests] = useState<WithdrawalRequest[]>([]);
@@ -662,8 +663,23 @@ function DaoTamApp() {
     };
   }, [activeUser?.id, activeUser?.isLoggedIn, isChatWidgetOpen]);
 
-  // Hàm đọc 1 lần danh sách truyện từ Firestore bằng getDocs (dùng lúc khởi tạo và nút "Tải lại" trong Admin)
-  const reloadNovels = useCallback(async () => {
+  // Hàm đọc danh sách truyện (ưu tiên bộ nhớ đệm 10 phút để F5 tốn 0 Reads; forceRefresh=true khi Admin bấm Tải lại)
+  const reloadNovels = useCallback(async (forceRefresh: boolean = false) => {
+    if (!forceRefresh) {
+      const cachedFresh = getCachedNovelsIfFresh();
+      if (Array.isArray(cachedFresh) && cachedFresh.length > 0) {
+        const filteredCached = cachedFresh.filter(
+          (n) => !deletingNovelIdsRef.current.has(n.id) && (!n.slug || !deletingNovelIdsRef.current.has(n.slug))
+        );
+        if (filteredCached.length > 0) {
+          setNovels(filteredCached);
+          setIsNovelsLoading(false);
+          setNovelsError(null);
+          return;
+        }
+      }
+    }
+
     setIsNovelsLoading(true);
     setNovelsError(null);
     try {
@@ -698,20 +714,25 @@ function DaoTamApp() {
         });
       }
     } catch (err: any) {
-      console.warn('Lỗi tải danh sách truyện từ Firestore:', err);
+      console.warn('Lỗi tải danh sách truyện:', err);
       setNovelsError(err?.message || 'Không thể tải danh sách truyện.');
     } finally {
       setIsNovelsLoading(false);
     }
   }, []);
 
-  // Fetch novels & categories 1 lần khi mở trang bằng getDocs (KHÔNG dùng onSnapshot toàn cục)
+  // Fetch novels & categories 1 lần khi mở trang (tôn trọng cache 10 phút, KHÔNG dùng onSnapshot toàn cục)
   useEffect(() => {
     let isMounted = true;
 
-    reloadNovels();
+    reloadNovels(false);
 
     async function loadCategories() {
+      if (isGenresCacheFresh() && getStoredGenres().length > 0) {
+        setIsCategoriesLoading(false);
+        return;
+      }
+
       setIsCategoriesLoading(true);
       setCategoriesError(null);
       try {
@@ -722,7 +743,7 @@ function DaoTamApp() {
           for (const item of INITIAL_HOT_GENRES) {
             map.set(item.name.toLowerCase().trim(), item);
           }
-          // Bổ sung thêm bất kỳ thể loại nào được thêm mới trên Firestore
+          // Bổ sung thêm bất kỳ thể loại nào được thêm mới
           if (Array.isArray(remoteCategories) && remoteCategories.length > 0) {
             for (const c of remoteCategories) {
               const key = c.name.toLowerCase().trim();
@@ -738,6 +759,7 @@ function DaoTamApp() {
           const mergedList = Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, 'vi'));
           setGenres(mergedList);
           saveGenres(mergedList);
+          markGenresCacheFresh();
         }
       } catch (err: any) {
         console.warn('Lưu ý đồng bộ categories (sử dụng 64 thể loại mặc định):', err);
@@ -1121,12 +1143,11 @@ function DaoTamApp() {
     });
   };
 
-  // Reading Progress auto-save: Tối ưu lưu tức thì vào cache bộ nhớ máy (Optimistic UI)
-  // và chỉ debounce ghi Firestore khi tài khoản đã đăng nhập thật, không spam vòng lặp
+  // Reading Progress auto-save: Lưu 100% trên localStorage thiết bị (0 Firestore writes khi đọc/lướt chương)
   const handleSaveProgress = (progress: ReadingProgress) => {
     try {
-      const raw = localStorage.getItem('daotam_reading_history');
-      const parsed = raw ? JSON.parse(raw) : [];
+      const raw = safeGetItem('daotam_reading_history');
+      const parsed = safeJsonParse<any[]>(raw, []);
       const existing: any[] = Array.isArray(parsed) ? parsed : [];
       const matchedNovel = novels.find((n) => n.id === progress.novelId);
       const novelSlug = matchedNovel?.slug || '';
@@ -1148,11 +1169,10 @@ function DaoTamApp() {
       if (!prev) return null;
       const filtered = (prev.readingHistory || []).filter((item) => item.novelId !== progress.novelId);
       const nextHistory = [progress, ...filtered];
-      const updated = {
+      return {
         ...prev,
         readingHistory: nextHistory,
       };
-      return updated;
     });
   };
 
@@ -1239,16 +1259,13 @@ function DaoTamApp() {
   };
 
   const handleClearReadingHistory = () => {
+    safeRemoveItem('daotam_reading_history');
     setUser((prev) => {
       if (!prev) return null;
-      const updated = {
+      return {
         ...prev,
         readingHistory: [],
       };
-      if (prev.isLoggedIn && prev.id && prev.id !== 'guest') {
-        updateUserState(prev.id, { readingHistory: [] }).catch(() => {});
-      }
-      return updated;
     });
   };
 
@@ -2787,7 +2804,7 @@ function DaoTamApp() {
     }
   };
 
-  // Đồng bộ tức thì audioUrl / audioUrlMale / audioUrlFemale của 1 chương vào state của App
+  // Đồng bộ tức thì audioUrl / audioUrlMale / audioUrlFemale + cờ hasMaleAudio / hasFemaleAudio của 1 chương vào state của App
   const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
     const mergeAudioFields = (c: Chapter): Chapter => ({
       ...c,
@@ -2806,26 +2823,54 @@ function DaoTamApp() {
       );
     };
 
-    setNovels((prev) => {
-      const next = (prev || []).map((n) =>
-        n.id === novelId
-          ? { ...n, chapters: patchChaptersList(n.chapters) || [], updatedAt: Date.now() }
-          : n
+    const deriveVoiceFlags = (chaps: Chapter[], prevNovel: Novel) => {
+      const maleInChaps = chaps.some(
+        (c) =>
+          (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+          (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
       );
+      const femaleInChaps = chaps.some(
+        (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
+      );
+      const hasUpdatedMale = Boolean(
+        (updatedChapter.audioUrlMale && updatedChapter.audioUrlMale.trim()) ||
+          (updatedChapter.audioUrl && updatedChapter.audioUrl.trim())
+      );
+      const hasUpdatedFemale = Boolean(
+        updatedChapter.audioUrlFemale && updatedChapter.audioUrlFemale.trim()
+      );
+      const hasMaleAudio = chaps.length > 0 ? maleInChaps : Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
+      const hasFemaleAudio = chaps.length > 0 ? femaleInChaps : Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
+      return {
+        hasMaleAudio,
+        hasFemaleAudio,
+        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+      };
+    };
+
+    setNovels((prev) => {
+      const next = (prev || []).map((n) => {
+        if (n.id !== novelId) return n;
+        const patched = patchChaptersList(n.chapters) || [];
+        const flags = deriveVoiceFlags(patched, n);
+        return { ...n, ...flags, chapters: patched, updatedAt: Date.now() };
+      });
       saveNovelsToStorage(next);
       return next;
     });
 
-    setSelectedNovel((prev) =>
-      prev && prev.id === novelId
-        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
-        : prev
-    );
-    setEditingNovel((prev) =>
-      prev && prev.id === novelId
-        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
-        : prev
-    );
+    setSelectedNovel((prev) => {
+      if (!prev || prev.id !== novelId) return prev;
+      const patched = patchChaptersList(prev.chapters) || [];
+      const flags = deriveVoiceFlags(patched, prev);
+      return { ...prev, ...flags, chapters: patched };
+    });
+    setEditingNovel((prev) => {
+      if (!prev || prev.id !== novelId) return prev;
+      const patched = patchChaptersList(prev.chapters) || [];
+      const flags = deriveVoiceFlags(patched, prev);
+      return { ...prev, ...flags, chapters: patched };
+    });
     setSelectedChapter((prev) =>
       prev &&
       ((updatedChapter.id && prev.id === updatedChapter.id) ||
@@ -2839,9 +2884,17 @@ function DaoTamApp() {
     if (!Array.isArray(updatedChapters) || updatedChapters.length === 0) return;
     const byId = new Map<string, Chapter>();
     const byNumber = new Map<number, Chapter>();
+    let batchHasMale = false;
+    let batchHasFemale = false;
     for (const ch of updatedChapters) {
       if (ch.id) byId.set(ch.id, ch);
       if (Number(ch.number) > 0) byNumber.set(Number(ch.number), ch);
+      if ((ch.audioUrlMale && ch.audioUrlMale.trim()) || (ch.audioUrl && ch.audioUrl.trim())) {
+        batchHasMale = true;
+      }
+      if (ch.audioUrlFemale && ch.audioUrlFemale.trim()) {
+        batchHasFemale = true;
+      }
     }
 
     const patchChaptersList = (chaps?: Chapter[]) => {
@@ -2858,26 +2911,47 @@ function DaoTamApp() {
       });
     };
 
-    setNovels((prev) => {
-      const next = (prev || []).map((n) =>
-        n.id === novelId
-          ? { ...n, chapters: patchChaptersList(n.chapters) || [], updatedAt: Date.now() }
-          : n
+    const deriveBatchFlags = (chaps: Chapter[], prevNovel: Novel) => {
+      const maleInChaps = chaps.some(
+        (c) =>
+          (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+          (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
       );
+      const femaleInChaps = chaps.some(
+        (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
+      );
+      const hasMaleAudio = chaps.length > 0 ? maleInChaps : Boolean(prevNovel.hasMaleAudio || batchHasMale);
+      const hasFemaleAudio = chaps.length > 0 ? femaleInChaps : Boolean(prevNovel.hasFemaleAudio || batchHasFemale);
+      return {
+        hasMaleAudio,
+        hasFemaleAudio,
+        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+      };
+    };
+
+    setNovels((prev) => {
+      const next = (prev || []).map((n) => {
+        if (n.id !== novelId) return n;
+        const patched = patchChaptersList(n.chapters) || [];
+        const flags = deriveBatchFlags(patched, n);
+        return { ...n, ...flags, chapters: patched, updatedAt: Date.now() };
+      });
       saveNovelsToStorage(next);
       return next;
     });
 
-    setSelectedNovel((prev) =>
-      prev && prev.id === novelId
-        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
-        : prev
-    );
-    setEditingNovel((prev) =>
-      prev && prev.id === novelId
-        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
-        : prev
-    );
+    setSelectedNovel((prev) => {
+      if (!prev || prev.id !== novelId) return prev;
+      const patched = patchChaptersList(prev.chapters) || [];
+      const flags = deriveBatchFlags(patched, prev);
+      return { ...prev, ...flags, chapters: patched };
+    });
+    setEditingNovel((prev) => {
+      if (!prev || prev.id !== novelId) return prev;
+      const patched = patchChaptersList(prev.chapters) || [];
+      const flags = deriveBatchFlags(patched, prev);
+      return { ...prev, ...flags, chapters: patched };
+    });
     setSelectedChapter((prev) => {
       if (!prev) return prev;
       const matched = byId.get(prev.id) || byNumber.get(Number(prev.number));
@@ -4232,7 +4306,7 @@ function DaoTamApp() {
             refreshUserData().catch(() => {});
           }
         }}
-        onReloadNovels={reloadNovels}
+        onReloadNovels={() => reloadNovels(true)}
         onChapterAudioUpdated={handleChapterAudioUpdated}
         onBatchChaptersAudioUpdated={handleBatchChaptersAudioUpdated}
       />

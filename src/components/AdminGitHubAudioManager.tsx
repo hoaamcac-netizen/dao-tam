@@ -638,6 +638,18 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   }, []);
 
   useEffect(() => {
+    const preloaded = Array.isArray(novel.chapters) ? novel.chapters : [];
+    const expectedTotal = Number(novel.totalChapters || 0);
+    if (preloaded.length > 0 && (expectedTotal === 0 || preloaded.length >= expectedTotal)) {
+      const sorted = [...preloaded].sort((a, b) => Number(a.number) - Number(b.number));
+      setChapters(sorted);
+      const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
+      setDeleteFromChapter(sorted[0]?.number || 1);
+      setDeleteToChapter(maxNum);
+      setIsLoadingChapters(false);
+      return;
+    }
+
     let cancelled = false;
     setIsLoadingChapters(true);
     fetchChaptersForNovel(novel.id)
@@ -1061,15 +1073,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }
   };
 
-  // Logic 3: Kiểm tra link hỏng trên trang hiện tại (tối đa 100 chương)
-  const handleCheckLinksOnCurrentPage = async () => {
+  // Logic 3: Quét kiểm tra toàn bộ link MP3 (tất cả trang, cả Nam Minh và Hằng Nga)
+  const handleCheckAllLinks = async () => {
     if (isCheckingLinks) {
-      checkAbortRef.current = true;
       return;
     }
 
     const tasks: { chapterId: string; voice: VoiceKey; url: string }[] = [];
-    for (const ch of pageChapters) {
+    for (const ch of sortedChapters) {
       const maleUrl = getMaleAudioUrl(ch);
       const femaleUrl = getFemaleAudioUrl(ch);
       if (maleUrl) tasks.push({ chapterId: ch.id, voice: 'male', url: maleUrl });
@@ -1079,7 +1090,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     if (tasks.length === 0) {
       setToolbarMessage({
         type: 'warning',
-        text: 'Trang hiện tại chưa có link MP3 nào để kiểm tra.',
+        text: 'Bộ truyện này chưa có link MP3 nào để kiểm tra.',
       });
       return;
     }
@@ -1092,9 +1103,10 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     let cursor = 0;
     let okCount = 0;
     let failCount = 0;
-    const pageResults: Record<string, BrokenVoiceState> = {};
+    let checkedCount = 0;
+    const scanResults: Record<string, BrokenVoiceState> = {};
 
-    const concurrency = Math.min(4, tasks.length);
+    const concurrency = Math.min(8, tasks.length);
     const worker = async () => {
       while (!checkAbortRef.current) {
         const idx = cursor++;
@@ -1103,12 +1115,13 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         const ok = await probeAudioUrlMetadata(t.url, 8000);
         if (checkAbortRef.current) break;
 
-        if (!pageResults[t.chapterId]) {
-          pageResults[t.chapterId] = {};
+        if (!scanResults[t.chapterId]) {
+          scanResults[t.chapterId] = {};
         }
-        pageResults[t.chapterId][t.voice] = !ok;
+        scanResults[t.chapterId][t.voice] = !ok;
         if (ok) okCount += 1;
         else failCount += 1;
+        checkedCount += 1;
 
         setCheckProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
       }
@@ -1116,21 +1129,35 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
 
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-    if (!checkAbortRef.current) {
+    const wasAborted = checkAbortRef.current;
+    if (Object.keys(scanResults).length > 0) {
       setBrokenLinksMap((prev) => {
         const next = { ...prev };
-        for (const [chId, state] of Object.entries(pageResults)) {
+        for (const [chId, state] of Object.entries(scanResults)) {
           next[chId] = { ...(next[chId] || {}), ...state };
         }
         return next;
       });
+    }
+
+    if (wasAborted) {
       setToolbarMessage({
         type: failCount > 0 ? 'warning' : 'success',
-        text: `Đã kiểm tra ${tasks.length} link trang ${safeCurrentPage}: ${okCount} link hợp lệ, ${failCount} link lỗi.`,
+        text: `Đã dừng kiểm tra (${checkedCount}/${tasks.length} link): ${okCount} link hợp lệ, ${failCount} link lỗi.`,
+        includeBrokenList: failCount > 0,
+      });
+    } else {
+      setToolbarMessage({
+        type: failCount > 0 ? 'warning' : 'success',
+        text: `Đã kiểm tra toàn bộ ${tasks.length} link: ${okCount} link hợp lệ, ${failCount} link lỗi.`,
         includeBrokenList: failCount > 0,
       });
     }
     setIsCheckingLinks(false);
+  };
+
+  const handleStopCheckingLinks = () => {
+    checkAbortRef.current = true;
   };
 
   // Logic 4: Xuất file dự phòng (.txt) chuẩn "Chương <số> | <url>"
@@ -1212,7 +1239,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               type="button"
               disabled={safeCurrentPage <= 1}
               onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
+              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
               <span>Trước</span>
@@ -1228,7 +1255,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                   key={item}
                   type="button"
                   onClick={() => setCurrentPage(item)}
-                  className={`min-w-[34px] min-h-[34px] px-2 py-1 rounded-lg font-bold tabular-nums cursor-pointer transition ${
+                  className={`min-w-[40px] min-h-[40px] px-2.5 py-1.5 rounded-lg font-bold tabular-nums cursor-pointer transition ${
                     safeCurrentPage === item
                       ? 'bg-pink-600 text-white shadow-xs'
                       : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -1243,7 +1270,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               type="button"
               disabled={safeCurrentPage >= totalPages}
               onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
+              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
             >
               <span>Sau</span>
               <ChevronRight className="w-3.5 h-3.5" />
@@ -1312,31 +1339,35 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               <span>Dán link MP3 hàng loạt</span>
             </button>
 
-            {/* Tool 2: Kiểm tra link trang này */}
-            <button
-              type="button"
-              onClick={handleCheckLinksOnCurrentPage}
-              className={`min-h-[40px] px-3.5 py-2 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition ${
-                isCheckingLinks
-                  ? 'bg-amber-50 border-amber-300 text-amber-800'
-                  : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800'
-              }`}
-              title="Kiểm tra tốc độ & trạng thái toàn bộ link MP3 đang hiển thị ở trang hiện tại"
-            >
-              {isCheckingLinks ? (
-                <>
+            {/* Tool 2: Kiểm tra toàn bộ link */}
+            {!isCheckingLinks ? (
+              <button
+                type="button"
+                onClick={handleCheckAllLinks}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl border bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
+                title="Kiểm tra toàn bộ link MP3 ở tất cả các chương (Nam Minh & Hằng Nga)"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>Kiểm tra toàn bộ link</span>
+              </button>
+            ) : (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="min-h-[40px] px-3.5 py-2 rounded-xl border bg-amber-50 border-amber-300 text-amber-900 text-xs font-bold inline-flex items-center gap-2 tabular-nums">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600 shrink-0" />
-                  <span className="tabular-nums">
-                    Đang kiểm tra ({checkProgress.checked}/{checkProgress.total}) • Bấm để dừng
+                  <span>
+                    Đang kiểm tra: {checkProgress.checked}/{checkProgress.total} link...
                   </span>
-                </>
-              ) : (
-                <>
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>Kiểm tra link trang này</span>
-                </>
-              )}
-            </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleStopCheckingLinks}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer shadow-xs transition"
+                >
+                  <X className="w-3.5 h-3.5 shrink-0" />
+                  <span>Dừng</span>
+                </button>
+              </div>
+            )}
 
             {/* Tool 3: Xóa link hàng loạt */}
             <button
@@ -1394,6 +1425,23 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               )}
             </div>
           </div>
+
+          {isCheckingLinks && checkProgress.total > 0 && (
+            <div className="p-2.5 rounded-xl bg-amber-50/80 border border-amber-200 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px] font-bold text-amber-900 tabular-nums">
+                <span>Đang kiểm tra: {checkProgress.checked}/{checkProgress.total} link...</span>
+                <span>{Math.min(100, Math.round((checkProgress.checked / Math.max(1, checkProgress.total)) * 100))}%</span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-amber-200/70 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-amber-500 to-pink-500 transition-all duration-200"
+                  style={{
+                    width: `${Math.min(100, Math.round((checkProgress.checked / Math.max(1, checkProgress.total)) * 100))}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
 
           {toolbarMessage && (
             <div
@@ -1601,7 +1649,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                     setVoiceFilter(f.id);
                     setCurrentPage(1);
                   }}
-                  className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums ${
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums ${
                     voiceFilter === f.id
                       ? 'bg-pink-600 text-white border-pink-600 shadow-2xs'
                       : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
@@ -1618,7 +1666,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                     setVoiceFilter('broken');
                     setCurrentPage(1);
                   }}
-                  className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums inline-flex items-center gap-1 ${
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums inline-flex items-center gap-1 ${
                     voiceFilter === 'broken'
                       ? 'bg-rose-600 text-white border-rose-600 shadow-2xs'
                       : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300'

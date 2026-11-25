@@ -50,9 +50,42 @@ import {
   SubmissionChapterDraft
 } from '../types';
 import { filterOutDummyChapters, formatXu } from '../utils/rulesAndVoices';
-import { safeSetItem, safeGetItem, safeRemoveItem, saveNovelsToStorage } from '../utils/safeStorage';
+import {
+  safeSetItem,
+  safeGetItem,
+  safeRemoveItem,
+  safeSessionGetItem,
+  safeSessionSetItem,
+  safeJsonParse,
+  trimChapterCacheEntries,
+  saveNovelsToStorage,
+  invalidateNovelsCache,
+} from '../utils/safeStorage';
 import { isGeneratedFallbackContent } from '../utils/chapterContentGenerator';
 import { invalidateGlobalBannerCache, type GlobalBannerConfig } from '../components/GlobalBanner';
+
+function computeNovelAudioFlags(
+  chapters: Array<{ audioUrl?: string; audioUrlMale?: string; audioUrlFemale?: string }>,
+  existingData?: Partial<Novel> | null
+): { hasMaleAudio: boolean; hasFemaleAudio: boolean; hasAudio: boolean } {
+  let hasMaleAudio = Boolean(existingData?.hasMaleAudio);
+  let hasFemaleAudio = Boolean(existingData?.hasFemaleAudio);
+  if (Array.isArray(chapters) && chapters.length > 0) {
+    hasMaleAudio = chapters.some(
+      (c) =>
+        (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+        (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
+    );
+    hasFemaleAudio = chapters.some(
+      (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
+    );
+  }
+  return {
+    hasMaleAudio,
+    hasFemaleAudio,
+    hasAudio: Boolean(existingData?.hasAudio || hasMaleAudio || hasFemaleAudio),
+  };
+}
 
 // [QUOTA GUARD] Chỉ cập nhật lastLogin/lastSeen tối đa 1 lần mỗi 5 phút cho mỗi user
 const LAST_PRESENCE_COOLDOWN_MS = 5 * 60 * 1000;
@@ -915,8 +948,8 @@ export async function checkIfUserIsApprovedAuthor(
  * Đăng xuất tài khoản Firebase
  */
 export async function logoutUser(): Promise<void> {
-  localStorage.removeItem('daotam_direct_user');
-  localStorage.removeItem('daotam_user_profile');
+  safeRemoveItem('daotam_direct_user');
+  safeRemoveItem('daotam_user_profile');
   try {
     await firebaseSignOut(auth);
   } catch (error) {
@@ -2526,16 +2559,12 @@ export async function fetchChaptersForNovel(novelId: string): Promise<Chapter[]>
 
   // 6. Chỉ kiểm tra cache localStorage khi thiết bị hoàn toàn ngoại tuyến (offline)
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    try {
-      const cached = localStorage.getItem('dao_tam_novels');
-      if (cached) {
-        const list = JSON.parse(cached);
-        const target = (Array.isArray(list) ? list : []).find((n: Novel) => n.id === novelId);
-        if (target && Array.isArray(target.chapters) && (target.chapters?.length || 0) > 0) {
-          return filterOutDummyChapters(target.chapters);
-        }
-      }
-    } catch (e) {}
+    const cached = safeGetItem('dao_tam_novels');
+    const list = safeJsonParse<Novel[]>(cached, []);
+    const target = (Array.isArray(list) ? list : []).find((n: Novel) => n.id === novelId);
+    if (target && Array.isArray(target.chapters) && (target.chapters?.length || 0) > 0) {
+      return filterOutDummyChapters(target.chapters);
+    }
   }
 
   return [];
@@ -2576,39 +2605,103 @@ export async function fetchFullChapterContent(
 } | null> {
   if (!novelId) return null;
 
-  const saveChapterCache = (text: string) => {
-    const ts = String(expectedUpdatedAt || Date.now());
+  interface CachedChapterPayload {
+    content: string;
+    wordCount?: number;
+    audioUrl?: string;
+    audioUrlMale?: string;
+    audioUrlFemale?: string;
+    cachedAt?: number;
+  }
+
+  const saveChapterCache = (payload: {
+    content: string;
+    wordCount?: number;
+    audioUrl?: string;
+    audioUrlMale?: string;
+    audioUrlFemale?: string;
+  }) => {
+    const nowTs = Date.now();
+    const record: CachedChapterPayload = {
+      content: payload.content,
+      wordCount:
+        payload.wordCount || payload.content.split(/\s+/).filter(Boolean)?.length || 0,
+      audioUrl: payload.audioUrl || undefined,
+      audioUrlMale: payload.audioUrlMale || undefined,
+      audioUrlFemale: payload.audioUrlFemale || undefined,
+      cachedAt: nowTs,
+    };
+    const serialized = JSON.stringify(record);
+    const tsStr = String(nowTs);
     if (chapterNumber !== undefined) {
-      safeSetItem(`chapter_full_${novelId}_${chapterNumber}`, text);
-      safeSetItem(`chapter_full_ts_${novelId}_${chapterNumber}`, ts);
+      safeSetItem(`chapter_full_${novelId}_${chapterNumber}`, serialized);
+      safeSetItem(`chapter_full_ts_${novelId}_${chapterNumber}`, tsStr);
     }
     if (chapterId) {
-      safeSetItem(`chapter_full_${novelId}_${chapterId}`, text);
-      safeSetItem(`chapter_full_ts_${novelId}_${chapterId}`, ts);
+      safeSetItem(`chapter_full_${novelId}_${chapterId}`, serialized);
+      safeSetItem(`chapter_full_ts_${novelId}_${chapterId}`, tsStr);
     }
+    trimChapterCacheEntries();
   };
 
-  // 1. Kiểm tra cache localStorage lưu trữ cục bộ
-  try {
-    if (chapterNumber !== undefined) {
-      const cachedByNum = localStorage.getItem(`chapter_full_${novelId}_${chapterNumber}`);
-      if (cachedByNum && (cachedByNum.trim()?.length || 0) > 0 && !isGeneratedFallbackContent(cachedByNum)) {
+  const readChapterCacheKey = (key: string, tsKey: string) => {
+    const raw = safeGetItem(key);
+    if (!raw || !raw.trim()) return null;
+
+    const rawTs = safeGetItem(tsKey);
+    const storedTs = rawTs ? Number(rawTs) || 0 : 0;
+
+    if (raw.trim().startsWith('{')) {
+      const parsed = safeJsonParse<CachedChapterPayload | null>(raw, null);
+      if (
+        parsed &&
+        typeof parsed.content === 'string' &&
+        parsed.content.trim().length > 0 &&
+        !isGeneratedFallbackContent(parsed.content)
+      ) {
+        const entryTs = Number(parsed.cachedAt || storedTs || 0);
+        if (expectedUpdatedAt && entryTs > 0 && expectedUpdatedAt > entryTs + 2000) {
+          return null;
+        }
         return {
-          content: cachedByNum,
-          wordCount: cachedByNum.split(/\s+/).filter(Boolean)?.length || 0,
+          content: parsed.content,
+          wordCount:
+            parsed.wordCount || parsed.content.split(/\s+/).filter(Boolean)?.length || 0,
+          audioUrl: parsed.audioUrl || undefined,
+          audioUrlMale: parsed.audioUrlMale || undefined,
+          audioUrlFemale: parsed.audioUrlFemale || undefined,
         };
       }
+      return null;
     }
-    if (chapterId) {
-      const cachedById = localStorage.getItem(`chapter_full_${novelId}_${chapterId}`);
-      if (cachedById && (cachedById.trim()?.length || 0) > 0 && !isGeneratedFallbackContent(cachedById)) {
-        return {
-          content: cachedById,
-          wordCount: cachedById.split(/\s+/).filter(Boolean)?.length || 0,
-        };
+
+    if (!isGeneratedFallbackContent(raw)) {
+      if (expectedUpdatedAt && storedTs > 0 && expectedUpdatedAt > storedTs + 2000) {
+        return null;
       }
+      return {
+        content: raw,
+        wordCount: raw.split(/\s+/).filter(Boolean)?.length || 0,
+      };
     }
-  } catch (e) {}
+    return null;
+  };
+
+  // 1. Kiểm tra cache localStorage lưu trữ cục bộ (tốn 0 Reads khi tải lại / đọc lại)
+  if (chapterNumber !== undefined) {
+    const cachedByNum = readChapterCacheKey(
+      `chapter_full_${novelId}_${chapterNumber}`,
+      `chapter_full_ts_${novelId}_${chapterNumber}`
+    );
+    if (cachedByNum) return cachedByNum;
+  }
+  if (chapterId) {
+    const cachedById = readChapterCacheKey(
+      `chapter_full_${novelId}_${chapterId}`,
+      `chapter_full_ts_${novelId}_${chapterId}`
+    );
+    if (cachedById) return cachedById;
+  }
 
   // 2. Thử trực tiếp doc theo chapterNumber hoặc chapterId trong subcollection
   const candidateIds: string[] = [];
@@ -2628,34 +2721,36 @@ export async function fetchFullChapterContent(
       if (snap.exists()) {
         const data = snap.data();
         if (data.content && (data.content.trim()?.length || 0) > 0) {
-          saveChapterCache(data.content);
-          return {
+          const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
             audioUrlMale: data.audioUrlMale || undefined,
             audioUrlFemale: data.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
-    } catch (e) {}
+    } catch {}
 
     try {
       const snap = await getDoc(doc(db, 'stories', novelId, 'chapters', cId));
       if (snap.exists()) {
         const data = snap.data();
         if (data.content && (data.content.trim()?.length || 0) > 0) {
-          saveChapterCache(data.content);
-          return {
+          const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
             audioUrlMale: data.audioUrlMale || undefined,
             audioUrlFemale: data.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
-    } catch (e) {}
+    } catch {}
   }
 
   // 3. Query subcollection 'novels/{novelId}/chapters' theo number (hỗ trợ cả number & string)
@@ -2666,34 +2761,36 @@ export async function fetchFullChapterContent(
       if (!snapNum.empty) {
         const data = snapNum.docs[0].data();
         if (data.content && (data.content.trim()?.length || 0) > 0) {
-          saveChapterCache(data.content);
-          return {
+          const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
             audioUrlMale: data.audioUrlMale || undefined,
             audioUrlFemale: data.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
       const snapStr = await getDocs(query(chaptersCol, where('number', '==', String(chapterNumber))));
       if (!snapStr.empty) {
         const data = snapStr.docs[0].data();
         if (data.content && (data.content.trim()?.length || 0) > 0) {
-          saveChapterCache(data.content);
-          return {
+          const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
             audioUrlMale: data.audioUrlMale || undefined,
             audioUrlFemale: data.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
     }
-  } catch (e) {}
+  } catch {}
 
-  // 4. Fallback đọc từ root document 'novels/{novelId}' hoặc 'novel_submissions/{novelId}' nếu truyện cũ lưu nội dung trên mảng chapters
+  // 4. Fallback đọc từ root document 'novels/{novelId}' hoặc 'novel_submissions/{novelId}'
   try {
     const novelSnap = await getDoc(doc(db, 'novels', novelId));
     if (novelSnap.exists()) {
@@ -2706,18 +2803,19 @@ export async function fetchFullChapterContent(
         );
         if (matched?.content && (String(matched.content).trim()?.length || 0) > 0) {
           const text = String(matched.content);
-          saveChapterCache(text);
-          return {
+          const result = {
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: matched.audioUrl || undefined,
             audioUrlMale: matched.audioUrlMale || undefined,
             audioUrlFemale: matched.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
     }
-  } catch (e) {}
+  } catch {}
 
   try {
     const subSnap = await getDoc(doc(db, 'novel_submissions', novelId));
@@ -2731,20 +2829,20 @@ export async function fetchFullChapterContent(
         );
         if (matched?.content && (String(matched.content).trim()?.length || 0) > 0) {
           const text = String(matched.content);
-          saveChapterCache(text);
-          return {
+          const result = {
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: matched.audioUrl || undefined,
             audioUrlMale: matched.audioUrlMale || undefined,
             audioUrlFemale: matched.audioUrlFemale || undefined,
           };
+          saveChapterCache(result);
+          return result;
         }
       }
     }
-  } catch (e) {}
+  } catch {}
 
-  // 5. Nếu chưa có trên cơ sở dữ liệu, trả về chuỗi rỗng để giao diện hiển thị thông báo thật (tuyệt đối không dùng nội dung ảo)
   return { content: '', wordCount: 0 };
 }
 
@@ -2802,6 +2900,8 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         ? (novelData as any).genres
         : [];
 
+      const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+
       novels.push({
         ...novelData,
         id: docSnap.id,
@@ -2818,6 +2918,9 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         totalChapters: resolvedTotal,
         latestChapterTitle,
         latestChapterNumber,
+        hasAudio: audioFlags.hasAudio,
+        hasMaleAudio: audioFlags.hasMaleAudio,
+        hasFemaleAudio: audioFlags.hasFemaleAudio,
       } as Novel);
     }
 
@@ -2892,6 +2995,8 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       ? (novelData as any).genres
       : [];
 
+    const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+
     return {
       ...novelData,
       id: docSnap.id,
@@ -2909,6 +3014,9 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       totalChapters: resolvedTotal,
       latestChapterTitle,
       latestChapterNumber,
+      hasAudio: audioFlags.hasAudio,
+      hasMaleAudio: audioFlags.hasMaleAudio,
+      hasFemaleAudio: audioFlags.hasFemaleAudio,
     } as Novel;
   };
 
@@ -3019,6 +3127,8 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         ? (novelData as any).genres
         : [];
 
+      const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+
       novels.push({
         ...novelData,
         id: docSnap.id,
@@ -3035,6 +3145,9 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         totalChapters: resolvedTotal,
         latestChapterTitle,
         latestChapterNumber,
+        hasAudio: audioFlags.hasAudio,
+        hasMaleAudio: audioFlags.hasMaleAudio,
+        hasFemaleAudio: audioFlags.hasFemaleAudio,
       } as Novel);
     }
 
@@ -3476,6 +3589,7 @@ export async function saveNovelToFirestore(
   const nowTs = Date.now();
   // Tạo danh mục chương tóm tắt siêu nhẹ trên root doc (không chứa nội dung chữ text)
   const strippedChapters = (chapters || []).map(stripChapterContent);
+  const audioFlags = computeNovelAudioFlags(chapters, novel);
 
   const payloadData: any = {
     ...novel,
@@ -3487,6 +3601,9 @@ export async function saveNovelToFirestore(
     updatedAt: nowTs,
     lastChapterUpdatedAt: shouldSyncChapters ? nowTs : (novel.lastChapterUpdatedAt ?? novel.updatedAt ?? nowTs),
     chapters: strippedChapters,
+    hasAudio: audioFlags.hasAudio,
+    hasMaleAudio: audioFlags.hasMaleAudio,
+    hasFemaleAudio: audioFlags.hasFemaleAudio,
   };
 
   const payload = cleanUndefinedFields(payloadData);
@@ -3876,13 +3993,13 @@ export async function updateChapterAudioUrlInFirestore(
     }
   }
 
-  // 2. Đồng bộ trong mảng mục lục chapters của root doc novels/{novelId}
+  // 2. Đồng bộ trong mảng mục lục chapters và cờ hasMaleAudio / hasFemaleAudio của root doc novels/{novelId}
   try {
     const novelRef = doc(db, 'novels', novelId);
     const novelSnap = await getDoc(novelRef);
     if (novelSnap.exists()) {
       const data = novelSnap.data();
-      if (Array.isArray(data.chapters)) {
+      if (Array.isArray(data.chapters) && data.chapters.length > 0) {
         const updatedChapters = data.chapters.map((c: any) => {
           const isMatch =
             (chapter.id && c.id === chapter.id) ||
@@ -3905,15 +4022,35 @@ export async function updateChapterAudioUrlInFirestore(
           }
           return cleanUndefinedFields(nextEntry);
         });
+        const flags = computeNovelAudioFlags(updatedChapters);
         await setDoc(
           novelRef,
           {
             chapters: updatedChapters,
+            hasMaleAudio: flags.hasMaleAudio,
+            hasFemaleAudio: flags.hasFemaleAudio,
+            hasAudio: flags.hasAudio,
             updatedAt: nowTs,
           },
           { merge: true }
         );
+      } else {
+        const nextFlags: Record<string, any> = { updatedAt: nowTs };
+        if (voice === 'female') {
+          if (cleanUrl) nextFlags.hasFemaleAudio = true;
+        } else {
+          if (cleanUrl) nextFlags.hasMaleAudio = true;
+        }
+        if (cleanUrl) nextFlags.hasAudio = true;
+        await setDoc(novelRef, nextFlags, { merge: true });
       }
+    }
+    // Xóa cache chi tiết chương này để lần mở tới nhận link MP3 mới nhất
+    if (chapter.number !== undefined) {
+      safeRemoveItem(`chapter_full_${novelId}_${chapter.number}`);
+    }
+    if (chapter.id) {
+      safeRemoveItem(`chapter_full_${novelId}_${chapter.id}`);
     }
   } catch (err) {
     console.warn('Lỗi đồng bộ liên kết audio lên mục lục truyện:', err);
@@ -4000,12 +4137,12 @@ export async function batchUpdateChapterAudioLinksInFirestore(
     }
   }
 
-  // 2. Đồng bộ 1 lần duy nhất lên mảng chapters trên root doc novels/{novelId}
+  // 2. Đồng bộ 1 lần duy nhất lên mảng chapters và cờ hasMaleAudio / hasFemaleAudio trên root doc novels/{novelId}
   const novelRef = doc(db, 'novels', novelId);
   const novelSnap = await getDoc(novelRef);
   if (novelSnap.exists()) {
     const data = novelSnap.data();
-    if (Array.isArray(data.chapters)) {
+    if (Array.isArray(data.chapters) && data.chapters.length > 0) {
       const updatedChapters = data.chapters.map((c: any) => {
         const match =
           (c.id ? byChapterId.get(String(c.id)) : undefined) ||
@@ -4035,11 +4172,16 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         return cleanUndefinedFields(nextEntry);
       });
 
+      const flags = computeNovelAudioFlags(updatedChapters);
+
       await withTimeout(
         setDoc(
           novelRef,
           {
             chapters: updatedChapters,
+            hasMaleAudio: flags.hasMaleAudio,
+            hasFemaleAudio: flags.hasFemaleAudio,
+            hasAudio: flags.hasAudio,
             updatedAt: nowTs,
           },
           { merge: true }
@@ -4047,6 +4189,32 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         15000,
         'Đồng bộ mục lục MP3 lên truyện'
       );
+    } else {
+      const anyMaleAdded = validItems.some(
+        (i) => typeof i.audioUrlMale === 'string' && i.audioUrlMale.trim().length > 0
+      );
+      const anyFemaleAdded = validItems.some(
+        (i) => typeof i.audioUrlFemale === 'string' && i.audioUrlFemale.trim().length > 0
+      );
+      const patchFlags: Record<string, any> = { updatedAt: nowTs };
+      if (anyMaleAdded) patchFlags.hasMaleAudio = true;
+      if (anyFemaleAdded) patchFlags.hasFemaleAudio = true;
+      if (anyMaleAdded || anyFemaleAdded) patchFlags.hasAudio = true;
+      await withTimeout(
+        setDoc(novelRef, patchFlags, { merge: true }),
+        15000,
+        'Đồng bộ cờ giọng MP3 lên truyện'
+      );
+    }
+  }
+
+  // Xóa cache chi tiết của các chương vừa đổi link để trình phát đọc link mới
+  for (const item of validItems) {
+    if (item.chapter.number !== undefined) {
+      safeRemoveItem(`chapter_full_${novelId}_${item.chapter.number}`);
+    }
+    if (item.chapter.id) {
+      safeRemoveItem(`chapter_full_${novelId}_${item.chapter.id}`);
     }
   }
 }
@@ -4184,7 +4352,7 @@ export async function deleteNovelFromFirestore(
   try {
     const cached = safeGetItem('dao_tam_novels');
     if (cached) {
-      const parsed = JSON.parse(cached);
+      const parsed = safeJsonParse<any[]>(cached, []);
       if (Array.isArray(parsed)) {
         const remaining = parsed.filter(
           (n: any) => n.id !== novelId && (!extra?.slug || n.slug !== extra.slug)
@@ -4193,17 +4361,17 @@ export async function deleteNovelFromFirestore(
       }
     }
 
-    if (typeof localStorage !== 'undefined') {
+    if (typeof window !== 'undefined' && window.localStorage) {
       const keysToRemove: string[] = [];
-      for (let i = 0; i < (localStorage?.length || 0); i++) {
-        const k = localStorage.key(i);
+      for (let i = 0; i < (window.localStorage?.length || 0); i++) {
+        const k = window.localStorage.key(i);
         if (k && (k.startsWith(`chapter_full_${novelId}`) || k.includes(novelId))) {
           keysToRemove.push(k);
         }
       }
       keysToRemove.forEach((k) => safeRemoveItem(k));
     }
-  } catch (e) {}
+  } catch {}
 
   // 3. Dọn dẹp subcollection chapters chạy ngầm (background non-blocking với writeBatch chunking <= 400 ops)
   (async () => {
@@ -4235,6 +4403,7 @@ export async function toggleHideNovelInFirestore(novelId: string, isHidden: bool
   };
 
   await setDoc(doc(db, 'novels', novelId), updatePayload, { merge: true });
+  invalidateNovelsCache();
 }
 
 /* ==========================================================================
@@ -6366,20 +6535,14 @@ export async function incrementNovelRealViewsInFirestore(novelId: string): Promi
   if (!novelId) return;
 
   const sessionKey = `daotam_viewed_${novelId}`;
-  try {
-    if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(sessionKey)) {
-      return;
-    }
-  } catch {}
+  if (safeSessionGetItem(sessionKey)) {
+    return;
+  }
 
   if (viewedNovelsInSession.has(novelId)) return;
   viewedNovelsInSession.add(novelId);
 
-  try {
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem(sessionKey, '1');
-    }
-  } catch {}
+  safeSessionSetItem(sessionKey, '1');
 
   try {
     const novelRef = doc(db, 'novels', novelId);

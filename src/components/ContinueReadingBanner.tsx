@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BookOpen, ArrowRight } from 'lucide-react';
+import { safeGetItem, safeJsonParse } from '../utils/safeStorage';
 
 export interface LocalReadingHistoryItem {
   novelId: string;
@@ -27,9 +28,9 @@ function readLatestHistoryFromLocalStorage(): LocalReadingHistoryItem | null {
     ];
 
     for (const key of candidateKeys) {
-      const raw = window.localStorage.getItem(key);
+      const raw = safeGetItem(key);
       if (!raw) continue;
-      const parsed = JSON.parse(raw);
+      const parsed = safeJsonParse<any[]>(raw, []);
       if (Array.isArray(parsed) && (parsed?.length ?? 0) > 0 && parsed[0]?.novelTitle) {
         return parsed[0] as LocalReadingHistoryItem;
       }
@@ -39,7 +40,6 @@ function readLatestHistoryFromLocalStorage(): LocalReadingHistoryItem | null {
   } catch {
     return null;
   }
-  return null;
 }
 
 interface ContinueReadingBannerProps {

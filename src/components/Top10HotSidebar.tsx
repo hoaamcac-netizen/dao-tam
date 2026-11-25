@@ -32,6 +32,10 @@ export const Top10HotSidebar: React.FC<Top10HotSidebarProps> = ({
   const [dailyTopFromDb, setDailyTopFromDb] = useState<Novel[]>([]);
 
   useEffect(() => {
+    if (Array.isArray(novels) && novels.length > 0) {
+      return;
+    }
+
     let isMounted = true;
 
     async function fetchTop10DailyHot() {
@@ -92,6 +96,8 @@ export const Top10HotSidebar: React.FC<Top10HotSidebarProps> = ({
                   : existingMatch?.updatedAt ?? Date.now(),
               lastUpdated: String(data.lastUpdated || existingMatch?.lastUpdated || ''),
               hasAudio: Boolean(data.hasAudio ?? existingMatch?.hasAudio ?? true),
+              hasMaleAudio: Boolean(data.hasMaleAudio ?? existingMatch?.hasMaleAudio),
+              hasFemaleAudio: Boolean(data.hasFemaleAudio ?? existingMatch?.hasFemaleAudio),
               fullBookPriceXu: Number(
                 data.fullBookPriceXu ?? existingMatch?.fullBookPriceXu ?? 0
               ),
@@ -105,7 +111,7 @@ export const Top10HotSidebar: React.FC<Top10HotSidebarProps> = ({
           setDailyTopFromDb(items);
         }
       } catch (err) {
-        console.warn('[Top10HotSidebar] Lỗi truy vấn dailyViews Firestore:', err);
+        console.warn('[Top10HotSidebar] Lỗi truy vấn top truyện ngày:', err);
       }
     }
 

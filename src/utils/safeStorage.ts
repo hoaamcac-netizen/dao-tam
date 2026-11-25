@@ -1,16 +1,22 @@
 /**
  * ==============================================================================
- * TIỆN ÍCH BẢO VỆ VÀ TỐI ƯU HÓA BỘ NHỚ LOCALSTORAGE - ĐẠO TÂM
- * 
+ * TIỆN ÍCH BẢO VỆ VÀ TỐI ƯU HÓA BỘ NHỚ LOCALSTORAGE / SESSIONSTORAGE - ĐẠO TÂM
+ *
  * Mục tiêu:
- * 1. Tối ưu dữ liệu: Chỉ lưu ID, tên truyện, tác giả và đường dẫn ảnh bìa khi lưu mảng truyện.
- *    Loại bỏ hoàn toàn thuộc tính chứa nội dung chữ (chapters, content, rawText...).
- * 2. Bọc lỗi an toàn: Bọc toàn bộ các lệnh localStorage.setItem trong khối try...catch.
- *    Nếu bắt được lỗi đầy bộ nhớ (QuotaExceededError), chỉ in cảnh báo ra console và bỏ qua lệnh lưu,
- *    tuyệt đối không để crash hay sập trắng màn hình ứng dụng.
- * 3. Tự động dọn dẹp các cache text quá khổ nếu phát hiện bộ nhớ đầy.
+ * 1. Lưu đệm danh sách truyện (TTL 10 phút) với đầy đủ metadata nhẹ (bao gồm
+ *    cờ hasMaleAudio / hasFemaleAudio), loại bỏ nội dung chữ dài.
+ * 2. Lưu đệm nội dung chương đã mở vào localStorage (giữ tối đa 25 chương gần nhất)
+ *    để F5 / đọc lại không tốn lượt đọc máy chủ (0 Reads).
+ * 3. Bọc try...catch toàn bộ localStorage / sessionStorage và JSON.parse để
+ *    tuyệt đối không bao giờ crash giao diện nếu trình duyệt chặn storage hoặc đầy bộ nhớ.
  * ==============================================================================
  */
+
+export const NOVELS_CACHE_KEY = 'dao_tam_novels';
+export const NOVELS_CACHE_TS_KEY = 'dao_tam_novels_cached_at';
+export const GENRES_CACHE_TS_KEY = 'dao_tam_genres_cached_at';
+export const NOVELS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 phút
+export const MAX_CACHED_CHAPTER_KEYS = 25;
 
 export interface LightweightNovelStorage {
   id: string;
@@ -24,6 +30,7 @@ export interface LightweightNovelStorage {
   lastUpdated?: string;
   mainCategory?: string;
   categories?: string[];
+  genres?: string[];
   views?: number;
   dailyViews?: number;
   rating?: number;
@@ -39,43 +46,117 @@ export interface LightweightNovelStorage {
   fullBookDiscountPriceXu?: number;
   isOriginal?: boolean;
   isExclusive?: boolean;
+  isShortStory?: boolean;
+  isHot?: boolean;
+  isSensitive?: boolean;
+  hasAudio?: boolean;
+  hasMaleAudio?: boolean;
+  hasFemaleAudio?: boolean;
+  editor?: string;
+}
+
+export function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw || typeof raw !== 'string') return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function safeSessionGetItem(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function safeSessionSetItem(key: string, value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    window.sessionStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function safeSessionRemoveItem(key: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(key);
+  } catch {}
+}
+
+/**
+ * Giữ lại tối đa N chương cache gần nhất (LRU theo timestamp chapter_full_ts_*),
+ * chỉ xóa bớt các chương cũ nhất khi vượt giới hạn hoặc đầy bộ nhớ.
+ */
+export function trimChapterCacheEntries(maxKeep: number = MAX_CACHED_CHAPTER_KEYS): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const entries: { dataKey: string; tsKey: string; ts: number }[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (!key) continue;
+      if (key.startsWith('chapter_full_') && !key.startsWith('chapter_full_ts_')) {
+        const suffix = key.slice('chapter_full_'.length);
+        const tsKey = `chapter_full_ts_${suffix}`;
+        let ts = 0;
+        try {
+          const rawTs = window.localStorage.getItem(tsKey);
+          ts = rawTs ? Number(rawTs) || 0 : 0;
+        } catch {}
+        entries.push({ dataKey: key, tsKey, ts });
+      }
+    }
+
+    if (entries.length <= maxKeep) return;
+
+    // Sắp xếp từ mới nhất -> cũ nhất, xóa phần dư cũ nhất
+    entries.sort((a, b) => b.ts - a.ts);
+    const toRemove = entries.slice(maxKeep);
+    for (const item of toRemove) {
+      try {
+        window.localStorage.removeItem(item.dataKey);
+        window.localStorage.removeItem(item.tsKey);
+      } catch {}
+    }
+  } catch {}
 }
 
 /**
  * Tự động dọn dẹp các key cache nội dung chữ quá nặng (như chapter_full_*)
- * để giải phóng dung lượng cho localStorage.
+ * để giải phóng dung lượng cho localStorage khi bộ nhớ đầy.
  */
 export function cleanHeavyStorageCache(): void {
   if (typeof window === 'undefined') return;
   try {
     const keysToRemove: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
       if (key && (key.startsWith('chapter_full_') || key.startsWith('dao_tam_real_comments_'))) {
         keysToRemove.push(key);
       }
     }
     keysToRemove.forEach((k) => {
       try {
-        localStorage.removeItem(k);
-      } catch (e) {}
+        window.localStorage.removeItem(k);
+      } catch {}
     });
-    if ((keysToRemove?.length || 0) > 0) {
-      console.warn(`[SafeStorage] Đã dọn dẹp ${keysToRemove?.length || 0} mục cache nội dung văn bản nặng để giải phóng bộ nhớ.`);
-    }
-  } catch (err) {
-    console.warn('[SafeStorage] Không thể quét dọn localStorage:', err);
-  }
+  } catch {}
 }
 
 /**
  * Bọc an toàn tuyệt đối cho localStorage.setItem.
- * Nếu bị lỗi QuotaExceededError hoặc bất kỳ lỗi nào khác, chỉ log cảnh báo và không bao giờ crash giao diện.
+ * Nếu bị lỗi QuotaExceededError hoặc bất kỳ lỗi nào khác, chỉ thu gọn cache cũ và thử lại 1 lần.
  */
 export function safeSetItem(key: string, value: string): boolean {
   if (typeof window === 'undefined') return false;
   try {
-    localStorage.setItem(key, value);
+    window.localStorage.setItem(key, value);
     return true;
   } catch (error: any) {
     const isQuota =
@@ -83,17 +164,23 @@ export function safeSetItem(key: string, value: string): boolean {
       error?.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
       error?.code === 22 ||
       error?.code === 1014 ||
-      (error?.message && error.message.toLowerCase().includes('quota'));
+      (error?.message && String(error.message).toLowerCase().includes('quota'));
 
     if (isQuota) {
-      console.warn(
-        `[SafeStorage] Bộ nhớ localStorage đã đầy (QuotaExceededError). Bỏ qua lệnh lưu khóa "${key}" để bảo vệ giao diện.`,
-        error
-      );
-      // Dọn dẹp các cache text thừa thãi để lần lưu kế tiếp có thể hoạt động
-      cleanHeavyStorageCache();
-    } else {
-      console.warn(`[SafeStorage] Lỗi khi ghi vào localStorage cho khóa "${key}":`, error);
+      // Đầu tiên thu gọn xuống còn 8 chương mới nhất; nếu vẫn đầy mới dọn toàn bộ cache text
+      trimChapterCacheEntries(8);
+      try {
+        window.localStorage.setItem(key, value);
+        return true;
+      } catch {
+        cleanHeavyStorageCache();
+        try {
+          window.localStorage.setItem(key, value);
+          return true;
+        } catch {
+          return false;
+        }
+      }
     }
     return false;
   }
@@ -105,9 +192,8 @@ export function safeSetItem(key: string, value: string): boolean {
 export function safeGetItem(key: string): string | null {
   if (typeof window === 'undefined') return null;
   try {
-    return localStorage.getItem(key);
-  } catch (error) {
-    console.warn(`[SafeStorage] Lỗi khi đọc từ localStorage cho khóa "${key}":`, error);
+    return window.localStorage.getItem(key);
+  } catch {
     return null;
   }
 }
@@ -118,29 +204,50 @@ export function safeGetItem(key: string): string | null {
 export function safeRemoveItem(key: string): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.removeItem(key);
-  } catch (error) {
-    console.warn(`[SafeStorage] Lỗi khi xóa khóa "${key}" khỏi localStorage:`, error);
-  }
+    window.localStorage.removeItem(key);
+  } catch {}
 }
 
 /**
  * Chuẩn hóa và loại bỏ toàn bộ các thuộc tính nội dung chữ (chapters, content, rawText...)
- * CHỈ GIỮ LẠI: ID, tên truyện, tác giả và đường dẫn ảnh bìa đúng như yêu cầu bắt buộc.
+ * Giữ lại metadata nhẹ và 2 cờ hasMaleAudio / hasFemaleAudio để ẩn/hiện giọng đọc tức thì.
  */
 export function stripNovelForStorage(novel: any): LightweightNovelStorage {
   const chaps = Array.isArray(novel?.chapters) ? novel.chapters : [];
   const latestCh = (chaps?.length || 0) > 0 ? chaps[(chaps?.length || 0) - 1] : null;
-  const total = typeof novel?.totalChapters === 'number' && novel.totalChapters > 0
-    ? novel.totalChapters
-    : ((chaps?.length || 0) > 0 ? (chaps?.length || 0) : (novel?.latestChapterNumber || 1));
-  const latestTitle = latestCh?.title || novel?.latestChapterTitle || (total ? `Chương ${total}` : undefined);
+  const total =
+    typeof novel?.totalChapters === 'number' && novel.totalChapters > 0
+      ? novel.totalChapters
+      : (chaps?.length || 0) > 0
+      ? chaps?.length || 0
+      : novel?.latestChapterNumber || 1;
+  const latestTitle =
+    latestCh?.title || novel?.latestChapterTitle || (total ? `Chương ${total}` : undefined);
   const latestNum = latestCh?.number || novel?.latestChapterNumber || total;
+
+  const hasMaleFromChapters = chaps.some(
+    (c: any) =>
+      (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+      (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
+  );
+  const hasFemaleFromChapters = chaps.some(
+    (c: any) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
+  );
+
+  const hasMaleAudio =
+    typeof novel?.hasMaleAudio === 'boolean'
+      ? novel.hasMaleAudio || hasMaleFromChapters
+      : hasMaleFromChapters;
+  const hasFemaleAudio =
+    typeof novel?.hasFemaleAudio === 'boolean'
+      ? novel.hasFemaleAudio || hasFemaleFromChapters
+      : hasFemaleFromChapters;
 
   return {
     id: String(novel?.id || ''),
     title: String(novel?.title || ''),
     author: String(novel?.author || 'Khuyết danh'),
+    editor: novel?.editor,
     coverImage: String(novel?.coverImage || ''),
     status: novel?.status || 'Đang ra',
     totalChapters: total > 0 ? total : undefined,
@@ -149,6 +256,7 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     lastUpdated: novel?.lastUpdated || 'Vừa xong',
     mainCategory: novel?.mainCategory,
     categories: Array.isArray(novel?.categories) ? novel.categories : undefined,
+    genres: Array.isArray(novel?.genres) ? novel.genres : undefined,
     views: typeof novel?.views === 'number' ? novel.views : 0,
     dailyViews: typeof novel?.dailyViews === 'number' ? novel.dailyViews : 0,
     rating: typeof novel?.rating === 'number' ? novel.rating : 5,
@@ -156,7 +264,12 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     coinCount: typeof novel?.coinCount === 'number' ? novel.coinCount : 0,
     createdAt: typeof novel?.createdAt === 'number' ? novel.createdAt : undefined,
     updatedAt: typeof novel?.updatedAt === 'number' ? novel.updatedAt : undefined,
-    lastChapterUpdatedAt: typeof novel?.lastChapterUpdatedAt === 'number' ? novel.lastChapterUpdatedAt : (typeof novel?.updatedAt === 'number' ? novel.updatedAt : undefined),
+    lastChapterUpdatedAt:
+      typeof novel?.lastChapterUpdatedAt === 'number'
+        ? novel.lastChapterUpdatedAt
+        : typeof novel?.updatedAt === 'number'
+        ? novel.updatedAt
+        : undefined,
     slug: novel?.slug,
     isHidden: Boolean(novel?.isHidden),
     publishStatus: novel?.publishStatus,
@@ -164,29 +277,76 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     fullBookDiscountPriceXu: novel?.fullBookDiscountPriceXu,
     isOriginal: novel?.isOriginal,
     isExclusive: novel?.isExclusive,
+    isShortStory: novel?.isShortStory,
+    isHot: novel?.isHot,
+    isSensitive: novel?.isSensitive,
+    hasAudio: Boolean(novel?.hasAudio || hasMaleAudio || hasFemaleAudio),
+    hasMaleAudio,
+    hasFemaleAudio,
   };
 }
 
 /**
- * Lưu danh sách truyện tối ưu vào localStorage an toàn tuyệt đối
+ * Lưu danh sách truyện tối ưu vào localStorage kèm dấu thời gian cache (10 phút)
  */
 export function saveNovelsToStorage(novels: any[]): void {
   if (!Array.isArray(novels) || typeof window === 'undefined') return;
   try {
     const minimalNovels: LightweightNovelStorage[] = (novels || []).map(stripNovelForStorage);
-    const saved = safeSetItem('dao_tam_novels', JSON.stringify(minimalNovels));
-    if (!saved && minimalNovels.length > 150) {
-      safeSetItem('dao_tam_novels', JSON.stringify(minimalNovels.slice(0, 150)));
+    const saved = safeSetItem(NOVELS_CACHE_KEY, JSON.stringify(minimalNovels));
+    if (saved) {
+      safeSetItem(NOVELS_CACHE_TS_KEY, String(Date.now()));
+    } else if (minimalNovels.length > 150) {
+      const savedTrimmed = safeSetItem(
+        NOVELS_CACHE_KEY,
+        JSON.stringify(minimalNovels.slice(0, 150))
+      );
+      if (savedTrimmed) {
+        safeSetItem(NOVELS_CACHE_TS_KEY, String(Date.now()));
+      }
     }
-  } catch (error) {
-    console.warn('[SafeStorage] Không thể chuẩn bị mảng truyện để lưu vào localStorage:', error);
+  } catch {}
+}
+
+/**
+ * Lấy danh sách truyện từ bộ nhớ đệm nếu còn hạn 10 phút (tốn 0 lượt đọc máy chủ).
+ */
+export function getCachedNovelsIfFresh(ttlMs: number = NOVELS_CACHE_TTL_MS): any[] | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const tsRaw = safeGetItem(NOVELS_CACHE_TS_KEY);
+    if (!tsRaw) return null;
+    const cachedAt = Number(tsRaw);
+    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > ttlMs) {
+      return null;
+    }
+    const rawNovels = safeGetItem(NOVELS_CACHE_KEY);
+    const parsed = safeJsonParse<any[]>(rawNovels, []);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
-// Chạy dọn dẹp nhẹ khi khởi tạo file trong môi trường trình duyệt
-if (typeof window !== 'undefined') {
+export function invalidateNovelsCache(): void {
+  safeRemoveItem(NOVELS_CACHE_TS_KEY);
+}
+
+export function isGenresCacheFresh(ttlMs: number = NOVELS_CACHE_TTL_MS): boolean {
+  if (typeof window === 'undefined') return false;
   try {
-    // Nếu có dữ liệu cũ quá tải, tự dọn dẹp
-    cleanHeavyStorageCache();
-  } catch (e) {}
+    const tsRaw = safeGetItem(GENRES_CACHE_TS_KEY);
+    if (!tsRaw) return false;
+    const ts = Number(tsRaw);
+    return Number.isFinite(ts) && Date.now() - ts <= ttlMs;
+  } catch {
+    return false;
+  }
+}
+
+export function markGenresCacheFresh(): void {
+  safeSetItem(GENRES_CACHE_TS_KEY, String(Date.now()));
 }

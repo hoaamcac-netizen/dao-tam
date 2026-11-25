@@ -47,6 +47,8 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
     transition: background-color 0.3s ease, color 0.3s ease;
+    overflow-x: clip;
+    max-width: 100%;
   }
 
   /* Font chuẩn hiện đại không chân */

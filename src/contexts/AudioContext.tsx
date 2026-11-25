@@ -19,8 +19,8 @@ import {
   getNovelVoiceAvailability,
   resolveEffectiveVoiceForNovel,
 } from '../utils/rulesAndVoices';
-import { safeGetItem, safeSetItem } from '../utils/safeStorage';
-import { fetchFullChapterContent, updateUserState } from '../firebase/services';
+import { safeGetItem, safeSetItem, safeJsonParse } from '../utils/safeStorage';
+import { fetchFullChapterContent } from '../firebase/services';
 import { useAuth } from './AuthContext';
 
 const CHUNK_MIN_LEN = DEFAULT_CHUNK_MIN_LENGTH;
@@ -454,14 +454,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         lastReadAt: Date.now(),
       };
 
-      const filteredHistory = (currentUser.readingHistory || []).filter(
-        (item) => item.novelId !== novel.id
-      );
-      const nextHistory = [progressEntry, ...filteredHistory].slice(0, 50);
-
       try {
         const rawLocal = safeGetItem('daotam_reading_history');
-        const existingLocal: any[] = rawLocal ? JSON.parse(rawLocal) : [];
+        const parsedLocal = safeJsonParse<any[]>(rawLocal, []);
+        const existingLocal: any[] = Array.isArray(parsedLocal) ? parsedLocal : [];
         const novelSlug = (novel.slug && novel.slug.trim()) || novel.id;
         const chapterSlug = chapter.slug || `chuong-${chapter.number}`;
         const localEntry = {
@@ -487,8 +483,6 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           readingHistory: [progressEntry, ...prevFiltered].slice(0, 50),
         };
       });
-
-      updateUserState(currentUser.id, { readingHistory: nextHistory }, true).catch(() => {});
     },
     [saveListeningProgressLocal, setUser]
   );
@@ -1676,6 +1670,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           audio.currentTime,
           playbackRateRef.current
         );
+        if (autoNextRef.current) {
+          preloadNextAfterMp3().catch(() => {});
+        }
       };
 
       audio.ontimeupdate = () => {

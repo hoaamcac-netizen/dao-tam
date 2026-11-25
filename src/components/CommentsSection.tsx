@@ -16,7 +16,7 @@ import {
   addNovelCommentToFirestore, 
   deleteNovelCommentFromFirestore 
 } from '../firebase/services';
-import { safeSetItem } from '../utils/safeStorage';
+import { safeGetItem, safeSetItem, safeJsonParse } from '../utils/safeStorage';
 
 interface CommentsSectionProps {
   novelId: string;
@@ -32,15 +32,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   user,
 }) => {
   const [commentList, setCommentList] = useState<Comment[]>(() => {
-    // Chỉ lấy từ cache bình luận thật, không dùng bình luận ảo mẫu
-    const saved = localStorage.getItem(`dao_tam_real_comments_${novelId}`);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      } catch (e) {}
-    }
-    return [];
+    const saved = safeGetItem(`dao_tam_real_comments_${novelId}`);
+    const parsed = safeJsonParse<Comment[]>(saved, []);
+    return Array.isArray(parsed) ? parsed : [];
   });
 
   const [isLoading, setIsLoading] = useState(true);
