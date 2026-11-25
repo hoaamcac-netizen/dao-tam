@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Chapter, Novel, ReadingProgress, UserProfile } from '../types';
 import {
   AudioChunk,
@@ -15,6 +15,8 @@ import {
   normalizeEdgeVoiceId,
   isDeviceFallbackVoice,
   getMatchingBrowserVoice,
+  getNovelVoiceAvailability,
+  resolveEffectiveVoiceForNovel,
 } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem } from '../utils/safeStorage';
 import { fetchFullChapterContent, updateUserState } from '../firebase/services';
@@ -214,6 +216,7 @@ export interface AudioContextType {
   currentChunk: AudioChunk | null;
   currentChunkText: string;
   voiceId: string;
+  availableVoiceIds: string[];
   playbackRate: number;
   progress: number;
   autoNext: boolean;
@@ -316,6 +319,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const currentChunkIndexRef = useRef<number>(-1);
   const chunksRef = useRef<QueuedAudioChunk[]>([]);
   const voiceIdRef = useRef<string>('vi-VN-NamMinhNeural');
+  const preferredVoiceIdRef = useRef<string>('vi-VN-NamMinhNeural');
   const playbackRateRef = useRef<number>(1.0);
   const autoNextRef = useRef<boolean>(true);
   const activeNovelRef = useRef<Novel | null>(null);
@@ -697,6 +701,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           parsed.autoNextChapter !== undefined ? Boolean(parsed.autoNextChapter) : true;
         setVoiceIdState(resolvedVoice);
         voiceIdRef.current = resolvedVoice;
+        preferredVoiceIdRef.current = resolvedVoice;
         setAutoNextState(resolvedAutoNext);
         autoNextRef.current = resolvedAutoNext;
       }
@@ -2062,6 +2067,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const setVoiceId = useCallback(
     (newVoice: string) => {
       const normalized = normalizeEdgeVoiceId(newVoice);
+      preferredVoiceIdRef.current = normalized;
       setVoiceIdState(normalized);
       voiceIdRef.current = normalized;
       setAudioError(null);
@@ -2253,7 +2259,19 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
 
-      const currentVoice = normalizeEdgeVoiceId(voiceIdRef.current);
+      const initialAvailability = getNovelVoiceAvailability(
+        novel,
+        chaptersListRef.current,
+        effectiveChapter
+      );
+      const currentVoice = resolveEffectiveVoiceForNovel(
+        preferredVoiceIdRef.current,
+        initialAvailability
+      );
+      if (voiceIdRef.current !== currentVoice) {
+        voiceIdRef.current = currentVoice;
+        setVoiceIdState(currentVoice);
+      }
       let directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, currentVoice);
 
       try {
@@ -2365,9 +2383,22 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     updatedLinks = true;
                   }
                   if (updatedLinks) {
+                    const refreshedAvailability = getNovelVoiceAvailability(
+                      novel,
+                      chaptersListRef.current,
+                      effectiveChapter
+                    );
+                    const refreshedVoice = resolveEffectiveVoiceForNovel(
+                      preferredVoiceIdRef.current,
+                      refreshedAvailability
+                    );
+                    if (voiceIdRef.current !== refreshedVoice) {
+                      voiceIdRef.current = refreshedVoice;
+                      setVoiceIdState(refreshedVoice);
+                    }
                     const resolvedAfterFetch = resolveChapterVoiceAudioUrl(
                       effectiveChapter,
-                      currentVoice
+                      refreshedVoice
                     );
                     if (resolvedAfterFetch) {
                       setFallbackNotice(null);
@@ -2561,6 +2592,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const currentChunkText = currentChunk?.text || '';
 
+  const availableVoiceIds = useMemo(() => {
+    return getNovelVoiceAvailability(activeNovel, chaptersList, activeChapter).availableVoiceIds;
+  }, [activeNovel, chaptersList, activeChapter]);
+
   return (
     <AudioContext.Provider
       value={{
@@ -2580,6 +2615,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         currentChunk,
         currentChunkText,
         voiceId,
+        availableVoiceIds,
         playbackRate,
         progress,
         autoNext,

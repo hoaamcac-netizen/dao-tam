@@ -10,6 +10,7 @@ import {
 interface VoiceSelectorDropdownProps {
   selectedVoiceId: string;
   onSelectVoice: (voiceId: string) => void;
+  availableVoiceIds?: string[];
   direction?: 'up' | 'down';
   variant?: 'floatingBar' | 'readerHeader';
 }
@@ -17,13 +18,22 @@ interface VoiceSelectorDropdownProps {
 export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
   selectedVoiceId,
   onSelectVoice,
+  availableVoiceIds,
   direction = 'up',
   variant = 'floatingBar',
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const normalizedSelected = normalizeEdgeVoiceId(selectedVoiceId);
+  const visibleOptions = (VOICE_SELECTOR_OPTIONS || []).filter((opt) => {
+    if (!Array.isArray(availableVoiceIds) || availableVoiceIds.length === 0) return true;
+    return availableVoiceIds.includes(opt.id) || isDeviceFallbackVoice(opt.id);
+  });
+
+  const rawNormalized = normalizeEdgeVoiceId(selectedVoiceId);
+  const normalizedSelected = visibleOptions.some((o) => o.id === rawNormalized)
+    ? rawNormalized
+    : visibleOptions[0]?.id || 'device-fallback';
   const activeMeta = getVoiceDisplayMeta(normalizedSelected);
   const isFallbackActive = isDeviceFallbackVoice(normalizedSelected);
   const isFemaleActive = normalizedSelected === 'vi-VN-HoaiMyNeural';
@@ -119,7 +129,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
           aria-label="Chọn giọng đọc"
           className={`${menuPositionClasses} z-50 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-2 space-y-1 animate-in fade-in zoom-in-95 duration-150`}
         >
-          {(VOICE_SELECTOR_OPTIONS || []).map((opt) => {
+          {(visibleOptions || []).map((opt) => {
             const isSelected = opt.id === normalizedSelected;
             const isDevice = isDeviceFallbackVoice(opt.id);
             const isFemale = opt.id === 'vi-VN-HoaiMyNeural';

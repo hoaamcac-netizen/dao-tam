@@ -3,7 +3,9 @@ import { Novel, Chapter, ReaderSettings, ReadingProgress, UserProfile } from '..
 import { 
   normalizeEdgeVoiceId,
   checkIsChapterUnlocked,
-  formatXu
+  formatXu,
+  getNovelVoiceAvailability,
+  resolveEffectiveVoiceForNovel
 } from '../utils/rulesAndVoices';
 import { useAudio } from '../contexts/AudioContext';
 import { fetchFullChapterContent } from '../firebase/services';
@@ -184,6 +186,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     hasInitialRealContent ? getCleanChapterContent(chapter.content) : ''
   );
   const [isLoadingFullContent, setIsLoadingFullContent] = useState<boolean>(!hasInitialRealContent);
+  const [chapterAudioMetaTick, setChapterAudioMetaTick] = useState<number>(0);
 
   const lastFetchedChapterKeyRef = useRef<string>('');
   const lastSyncedAudioKeyRef = useRef<string>('');
@@ -209,14 +212,21 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
       fetchFullChapterContent(novel.id, chapter.id, chapter.number, novel.updatedAt)
         .then((res) => {
           if (!isCancelled && res) {
+            let foundAudioMeta = false;
             if (res.audioUrl && !chapter.audioUrl) {
               chapter.audioUrl = res.audioUrl;
+              foundAudioMeta = true;
             }
             if (res.audioUrlMale && !chapter.audioUrlMale) {
               chapter.audioUrlMale = res.audioUrlMale;
+              foundAudioMeta = true;
             }
             if (res.audioUrlFemale && !chapter.audioUrlFemale) {
               chapter.audioUrlFemale = res.audioUrlFemale;
+              foundAudioMeta = true;
+            }
+            if (foundAudioMeta) {
+              setChapterAudioMetaTick((t) => t + 1);
             }
             const cleanFetched = getCleanChapterContent(res.content);
             if (cleanFetched) {
@@ -366,8 +376,37 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const currentChunkIndex = isCurrentChapterAudio ? audioContext.currentChunkIndex : -1;
   const isTtsPlaying = isCurrentChapterAudio && audioContext.isPlaying;
   const isTtsLoading = isCurrentChapterAudio && audioContext.isLoading;
-  const activeVoiceId = audioContext.voiceId;
   const playbackRate = audioContext.playbackRate;
+
+  const readerVoiceAvailability = useMemo(() => {
+    void chapterAudioMetaTick;
+    return getNovelVoiceAvailability(
+      novel,
+      safeChapters,
+      audioContext.activeNovel?.id === novel.id ? audioContext.activeChapter || chapter : chapter
+    );
+  }, [
+    novel,
+    safeChapters,
+    chapter,
+    audioContext.activeNovel?.id,
+    audioContext.activeChapter,
+    chapterAudioMetaTick,
+  ]);
+
+  const effectiveReaderVoiceId = useMemo(() => {
+    const baseVoice =
+      audioContext.activeNovel?.id === novel.id
+        ? audioContext.voiceId
+        : readerSettings.selectedVoiceId;
+    return resolveEffectiveVoiceForNovel(baseVoice, readerVoiceAvailability);
+  }, [
+    audioContext.activeNovel?.id,
+    audioContext.voiceId,
+    novel.id,
+    readerSettings.selectedVoiceId,
+    readerVoiceAvailability,
+  ]);
 
   // Điều phối các hành động Audio qua AudioContext
   const playTts = useCallback(async (startIndex?: number) => {
@@ -898,8 +937,9 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
           {/* Action buttons */}
           <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
             <VoiceSelectorDropdown
-              selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
+              selectedVoiceId={effectiveReaderVoiceId}
               onSelectVoice={handleChangeVoice}
+              availableVoiceIds={readerVoiceAvailability.availableVoiceIds}
               direction="down"
               variant="readerHeader"
             />

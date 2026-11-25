@@ -34,11 +34,19 @@ const CHAPTERS_PER_PAGE = 100;
 
 type VoiceKey = 'male' | 'female';
 type DeleteVoiceScope = 'male' | 'female' | 'both';
-type VoiceFilterMode = 'all' | 'missing_male' | 'missing_female' | 'both_ready';
+type VoiceFilterMode = 'all' | 'missing_male' | 'missing_female' | 'both_ready' | 'broken';
 
 export interface BrokenVoiceState {
   male?: boolean;
   female?: boolean;
+}
+
+interface BrokenLinkEntry {
+  chapterId: string;
+  chapterNumber: number;
+  chapterTitle: string;
+  voice: VoiceKey;
+  voiceLabel: string;
 }
 
 function getMaleAudioUrl(chapter: Chapter): string {
@@ -112,6 +120,7 @@ interface AdminChapterMp3ActionsProps {
   chapter: Chapter;
   disabledExternally?: boolean;
   brokenVoices?: BrokenVoiceState;
+  externalEditRequest?: { chapterId: string; voice: VoiceKey; nonce: number } | null;
   onAudioLinksUpdated: (
     chapter: Chapter,
     links: { audioUrl?: string; audioUrlMale?: string; audioUrlFemale?: string }
@@ -124,6 +133,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   chapter,
   disabledExternally = false,
   brokenVoices,
+  externalEditRequest,
   onAudioLinksUpdated,
   onClearBrokenFlag,
 }) => {
@@ -146,6 +156,18 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!externalEditRequest || externalEditRequest.chapterId !== chapter.id) return;
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setEditingVoice(externalEditRequest.voice);
+    setLinkInput(
+      externalEditRequest.voice === 'male'
+        ? getMaleAudioUrl(chapter)
+        : getFemaleAudioUrl(chapter)
+    );
+  }, [externalEditRequest, chapter]);
 
   const maleUrl = getMaleAudioUrl(chapter);
   const femaleUrl = getFemaleAudioUrl(chapter);
@@ -323,7 +345,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
             isBroken ? (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[10px] font-bold">
                 <AlertTriangle className="w-3 h-3 shrink-0" />
-                <span>⚠️ Link lỗi</span>
+                <span>Link lỗi</span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
@@ -417,7 +439,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           <span className="flex items-center gap-1.5 min-w-0">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
             <span>
-              ⚠️ Còn thiếu link MP3: <strong>{missingVoices.join(' / ')}</strong>
+              Còn thiếu link MP3: <strong>{missingVoices.join(' / ')}</strong>
             </span>
           </span>
           <button
@@ -574,9 +596,10 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   const [toolbarMessage, setToolbarMessage] = useState<{
     type: 'success' | 'error' | 'warning';
     text: string;
+    includeBrokenList?: boolean;
   } | null>(null);
 
-  // Page Link Health Check
+  // Page Link Health Check & Jump-to-Broken Chapter
   const [isCheckingLinks, setIsCheckingLinks] = useState(false);
   const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number }>({
     checked: 0,
@@ -584,6 +607,15 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   });
   const checkAbortRef = useRef<boolean>(false);
   const [brokenLinksMap, setBrokenLinksMap] = useState<Record<string, BrokenVoiceState>>({});
+  const chapterCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const pendingJumpChapterIdRef = useRef<string | null>(null);
+  const [highlightedChapterId, setHighlightedChapterId] = useState<string | null>(null);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [editVoiceRequest, setEditVoiceRequest] = useState<{
+    chapterId: string;
+    voice: VoiceKey;
+    nonce: number;
+  } | null>(null);
 
   // Export Backup (.txt) Dropdown
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -599,6 +631,9 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       checkAbortRef.current = true;
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -624,14 +659,46 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     };
   }, [novel.id]);
 
-  // Reset page to 1 when search or filter changes
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery, voiceFilter]);
-
   const sortedChapters = useMemo(() => {
     return [...(chapters || [])].sort((a, b) => Number(a.number) - Number(b.number));
   }, [chapters]);
+
+  const { brokenEntries, brokenChapterIdsSet } = useMemo(() => {
+    const entries: BrokenLinkEntry[] = [];
+    const chapIds = new Set<string>();
+    for (const ch of sortedChapters) {
+      const state = brokenLinksMap[ch.id];
+      if (!state) continue;
+      if (state.male && getMaleAudioUrl(ch)) {
+        entries.push({
+          chapterId: ch.id,
+          chapterNumber: Number(ch.number),
+          chapterTitle: ch.title || `Chương ${ch.number}`,
+          voice: 'male',
+          voiceLabel: 'Nam Minh',
+        });
+        chapIds.add(ch.id);
+      }
+      if (state.female && getFemaleAudioUrl(ch)) {
+        entries.push({
+          chapterId: ch.id,
+          chapterNumber: Number(ch.number),
+          chapterTitle: ch.title || `Chương ${ch.number}`,
+          voice: 'female',
+          voiceLabel: 'Hằng Nga',
+        });
+        chapIds.add(ch.id);
+      }
+    }
+    return { brokenEntries: entries, brokenChapterIdsSet: chapIds };
+  }, [sortedChapters, brokenLinksMap]);
+
+  useEffect(() => {
+    if (voiceFilter === 'broken' && brokenChapterIdsSet.size === 0) {
+      setVoiceFilter('all');
+      setCurrentPage(1);
+    }
+  }, [voiceFilter, brokenChapterIdsSet.size]);
 
   const audioStats = useMemo(() => {
     let maleCount = 0;
@@ -668,13 +735,19 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       if (voiceFilter === 'missing_male' && hasMale) return false;
       if (voiceFilter === 'missing_female' && hasFemale) return false;
       if (voiceFilter === 'both_ready' && (!hasMale || !hasFemale)) return false;
+      if (voiceFilter === 'broken') {
+        const b = brokenLinksMap[ch.id];
+        const hasBrokenMale = Boolean(b?.male && hasMale);
+        const hasBrokenFemale = Boolean(b?.female && hasFemale);
+        if (!hasBrokenMale && !hasBrokenFemale) return false;
+      }
 
       if (!q && !rawTrimmed) return true;
       const numMatch = String(ch.number) === rawTrimmed || String(ch.number).includes(rawTrimmed);
       const titleMatch = removeVietnameseTones(ch.title || '').includes(q);
       return numMatch || titleMatch;
     });
-  }, [sortedChapters, searchQuery, voiceFilter]);
+  }, [sortedChapters, searchQuery, voiceFilter, brokenLinksMap]);
 
   const totalPages = Math.max(1, Math.ceil(filteredChapters.length / CHAPTERS_PER_PAGE));
   const safeCurrentPage = Math.min(currentPage, totalPages);
@@ -682,6 +755,48 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   const pageChapters = useMemo(() => {
     return filteredChapters.slice(pageStartIndex, pageStartIndex + CHAPTERS_PER_PAGE);
   }, [filteredChapters, pageStartIndex]);
+
+  useEffect(() => {
+    const targetId = pendingJumpChapterIdRef.current;
+    if (!targetId) return;
+    const cardEl = chapterCardRefs.current[targetId];
+    if (!cardEl) return;
+
+    pendingJumpChapterIdRef.current = null;
+    cardEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedChapterId(targetId);
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedChapterId((cur) => (cur === targetId ? null : cur));
+    }, 3200);
+  }, [pageChapters, safeCurrentPage]);
+
+  const handleJumpToBrokenChapter = (entry: BrokenLinkEntry) => {
+    const nextFilter: VoiceFilterMode = voiceFilter === 'broken' ? 'broken' : 'all';
+    const nextList = sortedChapters.filter((ch) => {
+      if (nextFilter === 'broken') {
+        const b = brokenLinksMap[ch.id];
+        return Boolean((b?.male && getMaleAudioUrl(ch)) || (b?.female && getFemaleAudioUrl(ch)));
+      }
+      return true;
+    });
+    const idx = nextList.findIndex(
+      (ch) => ch.id === entry.chapterId || Number(ch.number) === entry.chapterNumber
+    );
+    const targetPage = idx >= 0 ? Math.floor(idx / CHAPTERS_PER_PAGE) + 1 : 1;
+
+    setSearchQuery('');
+    setVoiceFilter(nextFilter);
+    setCurrentPage(targetPage);
+    pendingJumpChapterIdRef.current = entry.chapterId;
+    setEditVoiceRequest({
+      chapterId: entry.chapterId,
+      voice: entry.voice,
+      nonce: Date.now(),
+    });
+  };
 
   const applyBatchUpdatesToState = (updatedChaptersList: Chapter[]) => {
     const byId = new Map<string, Chapter>();
@@ -1012,6 +1127,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       setToolbarMessage({
         type: failCount > 0 ? 'warning' : 'success',
         text: `Đã kiểm tra ${tasks.length} link trang ${safeCurrentPage}: ${okCount} link hợp lệ, ${failCount} link lỗi.`,
+        includeBrokenList: failCount > 0,
       });
     }
     setIsCheckingLinks(false);
@@ -1281,7 +1397,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
 
           {toolbarMessage && (
             <div
-              className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border ${
+              className={`px-3 py-2.5 rounded-xl text-xs font-semibold flex flex-col gap-1.5 border ${
                 toolbarMessage.type === 'success'
                   ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                   : toolbarMessage.type === 'warning'
@@ -1289,21 +1405,46 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                   : 'bg-rose-50 border-rose-200 text-rose-700'
               }`}
             >
-              <span className="flex items-center gap-1.5 min-w-0">
-                {toolbarMessage.type === 'success' ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                ) : (
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                )}
-                <span>{toolbarMessage.text}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => setToolbarMessage(null)}
-                className="p-1 rounded-lg hover:bg-black/5 cursor-pointer shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 min-w-0">
+                  {toolbarMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                  )}
+                  <span>{toolbarMessage.text}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setToolbarMessage(null)}
+                  className="p-1 rounded-lg hover:bg-black/5 cursor-pointer shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {toolbarMessage.includeBrokenList && brokenEntries.length > 0 && (
+                <div className="pt-1.5 border-t border-amber-200/80 flex flex-wrap items-center gap-1.5 max-h-28 overflow-y-auto">
+                  <span className="font-bold text-rose-700 shrink-0 tabular-nums">
+                    {brokenEntries.length} link lỗi:
+                  </span>
+                  {brokenEntries.map((entry, idx) => (
+                    <React.Fragment key={`${entry.chapterId}-${entry.voice}`}>
+                      <button
+                        type="button"
+                        onClick={() => handleJumpToBrokenChapter(entry)}
+                        className="inline-flex items-center px-2 py-0.5 rounded-lg bg-white hover:bg-rose-50 border border-rose-300 text-rose-700 font-bold text-[11px] cursor-pointer transition hover:underline underline-offset-2"
+                        title={`Nhảy tới Chương ${entry.chapterNumber} để sửa link ${entry.voiceLabel}`}
+                      >
+                        Chương {entry.chapterNumber} ({entry.voiceLabel})
+                      </button>
+                      {idx < brokenEntries.length - 1 ? (
+                        <span className="text-amber-700">,</span>
+                      ) : null}
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1413,21 +1554,27 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
             </form>
           )}
 
-          {/* Thanh tìm kiếm & 4 nút lọc nhanh */}
+          {/* Thanh tìm kiếm & các nút lọc nhanh */}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
             <div className="relative flex-1 min-w-0">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setCurrentPage(1);
+                }}
                 placeholder="Tìm nhanh theo số chương (vd: 15, 120) hoặc tên chương..."
                 className="w-full min-h-[40px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-9 pr-8 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none"
               />
               {searchQuery && (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
+                  onClick={() => {
+                    setSearchQuery('');
+                    setCurrentPage(1);
+                  }}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -1450,7 +1597,10 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                 <button
                   key={f.id}
                   type="button"
-                  onClick={() => setVoiceFilter(f.id)}
+                  onClick={() => {
+                    setVoiceFilter(f.id);
+                    setCurrentPage(1);
+                  }}
                   className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums ${
                     voiceFilter === f.id
                       ? 'bg-pink-600 text-white border-pink-600 shadow-2xs'
@@ -1460,6 +1610,24 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                   {f.label}
                 </button>
               ))}
+
+              {brokenChapterIdsSet.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVoiceFilter('broken');
+                    setCurrentPage(1);
+                  }}
+                  className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums inline-flex items-center gap-1 ${
+                    voiceFilter === 'broken'
+                      ? 'bg-rose-600 text-white border-rose-600 shadow-2xs'
+                      : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300'
+                  }`}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Link lỗi ({brokenChapterIdsSet.size})</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1482,7 +1650,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               {pageChapters.map((ch) => (
                 <div
                   key={ch.id}
-                  className="p-3.5 rounded-2xl bg-white border border-slate-200 shadow-2xs"
+                  ref={(el) => {
+                    chapterCardRefs.current[ch.id] = el;
+                  }}
+                  className={`p-3.5 rounded-2xl bg-white border shadow-2xs transition-all ${
+                    highlightedChapterId === ch.id
+                      ? 'border-rose-500 ring-2 ring-rose-300 bg-rose-50/30'
+                      : 'border-slate-200'
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="min-w-0 flex-1">
@@ -1499,6 +1674,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                     novel={novel}
                     chapter={ch}
                     brokenVoices={brokenLinksMap[ch.id]}
+                    externalEditRequest={editVoiceRequest}
                     onClearBrokenFlag={(chId, voice) => {
                       setBrokenLinksMap((prev) => {
                         if (!prev[chId]) return prev;

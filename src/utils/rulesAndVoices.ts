@@ -168,6 +168,78 @@ export function getVoiceDisplayMeta(voiceId?: string | null): VoiceSelectorOptio
   );
 }
 
+export interface NovelAudioVoiceAvailability {
+  hasMaleMp3: boolean;
+  hasFemaleMp3: boolean;
+  availableVoiceIds: string[];
+}
+
+function isValidVoiceMp3Url(raw?: string | null): boolean {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) return false;
+  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('blob:');
+}
+
+/**
+ * Kiểm tra xem bộ truyện (hoặc chương hiện tại) đã có link MP3 cho giọng nào.
+ * Giọng nào chưa có bất kỳ link MP3 nào sẽ bị ẩn khỏi menu chọn giọng của người đọc.
+ * Giọng Máy Google luôn khả dụng.
+ */
+export function getNovelVoiceAvailability(
+  novel?: Novel | null,
+  extraChapters?: Chapter[] | null,
+  currentChapter?: Chapter | null
+): NovelAudioVoiceAvailability {
+  const chaptersToScan: Chapter[] = [];
+  if (Array.isArray(extraChapters)) chaptersToScan.push(...extraChapters);
+  if (Array.isArray(novel?.chapters)) chaptersToScan.push(...novel.chapters);
+  if (currentChapter) chaptersToScan.push(currentChapter);
+
+  let hasMaleMp3 = false;
+  let hasFemaleMp3 = false;
+
+  for (const ch of chaptersToScan) {
+    if (!ch) continue;
+    if (!hasMaleMp3 && (isValidVoiceMp3Url(ch.audioUrlMale) || isValidVoiceMp3Url(ch.audioUrl))) {
+      hasMaleMp3 = true;
+    }
+    if (!hasFemaleMp3 && isValidVoiceMp3Url(ch.audioUrlFemale)) {
+      hasFemaleMp3 = true;
+    }
+    if (hasMaleMp3 && hasFemaleMp3) break;
+  }
+
+  const availableVoiceIds: string[] = [];
+  if (hasMaleMp3) availableVoiceIds.push('vi-VN-NamMinhNeural');
+  if (hasFemaleMp3) availableVoiceIds.push('vi-VN-HoaiMyNeural');
+  availableVoiceIds.push(DEVICE_FALLBACK_VOICE_ID);
+
+  return { hasMaleMp3, hasFemaleMp3, availableVoiceIds };
+}
+
+/**
+ * Chọn giọng phù hợp với dữ liệu MP3 hiện có của bộ truyện:
+ * - Nếu người đọc chủ động chọn Giọng Máy Google -> giữ nguyên Giọng Máy Google.
+ * - Nếu giọng đang ưu tiên chưa có link MP3 trong bộ truyện -> chuyển sang giọng MP3 còn lại nếu có, hoặc mặc định Giọng Máy Google.
+ */
+export function resolveEffectiveVoiceForNovel(
+  preferredVoiceId: string | null | undefined,
+  availability: NovelAudioVoiceAvailability
+): string {
+  const normalized = normalizeEdgeVoiceId(preferredVoiceId || undefined);
+  if (isDeviceFallbackVoice(normalized)) {
+    return DEVICE_FALLBACK_VOICE_ID;
+  }
+  if (normalized === 'vi-VN-HoaiMyNeural') {
+    if (availability.hasFemaleMp3) return 'vi-VN-HoaiMyNeural';
+    if (availability.hasMaleMp3) return 'vi-VN-NamMinhNeural';
+    return DEVICE_FALLBACK_VOICE_ID;
+  }
+  if (availability.hasMaleMp3) return 'vi-VN-NamMinhNeural';
+  if (availability.hasFemaleMp3) return 'vi-VN-HoaiMyNeural';
+  return DEVICE_FALLBACK_VOICE_ID;
+}
+
 /**
  * Chuẩn hóa mã giọng đọc (mặc định Nam Minh để tương thích liên kết MP3 cũ & mới)
  */

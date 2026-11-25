@@ -75,6 +75,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
     totalChunks,
     currentChunkText,
     voiceId,
+    availableVoiceIds,
     playbackRate,
     progress,
     autoNext,
@@ -461,6 +462,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 <VoiceSelectorDropdown
                   selectedVoiceId={voiceId}
                   onSelectVoice={setVoiceId}
+                  availableVoiceIds={availableVoiceIds}
                   direction="up"
                   variant="floatingBar"
                 />
