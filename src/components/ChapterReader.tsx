@@ -1,10 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Novel, Chapter, ReaderSettings, ReadingProgress, UserProfile } from '../types';
 import { 
-  EDGE_TTS_VOICES, 
-  fetchAvailableEdgeVoices, 
   normalizeEdgeVoiceId,
-  isDeviceFallbackVoice,
   checkIsChapterUnlocked,
   formatXu
 } from '../utils/rulesAndVoices';
@@ -116,7 +113,6 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const [isUnlockingDirectly, setIsUnlockingDirectly] = useState(false);
   const [isWindowBlurred, setIsWindowBlurred] = useState(false);
   const [showSecurityModal, setShowSecurityModal] = useState(false);
-  const [availableVoices, setAvailableVoices] = useState(EDGE_TTS_VOICES);
 
   // LỚP 1: KIỂM TRA QUYỀN ADMIN ('hoaamcac@gmail.com', 'meoyeutien22@gmail.com')
   const isAdmin = checkIsAdmin(user?.email);
@@ -190,7 +186,6 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const [isLoadingFullContent, setIsLoadingFullContent] = useState<boolean>(!hasInitialRealContent);
 
   const lastFetchedChapterKeyRef = useRef<string>('');
-  const hasFetchedVoicesRef = useRef<boolean>(false);
   const lastSyncedAudioKeyRef = useRef<string>('');
 
   useEffect(() => {
@@ -216,6 +211,12 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
           if (!isCancelled && res) {
             if (res.audioUrl && !chapter.audioUrl) {
               chapter.audioUrl = res.audioUrl;
+            }
+            if (res.audioUrlMale && !chapter.audioUrlMale) {
+              chapter.audioUrlMale = res.audioUrlMale;
+            }
+            if (res.audioUrlFemale && !chapter.audioUrlFemale) {
+              chapter.audioUrlFemale = res.audioUrlFemale;
             }
             const cleanFetched = getCleanChapterContent(res.content);
             if (cleanFetched) {
@@ -311,21 +312,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const prevChapter = currentIndex > 0 ? safeChapters[currentIndex - 1] : null;
   const nextChapter = currentIndex >= 0 && currentIndex < (safeChapters?.length || 0) - 1 ? safeChapters[currentIndex + 1] : null;
 
-  // KẾT NỐI VÀO SINGLE SOURCE OF TRUTH: useAudio (Microsoft Edge TTS Hoài My & Nam Minh)
   const audioContext = useAudio();
-
-  // Quét danh sách giọng Edge TTS tiếng Việt thực tế (chỉ gọi khi không ở chế độ Giọng máy và không phát MP3 trực tiếp)
-  useEffect(() => {
-    if (hasFetchedVoicesRef.current) return;
-    const currentVoice = audioContext.voiceId || readerSettings.selectedVoiceId;
-    if (isDeviceFallbackVoice(currentVoice) || Boolean(chapter?.audioUrl?.trim())) return;
-    hasFetchedVoicesRef.current = true;
-    fetchAvailableEdgeVoices().then((voices) => {
-      if (voices && (voices?.length || 0) > 0) {
-        setAvailableVoices(voices);
-      }
-    });
-  }, [audioContext.voiceId, readerSettings.selectedVoiceId, chapter?.audioUrl]);
 
   // Kiểm tra xem luồng Audio đang phát có phải của đúng truyện & chương hiện tại không
   const isCurrentChapterAudio = Boolean(
@@ -351,11 +338,11 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     audioContextRef.current = audioContext;
   }, [audioContext]);
 
-  // MEMORY LEAK PROTECTION: Giải phóng tài nguyên & ngắt Giọng Máy nếu thoát trang đọc
+  // Giải phóng tài nguyên & ngắt Giọng Máy nếu thanh điều khiển không hiển thị khi thoát trang đọc
   useEffect(() => {
     return () => {
       if (
-        isDeviceFallbackVoice(audioContextRef.current.voiceId) &&
+        !audioContextRef.current.isBarVisible &&
         !audioContextRef.current.isDirectMp3
       ) {
         if (audioContextRef.current.isPlaying || audioContextRef.current.isLoading) {
@@ -577,7 +564,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
       return updated;
     });
     setVoiceId(normalized);
-    if (!isCurrentChapterAudio && !chapter?.audioUrl?.trim() && isChapterUnlocked && (audioContext.isBarVisible || isAudioActive)) {
+    if (!isCurrentChapterAudio && isChapterUnlocked && (audioContext.isBarVisible || isAudioActive)) {
       setIsAudioActive(true);
       safeSetItem('daotam_audio_active', 'true');
       audioContext.playChapter(novel, chapter, true, safeChapters, true).catch(() => {});
@@ -910,15 +897,12 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
           {/* Action buttons */}
           <div className="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
-            {/* Voice Selector Dropdown (Nam Minh / Hoài My) - ẩn khi chương dùng file MP3 trực tiếp */}
-            {!(chapter?.audioUrl && chapter.audioUrl.trim()) && (
-              <VoiceSelectorDropdown
-                selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
-                onSelectVoice={handleChangeVoice}
-                direction="down"
-                variant="readerHeader"
-              />
-            )}
+            <VoiceSelectorDropdown
+              selectedVoiceId={activeVoiceId || readerSettings.selectedVoiceId}
+              onSelectVoice={handleChangeVoice}
+              direction="down"
+              variant="readerHeader"
+            />
 
             {/* Play/Pause Button */}
             <button
@@ -1202,6 +1186,13 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
           )}
         </div>
 
+        {isCurrentChapterAudio && audioContext.fallbackNotice && (
+          <div className="mb-5 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/70 text-amber-800 dark:text-amber-200 text-xs font-medium flex items-center justify-center gap-2 text-center">
+            <Smartphone className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>{audioContext.fallbackNotice}</span>
+          </div>
+        )}
+
         {/* Text Body with Karaoke Mode Highlighting */}
         <div
           style={{
@@ -1351,7 +1342,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                     Chương {chapter.number}: {chapter.title.replace(/^Chương\s*\d+[:.]*\s*/i, '')}
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-md mx-auto leading-relaxed">
-                    Nội dung chương này đã được bảo hộ bản quyền. Mở khóa để đọc toàn bộ tác phẩm và trải nghiệm giọng đọc Audio TTS mượt mà.
+                    Nội dung chương này đã được bảo hộ bản quyền. Mở khóa để đọc toàn bộ tác phẩm và trải nghiệm giọng đọc Audio mượt mà.
                   </p>
                 </div>
 

@@ -1,6 +1,5 @@
 import { Chapter, VoiceOption, Novel } from '../types';
 import { checkIsAdmin } from '../firebase/config';
-import { getTtsEndpointUrl } from './audioChunker';
 
 /**
  * QUY TẮC THIẾT LẬP VIP TỰ ĐỘNG:
@@ -76,40 +75,38 @@ export function getStoryRoyaltyRate(isExclusive?: boolean, isEditorOnly?: boolea
 }
 
 /**
- * DANH SÁCH GIỌNG ĐỌC MICROSOFT EDGE TTS TIẾNG VIỆT THỰC TẾ
- * Tuyệt đối không bịa giọng ảo, không nhân bản bằng cách chỉnh pitch/rate.
- * Giữ nguyên chất giọng Neural tự nhiên chuẩn bản ngữ:
- * 1. vi-VN-HoaiMyNeural: Giọng Nữ truyền cảm, nhẹ nhàng, tự nhiên.
- * 2. vi-VN-NamMinhNeural: Giọng Nam trầm ấm, đĩnh đạc, chuẩn bản ngữ.
+ * DANH SÁCH GIỌNG ĐỌC MP3 CHÍNH THỨC TRÊN ĐẠO TÂM:
+ * 1. vi-VN-NamMinhNeural: Giọng Nam Minh (audioUrlMale || audioUrl)
+ * 2. vi-VN-HoaiMyNeural: Giọng Hằng Nga (audioUrlFemale)
  */
 export const EDGE_TTS_VOICES: VoiceOption[] = [
-  {
-    id: 'vi-VN-HoaiMyNeural',
-    shortName: 'vi-VN-HoaiMyNeural',
-    name: 'Hoài My',
-    tag: 'Giọng Nữ • Miền Nam',
-    gender: 'female',
-    region: 'Nam',
-    locale: 'vi-VN',
-    pitch: 1.0,
-    rateMultiplier: 1.0,
-    sampleText: 'Chào bạn, mình là Hoài My. Chúc bạn có những phút giây nghe truyện thư giãn và thú vị.',
-    description: 'Giọng đọc nữ truyền cảm, ngữ điệu tự nhiên, chuẩn bản ngữ tiếng Việt.',
-    audioSampleUrl: '/assets/audio/hoai-my.wav',
-  },
   {
     id: 'vi-VN-NamMinhNeural',
     shortName: 'vi-VN-NamMinhNeural',
     name: 'Nam Minh',
-    tag: 'Giọng Nam • Miền Bắc',
+    tag: 'Giọng Nam • MP3 trực tiếp',
     gender: 'male',
     region: 'Bắc',
     locale: 'vi-VN',
     pitch: 1.0,
     rateMultiplier: 1.0,
     sampleText: 'Tôi là Nam Minh. Mời quý bạn đọc cùng thưởng thức câu chuyện hấp dẫn này.',
-    description: 'Giọng đọc nam trầm ấm, đĩnh đạc, ngữ điệu tự nhiên chuẩn bản ngữ.',
+    description: 'Giọng đọc nam trầm ấm, đĩnh đạc (phát từ liên kết MP3 trực tiếp).',
     audioSampleUrl: '/assets/audio/nam-minh.wav',
+  },
+  {
+    id: 'vi-VN-HoaiMyNeural',
+    shortName: 'vi-VN-HoaiMyNeural',
+    name: 'Hằng Nga',
+    tag: 'Giọng Nữ • MP3 trực tiếp',
+    gender: 'female',
+    region: 'Nam',
+    locale: 'vi-VN',
+    pitch: 1.0,
+    rateMultiplier: 1.0,
+    sampleText: 'Chào bạn, mình là Hằng Nga. Chúc bạn có những phút giây nghe truyện thư giãn và thú vị.',
+    description: 'Giọng đọc nữ truyền cảm, dịu dàng (phát từ liên kết MP3 trực tiếp).',
+    audioSampleUrl: '/assets/audio/hoai-my.wav',
   },
 ];
 
@@ -127,9 +124,9 @@ export interface VoiceSelectorOption {
 
 export const DEVICE_FALLBACK_VOICE_META: VoiceSelectorOption = {
   id: DEVICE_FALLBACK_VOICE_ID,
-  label: 'Giọng Máy (Ổn định)',
-  shortLabel: 'Giọng Máy',
-  subtitle: 'Giọng thiết bị vi-VN (không phụ thuộc mạng)',
+  label: 'Giọng Máy Google',
+  shortLabel: 'Giọng Máy Google',
+  subtitle: 'Giọng đọc trực tiếp trên thiết bị (tiếng Việt)',
 };
 
 export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
@@ -137,13 +134,13 @@ export const VOICE_SELECTOR_OPTIONS: VoiceSelectorOption[] = [
     id: 'vi-VN-NamMinhNeural',
     label: 'Nam Minh',
     shortLabel: 'Nam Minh',
-    subtitle: 'Giọng chính - Nam',
+    subtitle: 'Giọng Nam • MP3 trực tiếp',
   },
   {
     id: 'vi-VN-HoaiMyNeural',
-    label: 'Hoài My',
-    shortLabel: 'Hoài My',
-    subtitle: 'Giọng chính - Nữ',
+    label: 'Hằng Nga',
+    shortLabel: 'Hằng Nga',
+    subtitle: 'Giọng Nữ • MP3 trực tiếp',
   },
   DEVICE_FALLBACK_VOICE_META,
 ];
@@ -155,7 +152,8 @@ export function isDeviceFallbackVoice(voiceId?: string | null): boolean {
     lower === DEVICE_FALLBACK_VOICE_ID ||
     lower === 'browser-speech' ||
     lower === 'device' ||
-    lower === 'speechsynthesis'
+    lower === 'speechsynthesis' ||
+    lower === 'google-device'
   );
 }
 
@@ -166,76 +164,40 @@ export function getVoiceDisplayMeta(voiceId?: string | null): VoiceSelectorOptio
   }
   return (
     VOICE_SELECTOR_OPTIONS.find((opt) => opt.id === normalized) ||
-    VOICE_SELECTOR_OPTIONS[1]
+    VOICE_SELECTOR_OPTIONS[0]
   );
 }
 
 /**
- * Chuẩn hóa mã giọng Edge TTS hoặc giữ nguyên giọng dự phòng của thiết bị
+ * Chuẩn hóa mã giọng đọc (mặc định Nam Minh để tương thích liên kết MP3 cũ & mới)
  */
 export function normalizeEdgeVoiceId(voiceId?: string): string {
-  if (!voiceId) return 'vi-VN-HoaiMyNeural';
+  if (!voiceId) return 'vi-VN-NamMinhNeural';
   if (isDeviceFallbackVoice(voiceId)) {
     return DEVICE_FALLBACK_VOICE_ID;
   }
   const lower = voiceId.toLowerCase();
-  if (lower.includes('namminh') || lower === 'nam-minh' || lower.includes('minh-quan')) {
-    return 'vi-VN-NamMinhNeural';
+  if (
+    lower.includes('hoaimy') ||
+    lower.includes('hoài my') ||
+    lower.includes('hang-nga') ||
+    lower.includes('hangnga') ||
+    lower.includes('hằng nga') ||
+    lower === 'female'
+  ) {
+    return 'vi-VN-HoaiMyNeural';
   }
-  return 'vi-VN-HoaiMyNeural';
+  return 'vi-VN-NamMinhNeural';
 }
 
-/**
- * Quét danh sách giọng tiếng Việt khả dụng thực tế từ Edge TTS qua API máy chủ
- */
-let dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
+const dynamicEdgeVoices: VoiceOption[] = [...EDGE_TTS_VOICES];
 
 export async function fetchAvailableEdgeVoices(): Promise<VoiceOption[]> {
-  const customTtsUrl = String((import.meta as any)?.env?.VITE_TTS_API_URL || '').trim();
-  if (customTtsUrl) {
-    return dynamicEdgeVoices;
-  }
-  try {
-    const res = await fetch('/api/tts/voices');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return dynamicEdgeVoices;
-    }
-    const data = await res.json();
-    if (data.success && Array.isArray(data.voices) && (data.voices?.length || 0) > 0) {
-      dynamicEdgeVoices = (data.voices || []).map((v: any) => ({
-        id: v.shortName || v.id,
-        shortName: v.shortName || v.id,
-        name: v.name || (v.gender === 'male' ? 'Nam Minh' : 'Hoài My'),
-        tag: v.tag || (v.gender === 'male' ? 'Nam • Edge Neural Tự Nhiên' : 'Nữ • Edge Neural Tự Nhiên'),
-        gender: v.gender || (v.id.includes('NamMinh') ? 'male' : 'female'),
-        locale: v.locale || 'vi-VN',
-        pitch: 1.0,
-        rateMultiplier: 1.0,
-        sampleText: v.sampleText || 'Đây là giọng đọc Edge TTS tự nhiên.',
-        description: v.description || 'Giọng đọc Microsoft Edge Neural chuẩn bản ngữ tiếng Việt.',
-      }));
-      return dynamicEdgeVoices;
-    }
-  } catch (err) {
-    console.warn('Không thể kết nối API quét giọng Edge TTS, sử dụng danh sách chuẩn:', err);
-  }
-  return dynamicEdgeVoices;
+  return [...dynamicEdgeVoices];
 }
 
 export function getLoadedEdgeVoices(): VoiceOption[] {
   return dynamicEdgeVoices;
-}
-
-/**
- * Tạo URL luồng âm thanh Edge TTS chất lượng cao
- */
-export function getEdgeTtsAudioUrl(text: string, voiceId: string): string {
-  const normalizedVoice = normalizeEdgeVoiceId(voiceId);
-  const endpoint = getTtsEndpointUrl();
-  const sep = endpoint.includes('?') ? '&' : '?';
-  return `${endpoint}${sep}text=${encodeURIComponent(text.trim())}&voice=${encodeURIComponent(normalizedVoice)}`;
 }
 
 /**
@@ -284,9 +246,9 @@ export function getMatchingBrowserVoice(voiceId: string): SpeechSynthesisVoice |
     if (lang === 'vi-vn' || lang === 'vi_vn') score += 50;
     else if (lang.startsWith('vi')) score += 30;
 
-    if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 35;
-    if (name.includes('google')) score += 25;
-    if (name.includes('microsoft')) score += 20;
+    if (name.includes('google')) score += 60;
+    if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 30;
+    if (name.includes('microsoft')) score += 15;
     if (name.includes('linh') || name.includes('hoaimy') || name.includes('hoài my') || name.includes('namminh') || name.includes('nam minh') || name.includes('an')) {
       score += 20;
     }
@@ -321,56 +283,61 @@ export function stopVoiceSample() {
   }
 }
 
+function playBrowserSpeechSample(sampleText: string, voiceId: string) {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  try {
+    const utterance = new SpeechSynthesisUtterance(sampleText);
+    utterance.lang = 'vi-VN';
+    const matched = getMatchingBrowserVoice(voiceId);
+    if (matched) utterance.voice = matched;
+    window.speechSynthesis.speak(utterance);
+  } catch {}
+}
+
 /**
- * Phát thử giọng đọc Edge TTS thực tế (truyền đúng mã voice vi-VN-HoaiMyNeural hoặc vi-VN-NamMinhNeural)
+ * Phát thử giọng đọc (ưu tiên file mẫu cục bộ, dự phòng qua giọng đọc thiết bị)
  */
 export function playVoiceSample(voiceId: string) {
   if (typeof window === 'undefined') return;
   stopVoiceSample();
 
   const normalizedVoiceId = normalizeEdgeVoiceId(voiceId);
-  const voice = dynamicEdgeVoices.find((v) => v.id === normalizedVoiceId) || dynamicEdgeVoices[0] || EDGE_TTS_VOICES[0];
+  if (isDeviceFallbackVoice(normalizedVoiceId)) {
+    playBrowserSpeechSample(
+      'Xin chào, đây là giọng đọc trực tiếp trên thiết bị của bạn.',
+      normalizedVoiceId
+    );
+    return;
+  }
 
-  // 1. Ưu tiên phát file âm thanh mẫu chuẩn cục bộ (cực nhanh < 0.05s, không bị lag mạng)
+  const voice =
+    dynamicEdgeVoices.find((v) => v.id === normalizedVoiceId) ||
+    dynamicEdgeVoices[0] ||
+    EDGE_TTS_VOICES[0];
+
   if (voice.audioSampleUrl) {
     try {
       const localAudio = new Audio(voice.audioSampleUrl);
       localAudio.volume = 1.0;
       activeAudioSample = localAudio;
-      localAudio.play().then(() => {
-        localAudio.onended = () => {
-          if (activeAudioSample === localAudio) activeAudioSample = null;
-        };
-      }).catch(() => {
-        // Nếu file cục bộ bị chặn, gọi API Edge TTS trực tuyến
-        playOnlineEdgeSample(voice, normalizedVoiceId);
-      });
+      localAudio
+        .play()
+        .then(() => {
+          localAudio.onended = () => {
+            if (activeAudioSample === localAudio) activeAudioSample = null;
+          };
+        })
+        .catch(() => {
+          playBrowserSpeechSample(voice.sampleText, normalizedVoiceId);
+        });
       return;
-    } catch (e) {
-      console.warn('Lỗi audio cục bộ, chuyển online:', e);
+    } catch {
+      playBrowserSpeechSample(voice.sampleText, normalizedVoiceId);
+      return;
     }
   }
 
-  playOnlineEdgeSample(voice, normalizedVoiceId);
-}
-
-function playOnlineEdgeSample(voice: VoiceOption, normalizedVoiceId: string) {
-  try {
-    const audioUrl = getEdgeTtsAudioUrl(voice.sampleText, normalizedVoiceId);
-    const audio = new Audio(audioUrl);
-    audio.volume = 1.0;
-    activeAudioSample = audio;
-    audio.play().then(() => {
-      audio.onended = () => {
-        if (activeAudioSample === audio) activeAudioSample = null;
-      };
-    }).catch((err) => {
-      console.warn('[VoiceSample] Không thể phát mẫu online cho giọng Neural:', err);
-      if (activeAudioSample === audio) activeAudioSample = null;
-    });
-  } catch (e) {
-    console.warn('[VoiceSample] Lỗi khởi tạo audio mẫu:', e);
-  }
+  playBrowserSpeechSample(voice.sampleText, normalizedVoiceId);
 }
 
 /**

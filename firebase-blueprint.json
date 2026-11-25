@@ -81,8 +81,10 @@
         "wordCount": { "type": "number", "description": "Số lượng từ" },
         "isVip": { "type": "boolean", "description": "Cờ đánh dấu chương VIP" },
         "priceXu": { "type": "number", "description": "Số Xu cần để mở khóa" },
-        "audioUrl": { "type": "string", "description": "Link file MP3 phát trực tiếp cho chương (ví dụ CDN GitHub)" },
-        "audioCache": { "type": "object", "description": "Kho lưu URL audio MP3 trên Firebase Cloud Storage theo giọng đọc và chỉ số chunk" }
+        "audioUrl": { "type": "string", "description": "Link file MP3 trực tiếp legacy (hiển thị và phát mặc định ở giọng Nam Minh)" },
+        "audioUrlMale": { "type": "string", "description": "Link file MP3 trực tiếp cho giọng Nam Minh" },
+        "audioUrlFemale": { "type": "string", "description": "Link file MP3 trực tiếp cho giọng Hằng Nga" },
+        "audioCache": { "type": "object", "description": "Kho lưu cache liên kết audio nếu có" }
       },
       "required": ["number", "title", "content", "isVip", "priceXu"]
     },

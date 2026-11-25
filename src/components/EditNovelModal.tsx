@@ -1,13 +1,9 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { Novel, Chapter, MainCategory, StoryRole, GenreItem } from '../types';
 import {
-  EDGE_TTS_VOICES,
   calculateChapterVip,
-  isDeviceFallbackVoice,
-  normalizeEdgeVoiceId,
 } from '../utils/rulesAndVoices';
-import { useAudio } from '../contexts/AudioContext';
-import { AdminGitHubConfigCard, AdminChapterMp3Actions } from './AdminGitHubAudioManager';
+import { AdminChapterMp3Actions } from './AdminGitHubAudioManager';
 import { 
   fetchChaptersForNovel, 
   deleteChapterFromFirestore, 
@@ -73,12 +69,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
 }) => {
   if (!isOpen || !novel) return null;
 
-  const audioContext = useAudio();
   const [activeTab, setActiveTab] = useState<'info' | 'chapters'>('info');
-  const [adminTtsVoiceId, setAdminTtsVoiceId] = useState<string>(() => {
-    const normalized = normalizeEdgeVoiceId(audioContext.voiceId || 'vi-VN-NamMinhNeural');
-    return isDeviceFallbackVoice(normalized) ? 'vi-VN-NamMinhNeural' : normalized;
-  });
 
   // Form states for Novel Metadata with complete null/undefined protection
   const [title, setTitle] = useState(novel.title || '');
@@ -1193,38 +1184,29 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
               </div>
             </div>
 
-            {/* Khung cấu hình GitHub & chọn giọng tạo MP3 (CHỈ HIỆN VỚI ADMIN) */}
             {isAdmin && (
-              <div className="space-y-3">
-                <AdminGitHubConfigCard defaultCollapsed />
-                <div className="px-4 py-2.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs text-emerald-900 font-semibold">
+              <div className="px-4 py-2.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-emerald-900 font-semibold tabular-nums">
+                  <span className="inline-flex items-center gap-1.5">
                     <Headphones className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>
-                      Audio MP3: đã có{' '}
-                      <strong className="text-emerald-700">
-                        {(chapters || []).filter((c) => Boolean(c.audioUrl && c.audioUrl.trim())).length}/{chapters?.length || 0}
-                      </strong>{' '}
-                      chương
+                      Nam Minh:{' '}
+                      <strong className="text-sky-700">
+                        {(chapters || []).filter((c) => Boolean((c.audioUrlMale || c.audioUrl || '').trim())).length}/{chapters?.length || 0}
+                      </strong>
                     </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs font-bold text-slate-700 whitespace-nowrap">
-                      Giọng tạo MP3:
-                    </label>
-                    <select
-                      value={adminTtsVoiceId}
-                      onChange={(e) => setAdminTtsVoiceId(e.target.value)}
-                      className="bg-white border border-emerald-300 rounded-xl px-2.5 py-1.5 text-xs font-bold text-slate-800 focus:outline-none focus:border-pink-500 cursor-pointer"
-                    >
-                      {EDGE_TTS_VOICES.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.name} ({v.tag})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  </span>
+                  <span className="text-emerald-300">|</span>
+                  <span>
+                    Hằng Nga:{' '}
+                    <strong className="text-pink-700">
+                      {(chapters || []).filter((c) => Boolean((c.audioUrlFemale || '').trim())).length}/{chapters?.length || 0}
+                    </strong>
+                  </span>
                 </div>
+                <span className="text-[11px] text-emerald-700 font-medium">
+                  Chế độ gắn link MP3 trực tiếp (2 giọng)
+                </span>
               </div>
             )}
 
@@ -1364,9 +1346,14 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                                   <EyeOff className="w-2.5 h-2.5 text-amber-700" /> Đã ẩn
                                 </span>
                               )}
-                              {ch.audioUrl && (
-                                <span className="bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-emerald-300 flex items-center gap-1">
-                                  <Headphones className="w-2.5 h-2.5 text-emerald-700" /> Đã có MP3
+                              {(ch.audioUrlMale || ch.audioUrl) && (
+                                <span className="bg-sky-100 text-sky-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-sky-300 flex items-center gap-1">
+                                  <Headphones className="w-2.5 h-2.5 text-sky-700" /> Nam Minh
+                                </span>
+                              )}
+                              {ch.audioUrlFemale && (
+                                <span className="bg-pink-100 text-pink-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-pink-300 flex items-center gap-1">
+                                  <Headphones className="w-2.5 h-2.5 text-pink-700" /> Hằng Nga
                                 </span>
                               )}
                             </div>
@@ -1432,17 +1419,23 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                         <AdminChapterMp3Actions
                           novel={novel}
                           chapter={ch}
-                          preferredVoiceId={adminTtsVoiceId}
-                          onAudioUrlUpdated={(targetChap, nextAudioUrl) => {
+                          onAudioLinksUpdated={(targetChap, links) => {
                             const updatedChap: Chapter = {
                               ...targetChap,
-                              audioUrl: nextAudioUrl,
+                              audioUrl: links.audioUrl,
+                              audioUrlMale: links.audioUrlMale,
+                              audioUrlFemale: links.audioUrlFemale,
                             };
                             setChapters((prev) =>
                               (prev || []).map((item) =>
                                 item.id === targetChap.id ||
                                 Number(item.number) === Number(targetChap.number)
-                                  ? { ...item, audioUrl: nextAudioUrl }
+                                  ? {
+                                      ...item,
+                                      audioUrl: links.audioUrl,
+                                      audioUrlMale: links.audioUrlMale,
+                                      audioUrlFemale: links.audioUrlFemale,
+                                    }
                                   : item
                               )
                             );

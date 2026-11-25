@@ -2567,7 +2567,13 @@ export async function fetchFullChapterContent(
   chapterId?: string,
   chapterNumber?: number,
   expectedUpdatedAt?: number
-): Promise<{ content: string; wordCount?: number; audioUrl?: string } | null> {
+): Promise<{
+  content: string;
+  wordCount?: number;
+  audioUrl?: string;
+  audioUrlMale?: string;
+  audioUrlFemale?: string;
+} | null> {
   if (!novelId) return null;
 
   const saveChapterCache = (text: string) => {
@@ -2627,6 +2633,8 @@ export async function fetchFullChapterContent(
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
+            audioUrlMale: data.audioUrlMale || undefined,
+            audioUrlFemale: data.audioUrlFemale || undefined,
           };
         }
       }
@@ -2642,6 +2650,8 @@ export async function fetchFullChapterContent(
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
+            audioUrlMale: data.audioUrlMale || undefined,
+            audioUrlFemale: data.audioUrlFemale || undefined,
           };
         }
       }
@@ -2661,6 +2671,8 @@ export async function fetchFullChapterContent(
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
+            audioUrlMale: data.audioUrlMale || undefined,
+            audioUrlFemale: data.audioUrlFemale || undefined,
           };
         }
       }
@@ -2673,6 +2685,8 @@ export async function fetchFullChapterContent(
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: data.audioUrl || undefined,
+            audioUrlMale: data.audioUrlMale || undefined,
+            audioUrlFemale: data.audioUrlFemale || undefined,
           };
         }
       }
@@ -2697,6 +2711,8 @@ export async function fetchFullChapterContent(
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: matched.audioUrl || undefined,
+            audioUrlMale: matched.audioUrlMale || undefined,
+            audioUrlFemale: matched.audioUrlFemale || undefined,
           };
         }
       }
@@ -2720,6 +2736,8 @@ export async function fetchFullChapterContent(
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
             audioUrl: matched.audioUrl || undefined,
+            audioUrlMale: matched.audioUrlMale || undefined,
+            audioUrlFemale: matched.audioUrlFemale || undefined,
           };
         }
       }
@@ -2762,6 +2780,8 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
         audioUrl: c.audioUrl || undefined,
+        audioUrlMale: c.audioUrlMale || undefined,
+        audioUrlFemale: c.audioUrlFemale || undefined,
         content: '', // KHÔNG BAO GIỜ tải text nội dung trong danh sách truyện
       }));
 
@@ -2850,6 +2870,8 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       wordCount: Number(c.wordCount || 0),
       isHidden: Boolean(c.isHidden),
       audioUrl: c.audioUrl || undefined,
+      audioUrlMale: c.audioUrlMale || undefined,
+      audioUrlFemale: c.audioUrlFemale || undefined,
       content: '',
     }));
 
@@ -2975,6 +2997,8 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
         audioUrl: c.audioUrl || undefined,
+        audioUrlMale: c.audioUrlMale || undefined,
+        audioUrlFemale: c.audioUrlFemale || undefined,
         content: '',
       }));
 
@@ -3146,6 +3170,8 @@ export async function queryNovelsWithFilters(
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
         audioUrl: c.audioUrl || undefined,
+        audioUrlMale: c.audioUrlMale || undefined,
+        audioUrlFemale: c.audioUrlFemale || undefined,
         content: '',
       }));
 
@@ -3302,6 +3328,8 @@ export function stripChapterContent(chapter: Chapter): Chapter {
     isHidden: Boolean(chapter.isHidden),
     content: '', // Không chứa nội dung chữ trên root doc
     audioUrl: chapter.audioUrl || undefined,
+    audioUrlMale: chapter.audioUrlMale || undefined,
+    audioUrlFemale: chapter.audioUrlFemale || undefined,
   };
 }
 
@@ -3551,6 +3579,8 @@ export async function saveNovelWithInitialChaptersBatch(
       isVip: !!ch.isVip,
       priceXu: ch.priceXu || 0,
       audioUrl: ch.audioUrl || undefined,
+      audioUrlMale: ch.audioUrlMale || undefined,
+      audioUrlFemale: ch.audioUrlFemale || undefined,
       content: typeof ch.content === 'string' ? ch.content : '',
       updatedAt: nowTs,
     });
@@ -3794,22 +3824,32 @@ export async function toggleHideChapterInFirestore(
 }
 
 /**
- * Cập nhật hoặc xóa trường audioUrl cho một chương cụ thể trên Firestore:
- * - Cập nhật cả document chi tiết trong subcollection novels/{novelId}/chapters
- * - Cập nhật cả mảng mục lục chapters trên root document novels/{novelId} để độc giả tải về ngay
+ * Cập nhật hoặc xóa liên kết MP3 theo từng giọng (Nam Minh / Hằng Nga) cho 1 chương:
+ * - voice = 'male'   -> cập nhật/xóa audioUrlMale (khi xóa cũng dọn audioUrl cũ để tránh sót link cũ)
+ * - voice = 'female' -> chỉ cập nhật/xóa audioUrlFemale, giữ nguyên 100% giọng Nam Minh & audioUrl cũ
  */
 export async function updateChapterAudioUrlInFirestore(
   novelId: string,
   chapter: Chapter,
-  audioUrl: string | null
+  audioUrl: string | null,
+  voice: 'male' | 'female' = 'male'
 ): Promise<void> {
   if (!novelId || !chapter) return;
 
   const cleanUrl = typeof audioUrl === 'string' ? audioUrl.trim() : '';
   const nowTs = Date.now();
-  const subPayload: Record<string, any> = cleanUrl
-    ? { audioUrl: cleanUrl, updatedAt: nowTs }
-    : { audioUrl: deleteField(), updatedAt: nowTs };
+  const subPayload: Record<string, any> = { updatedAt: nowTs };
+
+  if (voice === 'female') {
+    subPayload.audioUrlFemale = cleanUrl ? cleanUrl : deleteField();
+  } else {
+    if (cleanUrl) {
+      subPayload.audioUrlMale = cleanUrl;
+    } else {
+      subPayload.audioUrlMale = deleteField();
+      subPayload.audioUrl = deleteField();
+    }
+  }
 
   const chNumId = String(chapter.number);
   const targetDocIds = Array.from(
@@ -3827,7 +3867,6 @@ export async function updateChapterAudioUrlInFirestore(
     if (i === 0) {
       await setDoc(chRef, subPayload, { merge: true });
     } else {
-      // Chỉ cập nhật thêm doc ID phụ nếu doc đó thực sự tồn tại
       try {
         const snap = await getDoc(chRef);
         if (snap.exists()) {
@@ -3837,7 +3876,7 @@ export async function updateChapterAudioUrlInFirestore(
     }
   }
 
-  // 2. Đồng bộ trường audioUrl trong mảng mục lục chapters của root doc novels/{novelId}
+  // 2. Đồng bộ trong mảng mục lục chapters của root doc novels/{novelId}
   try {
     const novelRef = doc(db, 'novels', novelId);
     const novelSnap = await getDoc(novelRef);
@@ -3850,10 +3889,19 @@ export async function updateChapterAudioUrlInFirestore(
             (Number(c.number) > 0 && Number(c.number) === Number(chapter.number));
           if (!isMatch) return c;
           const nextEntry: Record<string, any> = { ...c };
-          if (cleanUrl) {
-            nextEntry.audioUrl = cleanUrl;
+          if (voice === 'female') {
+            if (cleanUrl) {
+              nextEntry.audioUrlFemale = cleanUrl;
+            } else {
+              delete nextEntry.audioUrlFemale;
+            }
           } else {
-            delete nextEntry.audioUrl;
+            if (cleanUrl) {
+              nextEntry.audioUrlMale = cleanUrl;
+            } else {
+              delete nextEntry.audioUrlMale;
+              delete nextEntry.audioUrl;
+            }
           }
           return cleanUndefinedFields(nextEntry);
         });
@@ -3868,7 +3916,138 @@ export async function updateChapterAudioUrlInFirestore(
       }
     }
   } catch (err) {
-    console.warn('Lỗi đồng bộ audioUrl lên root doc novels:', err);
+    console.warn('Lỗi đồng bộ liên kết audio lên mục lục truyện:', err);
+  }
+}
+
+export interface ChapterAudioLinkBatchItem {
+  chapter: Chapter;
+  audioUrlMale?: string | null;
+  audioUrlFemale?: string | null;
+}
+
+/**
+ * Cập nhật hoặc xóa hàng loạt link MP3 (chỉ chạm vào đúng chương và đúng giọng được truyền vào).
+ * Dùng WriteBatch <= 400 operations cho subcollection và cập nhật 1 lần lên root doc novels/{novelId}.
+ */
+export async function batchUpdateChapterAudioLinksInFirestore(
+  novelId: string,
+  items: ChapterAudioLinkBatchItem[]
+): Promise<void> {
+  if (!novelId || !Array.isArray(items) || items.length === 0) return;
+
+  const validItems = items.filter(
+    (item) =>
+      item?.chapter &&
+      (item.audioUrlMale !== undefined || item.audioUrlFemale !== undefined)
+  );
+  if (validItems.length === 0) return;
+
+  const nowTs = Date.now();
+  const byChapterNum = new Map<number, ChapterAudioLinkBatchItem>();
+  const byChapterId = new Map<string, ChapterAudioLinkBatchItem>();
+
+  validItems.forEach((item) => {
+    const num = Number(item.chapter.number);
+    if (Number.isFinite(num)) {
+      byChapterNum.set(num, item);
+    }
+    if (item.chapter.id) {
+      byChapterId.set(item.chapter.id, item);
+    }
+  });
+
+  // 1. Ghi subcollection theo từng batch an toàn (<= 400 ops/batch)
+  for (let i = 0; i < validItems.length; i += FIRESTORE_BATCH_LIMIT) {
+    const chunk = validItems.slice(i, i + FIRESTORE_BATCH_LIMIT);
+    const batch = writeBatch(db);
+
+    chunk.forEach((item) => {
+      const chNumId = String(item.chapter.number);
+      const subPayload: Record<string, any> = { updatedAt: nowTs };
+
+      if (item.audioUrlMale !== undefined) {
+        const cleanMale = typeof item.audioUrlMale === 'string' ? item.audioUrlMale.trim() : '';
+        if (cleanMale) {
+          subPayload.audioUrlMale = cleanMale;
+        } else {
+          subPayload.audioUrlMale = deleteField();
+          subPayload.audioUrl = deleteField();
+        }
+      }
+
+      if (item.audioUrlFemale !== undefined) {
+        const cleanFemale =
+          typeof item.audioUrlFemale === 'string' ? item.audioUrlFemale.trim() : '';
+        if (cleanFemale) {
+          subPayload.audioUrlFemale = cleanFemale;
+        } else {
+          subPayload.audioUrlFemale = deleteField();
+        }
+      }
+
+      batch.set(doc(db, 'novels', novelId, 'chapters', chNumId), subPayload, { merge: true });
+    });
+
+    await withTimeout(
+      batch.commit(),
+      25000,
+      `Cập nhật lô link MP3 ${Math.floor(i / FIRESTORE_BATCH_LIMIT) + 1}`
+    );
+
+    if (i + FIRESTORE_BATCH_LIMIT < validItems.length) {
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  }
+
+  // 2. Đồng bộ 1 lần duy nhất lên mảng chapters trên root doc novels/{novelId}
+  const novelRef = doc(db, 'novels', novelId);
+  const novelSnap = await getDoc(novelRef);
+  if (novelSnap.exists()) {
+    const data = novelSnap.data();
+    if (Array.isArray(data.chapters)) {
+      const updatedChapters = data.chapters.map((c: any) => {
+        const match =
+          (c.id ? byChapterId.get(String(c.id)) : undefined) ||
+          (Number(c.number) > 0 ? byChapterNum.get(Number(c.number)) : undefined);
+        if (!match) return c;
+
+        const nextEntry: Record<string, any> = { ...c };
+        if (match.audioUrlMale !== undefined) {
+          const cleanMale =
+            typeof match.audioUrlMale === 'string' ? match.audioUrlMale.trim() : '';
+          if (cleanMale) {
+            nextEntry.audioUrlMale = cleanMale;
+          } else {
+            delete nextEntry.audioUrlMale;
+            delete nextEntry.audioUrl;
+          }
+        }
+        if (match.audioUrlFemale !== undefined) {
+          const cleanFemale =
+            typeof match.audioUrlFemale === 'string' ? match.audioUrlFemale.trim() : '';
+          if (cleanFemale) {
+            nextEntry.audioUrlFemale = cleanFemale;
+          } else {
+            delete nextEntry.audioUrlFemale;
+          }
+        }
+        return cleanUndefinedFields(nextEntry);
+      });
+
+      await withTimeout(
+        setDoc(
+          novelRef,
+          {
+            chapters: updatedChapters,
+            updatedAt: nowTs,
+          },
+          { merge: true }
+        ),
+        15000,
+        'Đồng bộ mục lục MP3 lên truyện'
+      );
+    }
   }
 }
 

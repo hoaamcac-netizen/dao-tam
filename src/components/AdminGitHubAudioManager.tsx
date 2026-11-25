@@ -1,266 +1,144 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Chapter, Novel } from '../types';
 import {
-  getAdminGitHubConfig,
-  saveAdminGitHubConfig,
-  parseGitHubRepo,
-  uploadMp3ToGitHub,
-  generateChapterMp3FromText,
-  extractChapterNumberFromMp3Filename,
-  isValidMp3UploadFile,
-  type AdminGitHubConfig,
-} from '../utils/githubAudioStorage';
-import {
-  extractPlainTextFromChapterHtml,
-  sanitizeUserFacingErrorText,
-  sleepWithAbort,
-} from '../utils/audioChunker';
-import {
   fetchChaptersForNovel,
-  fetchFullChapterContent,
   updateChapterAudioUrlInFirestore,
+  batchUpdateChapterAudioLinksInFirestore,
+  type ChapterAudioLinkBatchItem,
 } from '../firebase/services';
+import { removeVietnameseTones } from '../utils/rulesAndVoices';
+import { sanitizeUserFacingErrorText } from '../utils/audioChunker';
 import {
-  EDGE_TTS_VOICES,
-  isDeviceFallbackVoice,
-  normalizeEdgeVoiceId,
-} from '../utils/rulesAndVoices';
-import { useAudio } from '../contexts/AudioContext';
-import {
-  KeyRound,
-  Save,
   CheckCircle2,
   AlertCircle,
-  Eye,
-  EyeOff,
-  Upload,
-  FolderUp,
-  Sparkles,
+  AlertTriangle,
   Volume2,
   Pause,
   Trash2,
   Loader2,
   X,
   Search,
-  ChevronDown,
-  ChevronUp,
   Headphones,
   ExternalLink,
-  Square,
+  Link2,
+  ClipboardPaste,
+  Download,
+  ShieldCheck,
+  UserRound,
+  ChevronLeft,
+  ChevronRight,
+  Edit3,
 } from 'lucide-react';
 
-interface AdminGitHubConfigCardProps {
-  defaultCollapsed?: boolean;
-  onConfigSaved?: (config: AdminGitHubConfig) => void;
+const CHAPTERS_PER_PAGE = 100;
+
+type VoiceKey = 'male' | 'female';
+type DeleteVoiceScope = 'male' | 'female' | 'both';
+type VoiceFilterMode = 'all' | 'missing_male' | 'missing_female' | 'both_ready';
+
+export interface BrokenVoiceState {
+  male?: boolean;
+  female?: boolean;
 }
 
-/**
- * Khung cấu hình kho lưu trữ GitHub (CHỈ HIỆN TRONG TRANG ADMIN)
- * Lưu hoàn toàn trong localStorage của trình duyệt Admin, tuyệt đối KHÔNG lưu lên Firestore.
- */
-export const AdminGitHubConfigCard: React.FC<AdminGitHubConfigCardProps> = ({
-  defaultCollapsed = false,
-  onConfigSaved,
-}) => {
-  const initialConfig = useMemo(() => getAdminGitHubConfig(), []);
-  const [repoInput, setRepoInput] = useState(initialConfig.repo);
-  const [tokenInput, setTokenInput] = useState(initialConfig.token);
-  const [showToken, setShowToken] = useState(false);
-  const [isCollapsed, setIsCollapsed] = useState(
-    defaultCollapsed && Boolean(initialConfig.repo && initialConfig.token)
-  );
-  const [savedNotice, setSavedNotice] = useState<string | null>(null);
-  const [errorNotice, setErrorNotice] = useState<string | null>(null);
+function getMaleAudioUrl(chapter: Chapter): string {
+  return (chapter.audioUrlMale || chapter.audioUrl || '').trim();
+}
 
-  const isConfigured =
-    Boolean(initialConfig.repo && initialConfig.token) ||
-    Boolean(repoInput.trim() && tokenInput.trim());
+function getFemaleAudioUrl(chapter: Chapter): string {
+  return (chapter.audioUrlFemale || '').trim();
+}
 
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorNotice(null);
-    setSavedNotice(null);
+function isValidHttpUrl(url: string): boolean {
+  return /^https?:\/\/\S+$/i.test(url.trim());
+}
 
-    const trimmedRepo = repoInput.trim();
-    const trimmedToken = tokenInput.trim();
+function sanitizeDownloadFilename(title: string): string {
+  const noTones = title
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+  const cleaned = noTones
+    .replace(/[^a-zA-Z0-9\s_-]/g, '')
+    .trim()
+    .replace(/\s+/g, '_');
+  return cleaned || 'TruyenDaoTam';
+}
 
-    if (!trimmedRepo) {
-      setErrorNotice('Vui lòng nhập Tên kho âm thanh (dạng chu-so-huu/ten-kho).');
+function probeAudioUrlMetadata(url: string, timeoutMs = 8000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const trimmed = url.trim();
+    if (!isValidHttpUrl(trimmed)) {
+      resolve(false);
       return;
     }
 
+    let settled = false;
+    const probe = new Audio();
+    probe.preload = 'metadata';
+
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      probe.onloadedmetadata = null;
+      probe.oncanplay = null;
+      probe.onerror = null;
+      try {
+        probe.pause();
+        probe.removeAttribute('src');
+        probe.load();
+      } catch {}
+      resolve(ok);
+    };
+
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    probe.onloadedmetadata = () => finish(true);
+    probe.oncanplay = () => finish(true);
+    probe.onerror = () => finish(false);
+
     try {
-      parseGitHubRepo(trimmedRepo);
-      const saved = saveAdminGitHubConfig(trimmedRepo, trimmedToken);
-      setRepoInput(saved.repo);
-      setTokenInput(saved.token);
-      setSavedNotice(
-        saved.token
-          ? 'Đã lưu cấu hình kho âm thanh trên trình duyệt Quản trị!'
-          : 'Đã lưu tên kho âm thanh (chưa có Mã xác thực).'
-      );
-      onConfigSaved?.(saved);
-      setTimeout(() => setSavedNotice(null), 3500);
-    } catch (err: any) {
-      setErrorNotice(err?.message || 'Tên kho âm thanh không đúng định dạng.');
+      probe.src = trimmed;
+      probe.load();
+    } catch {
+      finish(false);
     }
-  };
-
-  return (
-    <div className="rounded-2xl bg-white dark:bg-zinc-900 border border-slate-200 dark:border-slate-700 shadow-xs overflow-hidden">
-      <div className="px-3.5 sm:px-4 py-3 bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-          <div className="w-8 h-8 rounded-xl bg-slate-900 dark:bg-zinc-900 text-white flex items-center justify-center shrink-0 border border-slate-700">
-            <Headphones className="w-4 h-4" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white break-words">
-              Cấu hình kho lưu trữ MP3 (Quản trị)
-            </h4>
-            <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-snug">
-              Chỉ lưu cục bộ trên trình duyệt Quản trị, không đồng bộ lên cơ sở dữ liệu
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 flex-wrap">
-          <span
-            className={`px-2.5 py-1 rounded-full text-[10px] font-bold border max-w-full truncate ${
-              repoInput.trim() && tokenInput.trim()
-                ? 'bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700'
-                : 'bg-amber-50 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-700'
-            }`}
-          >
-            {repoInput.trim() && tokenInput.trim() ? 'Kho âm thanh sẵn sàng' : 'Chưa cấu hình đủ'}
-          </span>
-          {defaultCollapsed && (
-            <button
-              type="button"
-              onClick={() => setIsCollapsed((prev) => !prev)}
-              className="min-h-[36px] px-3 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600 text-xs font-semibold text-slate-700 dark:text-white flex items-center gap-1 cursor-pointer"
-            >
-              <span>{isCollapsed ? 'Mở cài đặt' : 'Thu gọn'}</span>
-              {isCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {!isCollapsed && (
-        <form onSubmit={handleSave} className="p-3.5 sm:p-4 space-y-3 bg-white dark:bg-zinc-900">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="min-w-0">
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                Tên kho âm thanh (dạng chu-so-huu/ten-kho):
-              </label>
-              <div className="relative">
-                <FolderUp className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={repoInput}
-                  onChange={(e) => setRepoInput(e.target.value)}
-                  placeholder="chu-so-huu/ten-kho-am-thanh"
-                  className="w-full min-h-[42px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-8 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none transition"
-                />
-              </div>
-            </div>
-
-            <div className="min-w-0">
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                Mã xác thực kho âm thanh:
-              </label>
-              <div className="relative">
-                <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type={showToken ? 'text' : 'password'}
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="Nhập mã xác thực truy cập..."
-                  autoComplete="off"
-                  className="w-full min-h-[42px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-8 pr-10 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none transition font-mono"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowToken((prev) => !prev)}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
-                  title={showToken ? 'Ẩn mã xác thực' : 'Hiện mã xác thực'}
-                >
-                  {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div className="flex-1 min-w-0">
-              {errorNotice && (
-                <div className="text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 flex items-start gap-1.5 break-words">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                  <span>{errorNotice}</span>
-                </div>
-              )}
-              {savedNotice && (
-                <div className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>{savedNotice}</span>
-                </div>
-              )}
-              {!errorNotice && !savedNotice && !isConfigured && (
-                <p className="text-[11px] text-slate-500 leading-snug">
-                  Kho lưu trữ công khai nhánh mặc định, mã xác thực cần có quyền đọc và ghi tệp âm thanh.
-                </p>
-              )}
-            </div>
-
-            <button
-              type="submit"
-              className="w-full sm:w-auto min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs transition shrink-0"
-            >
-              <Save className="w-3.5 h-3.5" />
-              <span>Lưu cấu hình</span>
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-};
+  });
+}
 
 interface AdminChapterMp3ActionsProps {
   novel: Novel;
   chapter: Chapter;
-  preferredVoiceId?: string;
   disabledExternally?: boolean;
-  onAudioUrlUpdated: (chapter: Chapter, nextAudioUrl: string | undefined) => void;
+  brokenVoices?: BrokenVoiceState;
+  onAudioLinksUpdated: (
+    chapter: Chapter,
+    links: { audioUrl?: string; audioUrlMale?: string; audioUrlFemale?: string }
+  ) => void;
+  onClearBrokenFlag?: (chapterId: string, voice: VoiceKey) => void;
 }
 
-/**
- * 2 nút chức năng MP3 ở mỗi chương + nhãn "Đã có MP3" + Nghe thử / Xóa audioUrl
- */
 export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   novel,
   chapter,
-  preferredVoiceId,
   disabledExternally = false,
-  onAudioUrlUpdated,
+  brokenVoices,
+  onAudioLinksUpdated,
+  onClearBrokenFlag,
 }) => {
-  const audioContext = useAudio();
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [isBusy, setIsBusy] = useState(false);
-  const [progressPercent, setProgressPercent] = useState(0);
-  const [statusLabel, setStatusLabel] = useState('');
+  const [editingVoice, setEditingVoice] = useState<VoiceKey | null>(null);
+  const [linkInput, setLinkInput] = useState('');
+  const [previewVoice, setPreviewVoice] = useState<VoiceKey | null>(null);
+  const [confirmClearVoice, setConfirmClearVoice] = useState<VoiceKey | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [justUploadedAt, setJustUploadedAt] = useState<number>(0);
 
   useEffect(() => {
     return () => {
-      abortControllerRef.current?.abort();
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current.src = '';
@@ -269,376 +147,362 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     };
   }, []);
 
-  const hasMp3 = Boolean(chapter.audioUrl && chapter.audioUrl.trim());
+  const maleUrl = getMaleAudioUrl(chapter);
+  const femaleUrl = getFemaleAudioUrl(chapter);
+  const missingVoices: string[] = [];
+  if (!maleUrl) missingVoices.push('Nam Minh');
+  if (!femaleUrl) missingVoices.push('Hằng Nga');
+
   const actionsDisabled = isBusy || disabledExternally;
 
-  const resolveEffectiveVoice = () => {
-    const raw = preferredVoiceId || audioContext.voiceId || 'vi-VN-NamMinhNeural';
-    const normalized = normalizeEdgeVoiceId(raw);
-    return isDeviceFallbackVoice(normalized) ? 'vi-VN-NamMinhNeural' : normalized;
-  };
-
-  const ensureGitHubConfigured = () => {
-    const cfg = getAdminGitHubConfig();
-    if (!cfg.repo || !cfg.token) {
-      throw new Error(
-        'Vui lòng nhập Tên kho âm thanh và Mã xác thực ở khung cấu hình phía trên rồi bấm Lưu.'
-      );
+  const stopPreview = () => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
     }
-    return cfg;
+    setPreviewVoice(null);
   };
 
-  const handleUploadFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
-    try {
-      const cfg = ensureGitHubConfigured();
-      if (!isValidMp3UploadFile(file)) {
-        throw new Error('Vui lòng chọn file âm thanh định dạng .mp3 (audio/mpeg) hợp lệ.');
-      }
-
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      setIsBusy(true);
-      setProgressPercent(25);
-      setStatusLabel(`Đang đọc file "${file.name}"...`);
-
-      const arrayBuffer = await file.arrayBuffer();
-      const mp3Bytes = new Uint8Array(arrayBuffer);
-
-      setProgressPercent(55);
-      const { cdnUrl } = await uploadMp3ToGitHub({
-        repoInput: cfg.repo,
-        token: cfg.token,
-        storyId: novel.id,
-        chapterId: chapter.id || `c-${chapter.number}`,
-        mp3Bytes,
-        commitMessage: `Upload MP3: ${novel.id} - Chương ${chapter.number}`,
-        signal: controller.signal,
-        onProgress: (pct, lbl) => {
-          setProgressPercent(pct);
-          setStatusLabel(lbl);
-        },
-      });
-
-      setProgressPercent(98);
-      setStatusLabel('Đang lưu liên kết phát MP3 vào hệ thống...');
-      try {
-        await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
-      } catch (fsErr: any) {
-        console.error('[AdminChapterMp3Actions] Lỗi lưu audioUrl khi upload:', fsErr);
-        throw new Error(
-          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${sanitizeUserFacingErrorText(
-            fsErr?.message,
-            'Lỗi cơ sở dữ liệu'
-          )}`
-        );
-      }
-
-      setJustUploadedAt(Date.now());
-      onAudioUrlUpdated(chapter, cdnUrl);
-      setProgressPercent(100);
-      setSuccessMsg('Đã tải tệp MP3 lên kho âm thanh và lưu vào hệ thống thành công!');
-      setTimeout(() => setSuccessMsg(null), 5000);
-    } catch (err: any) {
-      if (err?.name !== 'AbortError') {
-        console.error('[AdminChapterMp3Actions] handleUploadFileChange error:', err);
-        setErrorMsg(
-          sanitizeUserFacingErrorText(
-            err?.message,
-            'Lỗi tải MP3 lên kho âm thanh (không xác định).'
-          )
-        );
-      }
-    } finally {
-      abortControllerRef.current = null;
-      setIsBusy(false);
-    }
-  };
-
-  const handleAutoGenerateMp3 = async () => {
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
-    try {
-      const cfg = ensureGitHubConfigured();
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      setIsBusy(true);
-      setProgressPercent(2);
-      setStatusLabel('Đang tải nội dung đầy đủ của chương...');
-
-      let textContent = extractPlainTextFromChapterHtml(chapter.content || '');
-      if (!textContent) {
-        const fetched = await fetchFullChapterContent(
-          novel.id,
-          chapter.id,
-          chapter.number,
-          novel.updatedAt
-        );
-        textContent = extractPlainTextFromChapterHtml(fetched?.content || '');
-      }
-
-      if (!textContent) {
-        throw new Error('Chương này chưa có nội dung văn bản để chuyển thành MP3.');
-      }
-
-      const selectedVoice = resolveEffectiveVoice();
-      const mergedMp3Blob = await generateChapterMp3FromText({
-        text: textContent,
-        chapterTitle: chapter.title || `Chương ${chapter.number}`,
-        voiceId: selectedVoice,
-        signal: controller.signal,
-        onProgress: ({ percent, label }) => {
-          setProgressPercent(percent);
-          setStatusLabel(label);
-        },
-      });
-
-      setProgressPercent(90);
-      setStatusLabel('Đang tải MP3 lên kho âm thanh...');
-      const { cdnUrl } = await uploadMp3ToGitHub({
-        repoInput: cfg.repo,
-        token: cfg.token,
-        storyId: novel.id,
-        chapterId: chapter.id || `c-${chapter.number}`,
-        mp3Blob: mergedMp3Blob,
-        commitMessage: `Generate TTS MP3 (${selectedVoice}): ${novel.id} - Chương ${chapter.number}`,
-        signal: controller.signal,
-        onProgress: (pct, lbl) => {
-          setProgressPercent(pct);
-          setStatusLabel(lbl);
-        },
-      });
-
-      setProgressPercent(98);
-      setStatusLabel('Đang lưu liên kết phát MP3 vào hệ thống...');
-      try {
-        await updateChapterAudioUrlInFirestore(novel.id, chapter, cdnUrl);
-      } catch (fsErr: any) {
-        console.error('[AdminChapterMp3Actions] Lỗi lưu audioUrl:', fsErr);
-        throw new Error(
-          `Đã tải MP3 lên kho âm thanh nhưng lưu cơ sở dữ liệu thất bại: ${sanitizeUserFacingErrorText(
-            fsErr?.message,
-            'Lỗi cơ sở dữ liệu'
-          )}`
-        );
-      }
-
-      setJustUploadedAt(Date.now());
-      onAudioUrlUpdated(chapter, cdnUrl);
-      setProgressPercent(100);
-      setSuccessMsg('Đã tạo MP3, ghép tệp và lưu vào hệ thống thành công!');
-      setTimeout(() => setSuccessMsg(null), 5000);
-    } catch (err: any) {
-      if (err?.name !== 'AbortError') {
-        console.error('[AdminChapterMp3Actions] handleAutoGenerateMp3 error:', err);
-        setErrorMsg(
-          sanitizeUserFacingErrorText(
-            err?.message,
-            'Lỗi khi tự tạo file MP3 từ nội dung chương.'
-          )
-        );
-      }
-    } finally {
-      abortControllerRef.current = null;
-      setIsBusy(false);
-    }
-  };
-
-  const handleCancelOperation = () => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    setIsBusy(false);
-    setProgressPercent(0);
-    setStatusLabel('');
-  };
-
-  const handleTogglePreview = () => {
-    if (!chapter.audioUrl) return;
+  const handleTogglePreview = (voice: VoiceKey, url: string) => {
+    if (!url) return;
 
     if (!previewAudioRef.current) {
       previewAudioRef.current = new Audio();
-      previewAudioRef.current.onended = () => setIsPreviewPlaying(false);
+      previewAudioRef.current.onended = () => setPreviewVoice(null);
       previewAudioRef.current.onerror = () => {
-        setIsPreviewPlaying(false);
+        setPreviewVoice(null);
         setErrorMsg(
-          'Không phát được tệp MP3 (nếu vừa mới tải lên, máy chủ âm thanh có thể cần vài giây để đồng bộ).'
+          `Không phát được file MP3 (${voice === 'male' ? 'Nam Minh' : 'Hằng Nga'}). Vui lòng kiểm tra lại đường dẫn.`
         );
       };
     }
 
     const audioEl = previewAudioRef.current;
-    if (isPreviewPlaying) {
+    if (previewVoice === voice) {
       audioEl.pause();
-      setIsPreviewPlaying(false);
+      setPreviewVoice(null);
       return;
     }
 
     setErrorMsg(null);
-    const playUrl =
-      justUploadedAt > 0 && Date.now() - justUploadedAt < 120000
-        ? `${chapter.audioUrl}?t=${justUploadedAt}`
-        : chapter.audioUrl;
-
-    if (audioEl.src !== playUrl) {
-      audioEl.src = playUrl;
-    }
+    audioEl.pause();
+    audioEl.src = url;
     audioEl
       .play()
-      .then(() => setIsPreviewPlaying(true))
+      .then(() => setPreviewVoice(voice))
       .catch((err) => {
-        setIsPreviewPlaying(false);
-        setErrorMsg(`Không thể phát thử MP3: ${err?.message || 'Lỗi trình duyệt'}`);
+        setPreviewVoice(null);
+        setErrorMsg(`Không thể nghe thử: ${err?.message || 'Đường dẫn chưa sẵn sàng'}`);
       });
   };
 
-  const handleRemoveAudioUrl = async () => {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      setTimeout(() => setConfirmClear(false), 4000);
+  const openEditorForVoice = (voice: VoiceKey) => {
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setEditingVoice(voice);
+    setLinkInput(voice === 'male' ? maleUrl : femaleUrl);
+  };
+
+  const handleSaveSingleLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingVoice) return;
+    const trimmed = linkInput.trim();
+    if (!isValidHttpUrl(trimmed)) {
+      setErrorMsg('Vui lòng nhập đường dẫn MP3 hợp lệ bắt đầu bằng http:// hoặc https://');
       return;
     }
 
-    setConfirmClear(false);
+    const targetVoice = editingVoice;
     setErrorMsg(null);
-    if (previewAudioRef.current) {
-      previewAudioRef.current.pause();
-      setIsPreviewPlaying(false);
-    }
-
+    setIsBusy(true);
     try {
-      setIsBusy(true);
-      setStatusLabel('Đang xóa đường dẫn MP3 khỏi hệ thống...');
-      await updateChapterAudioUrlInFirestore(novel.id, chapter, null);
-      onAudioUrlUpdated(chapter, undefined);
-      setSuccessMsg('Đã xóa liên kết MP3 khỏi chương này.');
+      await updateChapterAudioUrlInFirestore(novel.id, chapter, trimmed, targetVoice);
+      onClearBrokenFlag?.(chapter.id, targetVoice);
+      if (targetVoice === 'male') {
+        onAudioLinksUpdated(chapter, {
+          audioUrl: chapter.audioUrl,
+          audioUrlMale: trimmed,
+          audioUrlFemale: chapter.audioUrlFemale,
+        });
+      } else {
+        onAudioLinksUpdated(chapter, {
+          audioUrl: chapter.audioUrl,
+          audioUrlMale: chapter.audioUrlMale,
+          audioUrlFemale: trimmed,
+        });
+      }
+      setEditingVoice(null);
+      setLinkInput('');
+      setSuccessMsg(
+        `Đã lưu link MP3 giọng ${targetVoice === 'male' ? 'Nam Minh' : 'Hằng Nga'}.`
+      );
       setTimeout(() => setSuccessMsg(null), 3500);
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Không thể xóa đường dẫn MP3 trên hệ thống.');
+      setErrorMsg(
+        sanitizeUserFacingErrorText(err?.message, 'Không thể lưu link MP3 lên hệ thống.')
+      );
     } finally {
       setIsBusy(false);
-      setStatusLabel('');
     }
+  };
+
+  const handleRemoveVoiceLink = async (voice: VoiceKey) => {
+    if (confirmClearVoice !== voice) {
+      setConfirmClearVoice(voice);
+      setTimeout(() => {
+        setConfirmClearVoice((cur) => (cur === voice ? null : cur));
+      }, 4000);
+      return;
+    }
+
+    setConfirmClearVoice(null);
+    setErrorMsg(null);
+    if (previewVoice === voice) {
+      stopPreview();
+    }
+
+    setIsBusy(true);
+    try {
+      await updateChapterAudioUrlInFirestore(novel.id, chapter, null, voice);
+      onClearBrokenFlag?.(chapter.id, voice);
+      if (voice === 'male') {
+        onAudioLinksUpdated(chapter, {
+          audioUrl: undefined,
+          audioUrlMale: undefined,
+          audioUrlFemale: chapter.audioUrlFemale,
+        });
+      } else {
+        onAudioLinksUpdated(chapter, {
+          audioUrl: chapter.audioUrl,
+          audioUrlMale: chapter.audioUrlMale,
+          audioUrlFemale: undefined,
+        });
+      }
+      setSuccessMsg(
+        `Đã xóa link MP3 giọng ${voice === 'male' ? 'Nam Minh' : 'Hằng Nga'}.`
+      );
+      setTimeout(() => setSuccessMsg(null), 3500);
+    } catch (err: any) {
+      setErrorMsg(
+        sanitizeUserFacingErrorText(err?.message, 'Không thể xóa link MP3 trên hệ thống.')
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const renderVoiceRow = (voice: VoiceKey, url: string) => {
+    const isMale = voice === 'male';
+    const voiceLabel = isMale ? 'Nam Minh' : 'Hằng Nga';
+    const isBroken = isMale ? Boolean(brokenVoices?.male) : Boolean(brokenVoices?.female);
+    const isThisPreviewPlaying = previewVoice === voice;
+    const isThisConfirming = confirmClearVoice === voice;
+
+    return (
+      <div
+        className={`rounded-xl px-3 py-2 border flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition ${
+          isBroken
+            ? 'bg-rose-50/90 border-rose-400'
+            : url
+            ? 'bg-slate-50/80 border-slate-200'
+            : 'bg-slate-50/40 border-dashed border-slate-200'
+        }`}
+      >
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          <span
+            className={`inline-flex items-center gap-1 text-xs font-bold ${
+              isMale ? 'text-sky-700' : 'text-pink-700'
+            }`}
+          >
+            <UserRound
+              className={`w-3.5 h-3.5 shrink-0 ${isMale ? 'text-sky-600' : 'text-pink-600'}`}
+            />
+            <span>{voiceLabel}:</span>
+          </span>
+
+          {url ? (
+            isBroken ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[10px] font-bold">
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <span>⚠️ Link lỗi</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                <CheckCircle2 className="w-3 h-3 shrink-0" />
+                <span>Đã có</span>
+              </span>
+            )
+          ) : (
+            <span className="text-[11px] font-medium text-slate-400">Chưa gắn link</span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+          {url ? (
+            <>
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => handleTogglePreview(voice, url)}
+                className={`min-h-[34px] px-2.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition disabled:opacity-50 ${
+                  isThisPreviewPlaying
+                    ? 'bg-emerald-600 text-white border-emerald-600'
+                    : 'bg-white hover:bg-emerald-50 text-emerald-700 border-emerald-200'
+                }`}
+                title={isThisPreviewPlaying ? 'Dừng nghe thử' : `Nghe thử ${voiceLabel}`}
+              >
+                {isThisPreviewPlaying ? (
+                  <Pause className="w-3 h-3 fill-current shrink-0" />
+                ) : (
+                  <Volume2 className="w-3 h-3 shrink-0" />
+                )}
+                <span>{isThisPreviewPlaying ? 'Dừng' : 'Nghe thử'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => openEditorForVoice(voice)}
+                className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition disabled:opacity-50"
+                title={`Sửa link MP3 ${voiceLabel}`}
+              >
+                <Edit3 className="w-3 h-3 shrink-0" />
+                <span>Sửa link</span>
+              </button>
+
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="min-h-[34px] min-w-[34px] inline-flex items-center justify-center rounded-lg bg-white hover:bg-slate-100 text-slate-500 hover:text-slate-800 border border-slate-200 transition"
+                title="Mở link MP3"
+              >
+                <ExternalLink className="w-3 h-3" />
+              </a>
+
+              <button
+                type="button"
+                disabled={actionsDisabled}
+                onClick={() => handleRemoveVoiceLink(voice)}
+                className={`min-h-[34px] px-2.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition disabled:opacity-50 ${
+                  isThisConfirming
+                    ? 'bg-rose-600 text-white border-rose-600'
+                    : 'bg-white hover:bg-rose-50 text-rose-600 border-rose-200'
+                }`}
+                title={`Xóa link MP3 ${voiceLabel}`}
+              >
+                <Trash2 className="w-3 h-3 shrink-0" />
+                <span>{isThisConfirming ? 'Xác nhận?' : 'Xóa'}</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              disabled={actionsDisabled}
+              onClick={() => openEditorForVoice(voice)}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white hover:bg-pink-50 text-pink-700 border border-pink-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition disabled:opacity-50"
+            >
+              <Link2 className="w-3 h-3 shrink-0" />
+              <span>Dán link</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   return (
     <div className="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2 min-w-0">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".mp3,audio/mpeg"
-        onChange={handleUploadFileChange}
-        className="hidden"
-      />
+      {missingVoices.length > 0 && (
+        <div className="px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-semibold flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-1.5 min-w-0">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span>
+              ⚠️ Còn thiếu link MP3: <strong>{missingVoices.join(' / ')}</strong>
+            </span>
+          </span>
+          <button
+            type="button"
+            disabled={actionsDisabled}
+            onClick={() => openEditorForVoice(!maleUrl ? 'male' : 'female')}
+            className="min-h-[30px] px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition shrink-0 disabled:opacity-50"
+          >
+            <Link2 className="w-3 h-3 shrink-0" />
+            <span>Dán link</span>
+          </button>
+        </div>
+      )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          disabled={actionsDisabled}
-          onClick={() => fileInputRef.current?.click()}
-          className="min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Chọn tệp .mp3 có sẵn và tải lên kho âm thanh"
-        >
-          <Upload className="w-3.5 h-3.5 text-slate-700 shrink-0" />
-          <span>Tải MP3 lên</span>
-        </button>
-
-        <button
-          type="button"
-          disabled={actionsDisabled}
-          onClick={handleAutoGenerateMp3}
-          className="min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Chuyển văn bản chương thành 1 tệp MP3 và tải lên kho âm thanh"
-        >
-          {isBusy ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-pink-600 shrink-0" />
-          ) : (
-            <Sparkles className="w-3.5 h-3.5 text-pink-600 shrink-0" />
-          )}
-          <span>Tự tạo MP3 từ chữ</span>
-        </button>
-
-        {hasMp3 && (
-          <>
-            <button
-              type="button"
-              disabled={actionsDisabled}
-              onClick={handleTogglePreview}
-              className={`min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl border text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 ${
-                isPreviewPlaying
-                  ? 'bg-emerald-600 text-white border-emerald-600'
-                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
-              }`}
-              title={isPreviewPlaying ? 'Dừng nghe thử' : 'Nghe thử file MP3 của chương'}
-            >
-              {isPreviewPlaying ? (
-                <Pause className="w-3.5 h-3.5 fill-current shrink-0" />
-              ) : (
-                <Volume2 className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span>{isPreviewPlaying ? 'Dừng thử' : 'Nghe thử'}</span>
-            </button>
-
-            <a
-              href={chapter.audioUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="min-h-[40px] min-w-[40px] sm:min-h-[36px] sm:min-w-[36px] inline-flex items-center justify-center rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-800 border border-slate-200 transition"
-              title="Mở liên kết MP3"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-
-            <button
-              type="button"
-              disabled={actionsDisabled}
-              onClick={handleRemoveAudioUrl}
-              className={`min-h-[40px] sm:min-h-[36px] px-3 py-1.5 rounded-xl border text-xs sm:text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50 ${
-                confirmClear
-                  ? 'bg-rose-600 text-white border-rose-600'
-                  : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
-              }`}
-              title="Xóa đường dẫn MP3 của chương khỏi hệ thống"
-            >
-              <Trash2 className="w-3.5 h-3.5 shrink-0" />
-              <span>{confirmClear ? 'Xác nhận xóa?' : 'Xóa MP3'}</span>
-            </button>
-          </>
-        )}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+        {renderVoiceRow('male', maleUrl)}
+        {renderVoiceRow('female', femaleUrl)}
       </div>
 
-      {isBusy && (
-        <div className="p-2.5 rounded-xl bg-pink-50/70 border border-pink-200 space-y-1.5">
-          <div className="flex items-center justify-between gap-2 text-[11px]">
-            <span className="font-semibold text-pink-800 min-w-0 break-words">
-              {statusLabel || 'Đang xử lý audio MP3...'}
-            </span>
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="font-black text-pink-700 tabular-nums">{progressPercent}%</span>
-              <button
-                type="button"
-                onClick={handleCancelOperation}
-                className="min-h-[32px] px-2.5 py-1 rounded-lg bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-[11px] font-bold cursor-pointer"
-              >
-                Hủy
-              </button>
-            </div>
+      {editingVoice && (
+        <form
+          onSubmit={handleSaveSingleLink}
+          className="p-2.5 rounded-xl bg-slate-50 border border-slate-300 flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+        >
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setEditingVoice('male');
+                setLinkInput(maleUrl);
+              }}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer border transition ${
+                editingVoice === 'male'
+                  ? 'bg-sky-600 text-white border-sky-600'
+                  : 'bg-white text-slate-600 border-slate-300'
+              }`}
+            >
+              Nam Minh
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingVoice('female');
+                setLinkInput(femaleUrl);
+              }}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer border transition ${
+                editingVoice === 'female'
+                  ? 'bg-pink-600 text-white border-pink-600'
+                  : 'bg-white text-slate-600 border-slate-300'
+              }`}
+            >
+              Hằng Nga
+            </button>
           </div>
-          <div className="h-2 w-full rounded-full bg-pink-100 overflow-hidden">
-            <div
-              className="h-full bg-gradient-to-r from-pink-500 to-rose-500 transition-all duration-200"
-              style={{ width: `${Math.min(100, Math.max(4, progressPercent))}%` }}
-            />
+          <input
+            type="url"
+            value={linkInput}
+            onChange={(e) => setLinkInput(e.target.value)}
+            placeholder={`Dán link MP3 trực tiếp (https://...) cho giọng ${
+              editingVoice === 'male' ? 'Nam Minh' : 'Hằng Nga'
+            }`}
+            className="flex-1 min-w-0 min-h-[36px] bg-white border border-slate-300 focus:border-pink-500 rounded-lg px-2.5 py-1 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none"
+            autoFocus
+          />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="submit"
+              disabled={isBusy}
+              className="min-h-[36px] px-3 py-1 rounded-lg bg-pink-600 hover:bg-pink-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+            >
+              {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+              <span>Lưu link</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingVoice(null);
+                setLinkInput('');
+              }}
+              className="min-h-[36px] px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 text-xs font-semibold cursor-pointer"
+            >
+              Hủy
+            </button>
           </div>
-        </div>
+        </form>
       )}
 
       {errorMsg && (
@@ -650,7 +514,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           <button
             type="button"
             onClick={() => setErrorMsg(null)}
-            className="text-rose-500 hover:text-rose-700 cursor-pointer p-1 shrink-0"
+            className="text-rose-500 hover:text-rose-700 cursor-pointer p-0.5 shrink-0"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -667,86 +531,74 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   );
 };
 
-interface BulkUploadIssueItem {
-  fileName: string;
-  reason: string;
-  type: 'error' | 'unmatched';
-}
-
-interface BulkUploadState {
-  isRunning: boolean;
-  wasCancelled: boolean;
-  totalMatched: number;
-  currentIndex: number;
-  currentLabel: string;
-  successCount: number;
-  skippedCount: number;
-  errorCount: number;
-  unmatchedCount: number;
-  ignoredNonMp3Count: number;
-  issues: BulkUploadIssueItem[];
-  summaryNotice: string | null;
-}
-
-const INITIAL_BULK_STATE: BulkUploadState = {
-  isRunning: false,
-  wasCancelled: false,
-  totalMatched: 0,
-  currentIndex: 0,
-  currentLabel: '',
-  successCount: 0,
-  skippedCount: 0,
-  errorCount: 0,
-  unmatchedCount: 0,
-  ignoredNonMp3Count: 0,
-  issues: [],
-  summaryNotice: null,
-};
-
 interface AdminNovelMp3DrawerModalProps {
   novel: Novel;
   onClose: () => void;
   onChapterAudioUpdated: (novelId: string, updatedChapter: Chapter) => void;
+  onBatchChaptersAudioUpdated?: (novelId: string, updatedChapters: Chapter[]) => void;
 }
 
-/**
- * Cửa sổ quản lý & tạo MP3 cho toàn bộ chương của 1 truyện ngay bên trong Trang Admin (Tab Quản lý truyện)
- * Hỗ trợ:
- * - Tải MP3 hàng loạt tuần tự an toàn (tự lọc .mp3, tách số chương theo regex, delay 300ms chống GitHub 409/rate limit)
- * - Tự tạo MP3 từ chữ (chia <= 400 ký tự, Netlify -> Vercel, ghép Blob ngay trên trình duyệt)
- * - Giao diện responsive mobile-first (< 640px không tràn ngang)
- */
 export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> = ({
   novel,
   onClose,
   onChapterAudioUpdated,
+  onBatchChaptersAudioUpdated,
 }) => {
-  const audioContext = useAudio();
   const [chapters, setChapters] = useState<Chapter[]>(() =>
     Array.isArray(novel.chapters) ? [...novel.chapters] : []
   );
-  const chaptersRef = useRef<Chapter[]>(chapters);
-  useEffect(() => {
-    chaptersRef.current = chapters;
-  }, [chapters]);
-
   const [isLoadingChapters, setIsLoadingChapters] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [synthesisVoiceId, setSynthesisVoiceId] = useState<string>(() => {
-    const normalized = normalizeEdgeVoiceId(audioContext.voiceId || 'vi-VN-NamMinhNeural');
-    return isDeviceFallbackVoice(normalized) ? 'vi-VN-NamMinhNeural' : normalized;
-  });
 
-  // Bulk Upload state
-  const bulkFileInputRef = useRef<HTMLInputElement>(null);
-  const bulkAbortRef = useRef<AbortController | null>(null);
-  const [skipExistingMp3, setSkipExistingMp3] = useState<boolean>(true);
-  const [bulkState, setBulkState] = useState<BulkUploadState>(INITIAL_BULK_STATE);
-  const [bulkConfigError, setBulkConfigError] = useState<string | null>(null);
+  // Search, Quick Filters & 100-chapter Pagination
+  const [searchQuery, setSearchQuery] = useState('');
+  const [voiceFilter, setVoiceFilter] = useState<VoiceFilterMode>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+
+  // Bulk Paste Modal / Panel
+  const [showBulkPasteModal, setShowBulkPasteModal] = useState(false);
+  const [bulkVoice, setBulkVoice] = useState<VoiceKey>('male');
+  const [bulkText, setBulkText] = useState('');
+  const [isSavingBulk, setIsSavingBulk] = useState(false);
+  const [bulkReport, setBulkReport] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    details: string[];
+  } | null>(null);
+
+  // Bulk Delete Modal
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [deleteScope, setDeleteScope] = useState<DeleteVoiceScope>('male');
+  const [deleteFromChapter, setDeleteFromChapter] = useState<number>(1);
+  const [deleteToChapter, setDeleteToChapter] = useState<number>(100);
+  const [isDeletingBulk, setIsDeletingBulk] = useState(false);
+  const [toolbarMessage, setToolbarMessage] = useState<{
+    type: 'success' | 'error' | 'warning';
+    text: string;
+  } | null>(null);
+
+  // Page Link Health Check
+  const [isCheckingLinks, setIsCheckingLinks] = useState(false);
+  const [checkProgress, setCheckProgress] = useState<{ checked: number; total: number }>({
+    checked: 0,
+    total: 0,
+  });
+  const checkAbortRef = useRef<boolean>(false);
+  const [brokenLinksMap, setBrokenLinksMap] = useState<Record<string, BrokenVoiceState>>({});
+
+  // Export Backup (.txt) Dropdown
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
+        setShowExportMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
     return () => {
-      bulkAbortRef.current?.abort();
+      document.removeEventListener('mousedown', handleClickOutside);
+      checkAbortRef.current = true;
     };
   }, []);
 
@@ -754,635 +606,891 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     let cancelled = false;
     setIsLoadingChapters(true);
     fetchChaptersForNovel(novel.id)
-      .then((fetched) => {
-        if (!cancelled && Array.isArray(fetched) && fetched.length > 0) {
-          setChapters(fetched);
+      .then((list) => {
+        if (!cancelled && Array.isArray(list) && list.length > 0) {
+          const sorted = [...list].sort((a, b) => Number(a.number) - Number(b.number));
+          setChapters(sorted);
+          const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
+          setDeleteFromChapter(sorted[0]?.number || 1);
+          setDeleteToChapter(maxNum);
         }
       })
       .catch(() => {})
       .finally(() => {
         if (!cancelled) setIsLoadingChapters(false);
       });
-
     return () => {
       cancelled = true;
     };
   }, [novel.id]);
 
+  // Reset page to 1 when search or filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, voiceFilter]);
+
+  const sortedChapters = useMemo(() => {
+    return [...(chapters || [])].sort((a, b) => Number(a.number) - Number(b.number));
+  }, [chapters]);
+
+  const audioStats = useMemo(() => {
+    let maleCount = 0;
+    let femaleCount = 0;
+    let missingMaleCount = 0;
+    let missingFemaleCount = 0;
+    let bothReadyCount = 0;
+    for (const ch of sortedChapters) {
+      const hasMale = Boolean(getMaleAudioUrl(ch));
+      const hasFemale = Boolean(getFemaleAudioUrl(ch));
+      if (hasMale) maleCount += 1;
+      else missingMaleCount += 1;
+      if (hasFemale) femaleCount += 1;
+      else missingFemaleCount += 1;
+      if (hasMale && hasFemale) bothReadyCount += 1;
+    }
+    return {
+      total: sortedChapters.length,
+      maleCount,
+      femaleCount,
+      missingMaleCount,
+      missingFemaleCount,
+      bothReadyCount,
+    };
+  }, [sortedChapters]);
+
   const filteredChapters = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return chapters;
-    return chapters.filter(
-      (c) =>
-        (c.title || '').toLowerCase().includes(q) || String(c.number || '').includes(q)
-    );
-  }, [chapters, searchQuery]);
+    const q = removeVietnameseTones(searchQuery);
+    const rawTrimmed = searchQuery.trim();
+    return sortedChapters.filter((ch) => {
+      const hasMale = Boolean(getMaleAudioUrl(ch));
+      const hasFemale = Boolean(getFemaleAudioUrl(ch));
 
-  const mp3ReadyCount = useMemo(
-    () => chapters.filter((c) => Boolean(c.audioUrl && c.audioUrl.trim())).length,
-    [chapters]
-  );
+      if (voiceFilter === 'missing_male' && hasMale) return false;
+      if (voiceFilter === 'missing_female' && hasFemale) return false;
+      if (voiceFilter === 'both_ready' && (!hasMale || !hasFemale)) return false;
 
-  const handleUpdated = (targetChapter: Chapter, nextAudioUrl: string | undefined) => {
-    const updatedChap: Chapter = { ...targetChapter, audioUrl: nextAudioUrl };
-    setChapters((prev) => {
-      const next = prev.map((c) =>
-        c.id === targetChapter.id || Number(c.number) === Number(targetChapter.number)
-          ? { ...c, audioUrl: nextAudioUrl }
-          : c
-      );
-      chaptersRef.current = next;
-      return next;
+      if (!q && !rawTrimmed) return true;
+      const numMatch = String(ch.number) === rawTrimmed || String(ch.number).includes(rawTrimmed);
+      const titleMatch = removeVietnameseTones(ch.title || '').includes(q);
+      return numMatch || titleMatch;
     });
-    onChapterAudioUpdated(novel.id, updatedChap);
-  };
+  }, [sortedChapters, searchQuery, voiceFilter]);
 
-  const handleCancelBulkUpload = () => {
-    bulkAbortRef.current?.abort();
-  };
+  const totalPages = Math.max(1, Math.ceil(filteredChapters.length / CHAPTERS_PER_PAGE));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageStartIndex = (safeCurrentPage - 1) * CHAPTERS_PER_PAGE;
+  const pageChapters = useMemo(() => {
+    return filteredChapters.slice(pageStartIndex, pageStartIndex + CHAPTERS_PER_PAGE);
+  }, [filteredChapters, pageStartIndex]);
 
-  const handleBulkFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files ? Array.from(e.target.files) : [];
-    e.target.value = '';
-    if (fileList.length === 0) return;
-
-    setBulkConfigError(null);
-
-    const cfg = getAdminGitHubConfig();
-    if (!cfg.repo || !cfg.token) {
-      setBulkConfigError(
-        'Vui lòng nhập Tên kho âm thanh và Mã xác thực rồi bấm "Lưu cấu hình" trước khi tải MP3 hàng loạt.'
-      );
-      return;
+  const applyBatchUpdatesToState = (updatedChaptersList: Chapter[]) => {
+    const byId = new Map<string, Chapter>();
+    const byNumber = new Map<number, Chapter>();
+    for (const u of updatedChaptersList) {
+      if (u.id) byId.set(u.id, u);
+      if (Number(u.number) > 0) byNumber.set(Number(u.number), u);
     }
-
-    try {
-      parseGitHubRepo(cfg.repo);
-    } catch (err: any) {
-      setBulkConfigError(err?.message || 'Tên kho âm thanh không hợp lệ.');
-      return;
-    }
-
-    // 1. Lọc file .mp3 (bỏ qua .txt, .srt, ảnh...)
-    const validMp3Files: File[] = [];
-    let ignoredNonMp3Count = 0;
-    for (const f of fileList) {
-      if (isValidMp3UploadFile(f)) {
-        validMp3Files.push(f);
-      } else {
-        ignoredNonMp3Count += 1;
+    setChapters((prev) =>
+      prev.map((item) => {
+        const matched = byId.get(item.id) || byNumber.get(Number(item.number));
+        if (!matched) return item;
+        return {
+          ...item,
+          audioUrl: matched.audioUrl,
+          audioUrlMale: matched.audioUrlMale,
+          audioUrlFemale: matched.audioUrlFemale,
+        };
+      })
+    );
+    if (onBatchChaptersAudioUpdated) {
+      onBatchChaptersAudioUpdated(novel.id, updatedChaptersList);
+    } else {
+      for (const u of updatedChaptersList) {
+        onChapterAudioUpdated(novel.id, u);
       }
     }
+  };
 
-    if (validMp3Files.length === 0) {
-      setBulkConfigError('Không có file .mp3 hợp lệ nào trong danh sách vừa chọn (các file .txt, .srt... đã được tự động bỏ qua).');
+  // Logic 1: Dán link MP3 hàng loạt
+  const handleBulkPasteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBulkReport(null);
+
+    const lines = bulkText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      setBulkReport({
+        type: 'error',
+        message: 'Vui lòng dán ít nhất 1 dòng chứa đường dẫn MP3.',
+        details: [],
+      });
       return;
     }
 
-    // 2. Tạo bản đồ số chương hiện có của truyện
     const chapterByNumber = new Map<number, Chapter>();
-    for (const ch of chaptersRef.current) {
-      const num = Number(ch.number);
-      if (Number.isFinite(num) && !chapterByNumber.has(num)) {
-        chapterByNumber.set(num, ch);
-      }
+    for (const ch of sortedChapters) {
+      chapterByNumber.set(Number(ch.number), ch);
     }
 
-    // 3. Tách số chương từ tên file & khớp chương
-    const matchedQueue: Array<{ file: File; chapterNumber: number; chapter: Chapter }> = [];
-    const seenChapterNumbers = new Set<number>();
-    const initialIssues: BulkUploadIssueItem[] = [];
-    let unmatchedCount = 0;
+    let sequentialChapterNum = 1;
+    const mappedByChapterKey = new Map<
+      string,
+      { chapter: Chapter; url: string }
+    >();
+    const issues: string[] = [];
 
-    // Sắp xếp tên file trước để xử lý nhất quán nếu lỡ chọn trùng số chương
-    const sortedFiles = [...validMp3Files].sort((a, b) =>
-      a.name.localeCompare(b.name, 'vi', { numeric: true })
-    );
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
 
-    for (const file of sortedFiles) {
-      const chapNum = extractChapterNumberFromMp3Filename(file.name);
-      if (chapNum === null) {
-        unmatchedCount += 1;
-        initialIssues.push({
-          fileName: file.name,
-          reason: 'Không tìm thấy số chương (vd: Chương_1, Chương 12, Chuong_01)',
-          type: 'unmatched',
-        });
+      // Ưu tiên 1: Chương <số> | <URL> (hỗ trợ |, :, -)
+      const labeledMatch = line.match(
+        /^(?:chương|chuong|c|hồi|hoi|chapter)\s*(\d+)(?:[^|\r\n]*?)\s*(?:\||:|-)\s*(https?:\/\/\S+)$/i
+      );
+      if (labeledMatch) {
+        const chapNum = parseInt(labeledMatch[1], 10);
+        const url = labeledMatch[2].trim();
+        const targetChapter = chapterByNumber.get(chapNum);
+        if (!targetChapter) {
+          issues.push(`Dòng ${i + 1}: Không tìm thấy Chương ${chapNum} trong truyện.`);
+          continue;
+        }
+        if (!isValidHttpUrl(url)) {
+          issues.push(`Dòng ${i + 1}: Đường dẫn không hợp lệ.`);
+          continue;
+        }
+        mappedByChapterKey.set(targetChapter.id, { chapter: targetChapter, url });
         continue;
       }
 
-      const matchedChapter = chapterByNumber.get(chapNum);
-      if (!matchedChapter) {
-        unmatchedCount += 1;
-        initialIssues.push({
-          fileName: file.name,
-          reason: `Không tìm thấy Chương ${chapNum} trong truyện này`,
-          type: 'unmatched',
-        });
+      // Ưu tiên 2: Chỉ có <URL> -> gán lần lượt từ Chương 1
+      const bareUrlMatch = line.match(/^(https?:\/\/\S+)$/i);
+      if (bareUrlMatch) {
+        const chapNum = sequentialChapterNum++;
+        const url = bareUrlMatch[1].trim();
+        const targetChapter = chapterByNumber.get(chapNum);
+        if (!targetChapter) {
+          issues.push(
+            `Dòng ${i + 1}: Không tìm thấy Chương ${chapNum} (khi gán tuần tự từ Chương 1).`
+          );
+          continue;
+        }
+        mappedByChapterKey.set(targetChapter.id, { chapter: targetChapter, url });
         continue;
       }
 
-      if (seenChapterNumbers.has(chapNum)) {
-        unmatchedCount += 1;
-        initialIssues.push({
-          fileName: file.name,
-          reason: `Trùng số Chương ${chapNum} với một file MP3 khác đã chọn`,
-          type: 'unmatched',
-        });
-        continue;
-      }
-
-      seenChapterNumbers.add(chapNum);
-      matchedQueue.push({
-        file,
-        chapterNumber: chapNum,
-        chapter: matchedChapter,
-      });
+      issues.push(`Dòng ${i + 1}: Không nhận diện được định dạng ("${line.slice(0, 50)}...")`);
     }
 
-    // Sắp xếp tăng dần theo số chương
-    matchedQueue.sort((a, b) => a.chapterNumber - b.chapterNumber);
-
-    if (matchedQueue.length === 0) {
-      setBulkState({
-        isRunning: false,
-        wasCancelled: false,
-        totalMatched: 0,
-        currentIndex: 0,
-        currentLabel: 'Không có file MP3 nào khớp với danh sách chương của truyện.',
-        successCount: 0,
-        skippedCount: 0,
-        errorCount: 0,
-        unmatchedCount,
-        ignoredNonMp3Count,
-        issues: initialIssues,
-        summaryNotice: `Đã quét ${validMp3Files.length} file MP3 nhưng không khớp chương nào.`,
+    const entries = Array.from(mappedByChapterKey.values());
+    if (entries.length === 0) {
+      setBulkReport({
+        type: 'error',
+        message: 'Không có chương nào hợp lệ để cập nhật.',
+        details: issues.slice(0, 10),
       });
       return;
     }
 
-    const controller = new AbortController();
-    bulkAbortRef.current = controller;
+    setIsSavingBulk(true);
+    try {
+      const batchItems: ChapterAudioLinkBatchItem[] = entries.map(({ chapter, url }) => ({
+        chapter,
+        audioUrlMale: bulkVoice === 'male' ? url : undefined,
+        audioUrlFemale: bulkVoice === 'female' ? url : undefined,
+      }));
 
-    let successCount = 0;
-    let skippedCount = 0;
-    let errorCount = 0;
-    const issues: BulkUploadIssueItem[] = [...initialIssues];
-    const totalMatched = matchedQueue.length;
-    let wasCancelled = false;
-    let stoppedByAuthError = false;
+      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems);
 
-    setBulkState({
-      isRunning: true,
-      wasCancelled: false,
-      totalMatched,
-      currentIndex: 0,
-      currentLabel: `Chuẩn bị tải ${totalMatched} file MP3 theo thứ tự tăng dần...`,
-      successCount: 0,
-      skippedCount: 0,
-      errorCount: 0,
-      unmatchedCount,
-      ignoredNonMp3Count,
-      issues: [...issues],
-      summaryNotice: null,
-    });
+      const updatedChapters: Chapter[] = entries.map(({ chapter, url }) => ({
+        ...chapter,
+        audioUrlMale: bulkVoice === 'male' ? url : chapter.audioUrlMale,
+        audioUrlFemale: bulkVoice === 'female' ? url : chapter.audioUrlFemale,
+      }));
 
-    // 4. BẮT BUỘC tải TUẦN TỰ từng file (for...of + await, TUYỆT ĐỐI KHÔNG dùng Promise.all)
-    let index = 0;
-    for (const item of matchedQueue) {
-      index += 1;
-      if (controller.signal.aborted) {
-        wasCancelled = true;
-        break;
-      }
-
-      const latestChapter =
-        chaptersRef.current.find(
-          (c) => c.id === item.chapter.id || Number(c.number) === Number(item.chapterNumber)
-        ) || item.chapter;
-
-      if (skipExistingMp3 && latestChapter.audioUrl && latestChapter.audioUrl.trim()) {
-        skippedCount += 1;
-        setBulkState({
-          isRunning: true,
-          wasCancelled: false,
-          totalMatched,
-          currentIndex: index,
-          currentLabel: `Bỏ qua ${index}/${totalMatched} - Chương ${item.chapterNumber} (đã có MP3)`,
-          successCount,
-          skippedCount,
-          errorCount,
-          unmatchedCount,
-          ignoredNonMp3Count,
-          issues: [...issues],
-          summaryNotice: null,
-        });
-        continue;
-      }
-
-      setBulkState({
-        isRunning: true,
-        wasCancelled: false,
-        totalMatched,
-        currentIndex: index,
-        currentLabel: `Đang tải ${index}/${totalMatched} - Chương ${item.chapterNumber}...`,
-        successCount,
-        skippedCount,
-        errorCount,
-        unmatchedCount,
-        ignoredNonMp3Count,
-        issues: [...issues],
-        summaryNotice: null,
+      setBrokenLinksMap((prev) => {
+        const next = { ...prev };
+        for (const ch of updatedChapters) {
+          if (next[ch.id]) {
+            next[ch.id] = {
+              ...next[ch.id],
+              [bulkVoice]: false,
+            };
+          }
+        }
+        return next;
       });
 
-      try {
-        const buffer = await item.file.arrayBuffer();
-        if (controller.signal.aborted) {
-          wasCancelled = true;
-          break;
+      applyBatchUpdatesToState(updatedChapters);
+
+      const voiceLabel = bulkVoice === 'male' ? 'Nam Minh' : 'Hằng Nga';
+      setBulkReport({
+        type: 'success',
+        message: `Đã ghép thành công ${updatedChapters.length} link MP3 cho giọng ${voiceLabel}${
+          issues.length > 0 ? ` (${issues.length} dòng bị bỏ qua)` : ''
+        }.`,
+        details: issues.slice(0, 12),
+      });
+      if (issues.length === 0) {
+        setBulkText('');
+      }
+    } catch (err: any) {
+      setBulkReport({
+        type: 'error',
+        message: sanitizeUserFacingErrorText(
+          err?.message,
+          'Lỗi khi lưu danh sách link MP3 lên hệ thống.'
+        ),
+        details: issues.slice(0, 10),
+      });
+    } finally {
+      setIsSavingBulk(false);
+    }
+  };
+
+  // Logic 2: Xóa link hàng loạt theo phạm vi chương & giọng
+  const deletePreviewCount = useMemo(() => {
+    const minC = Math.min(deleteFromChapter, deleteToChapter);
+    const maxC = Math.max(deleteFromChapter, deleteToChapter);
+    return sortedChapters.filter((ch) => {
+      const num = Number(ch.number);
+      if (num < minC || num > maxC) return false;
+      const hasMale = Boolean(getMaleAudioUrl(ch));
+      const hasFemale = Boolean(getFemaleAudioUrl(ch));
+      if (deleteScope === 'male') return hasMale;
+      if (deleteScope === 'female') return hasFemale;
+      return hasMale || hasFemale;
+    }).length;
+  }, [sortedChapters, deleteFromChapter, deleteToChapter, deleteScope]);
+
+  const handleBulkDeleteConfirm = async () => {
+    const minC = Math.min(deleteFromChapter, deleteToChapter);
+    const maxC = Math.max(deleteFromChapter, deleteToChapter);
+    const targets = sortedChapters.filter((ch) => {
+      const num = Number(ch.number);
+      if (num < minC || num > maxC) return false;
+      const hasMale = Boolean(getMaleAudioUrl(ch));
+      const hasFemale = Boolean(getFemaleAudioUrl(ch));
+      if (deleteScope === 'male') return hasMale;
+      if (deleteScope === 'female') return hasFemale;
+      return hasMale || hasFemale;
+    });
+
+    if (targets.length === 0) {
+      setToolbarMessage({
+        type: 'warning',
+        text: `Không có link MP3 nào thuộc phạm vi Chương ${minC}–${maxC} để xóa.`,
+      });
+      setShowBulkDeleteModal(false);
+      return;
+    }
+
+    setIsDeletingBulk(true);
+    try {
+      const batchItems: ChapterAudioLinkBatchItem[] = targets.map((ch) => ({
+        chapter: ch,
+        audioUrlMale: deleteScope === 'male' || deleteScope === 'both' ? '' : undefined,
+        audioUrlFemale: deleteScope === 'female' || deleteScope === 'both' ? '' : undefined,
+      }));
+
+      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems);
+
+      const updatedChapters: Chapter[] = targets.map((ch) => ({
+        ...ch,
+        audioUrl:
+          deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.audioUrl,
+        audioUrlMale:
+          deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.audioUrlMale,
+        audioUrlFemale:
+          deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.audioUrlFemale,
+      }));
+
+      setBrokenLinksMap((prev) => {
+        const next = { ...prev };
+        for (const ch of targets) {
+          if (next[ch.id]) {
+            next[ch.id] = {
+              male: deleteScope === 'male' || deleteScope === 'both' ? false : next[ch.id].male,
+              female:
+                deleteScope === 'female' || deleteScope === 'both' ? false : next[ch.id].female,
+            };
+          }
         }
-        const mp3Bytes = new Uint8Array(buffer);
+        return next;
+      });
 
-        const { cdnUrl } = await uploadMp3ToGitHub({
-          repoInput: cfg.repo,
-          token: cfg.token,
-          storyId: novel.id,
-          chapterId: latestChapter.id || `c-${latestChapter.number}`,
-          mp3Bytes,
-          commitMessage: `Bulk upload MP3: ${novel.id} - Chương ${latestChapter.number}`,
-          signal: controller.signal,
-        });
+      applyBatchUpdatesToState(updatedChapters);
+      setShowBulkDeleteModal(false);
+      const scopeLabel =
+        deleteScope === 'male'
+          ? 'Nam Minh'
+          : deleteScope === 'female'
+          ? 'Hằng Nga'
+          : 'Cả 2 giọng';
+      setToolbarMessage({
+        type: 'success',
+        text: `Đã xóa link MP3 (${scopeLabel}) của ${targets.length} chương trong phạm vi Chương ${minC}–${maxC}.`,
+      });
+    } catch (err: any) {
+      setToolbarMessage({
+        type: 'error',
+        text: sanitizeUserFacingErrorText(
+          err?.message,
+          'Không thể xóa hàng loạt link MP3.'
+        ),
+      });
+    } finally {
+      setIsDeletingBulk(false);
+    }
+  };
 
-        await updateChapterAudioUrlInFirestore(novel.id, latestChapter, cdnUrl);
+  // Logic 3: Kiểm tra link hỏng trên trang hiện tại (tối đa 100 chương)
+  const handleCheckLinksOnCurrentPage = async () => {
+    if (isCheckingLinks) {
+      checkAbortRef.current = true;
+      return;
+    }
 
-        // Cập nhật ngay trạng thái "Đã có MP3" cho từng chương vừa xong
-        handleUpdated(latestChapter, cdnUrl);
-        successCount += 1;
+    const tasks: { chapterId: string; voice: VoiceKey; url: string }[] = [];
+    for (const ch of pageChapters) {
+      const maleUrl = getMaleAudioUrl(ch);
+      const femaleUrl = getFemaleAudioUrl(ch);
+      if (maleUrl) tasks.push({ chapterId: ch.id, voice: 'male', url: maleUrl });
+      if (femaleUrl) tasks.push({ chapterId: ch.id, voice: 'female', url: femaleUrl });
+    }
 
-        setBulkState({
-          isRunning: true,
-          wasCancelled: false,
-          totalMatched,
-          currentIndex: index,
-          currentLabel: `Đã xong ${index}/${totalMatched} - Chương ${item.chapterNumber}`,
-          successCount,
-          skippedCount,
-          errorCount,
-          unmatchedCount,
-          ignoredNonMp3Count,
-          issues: [...issues],
-          summaryNotice: null,
-        });
+    if (tasks.length === 0) {
+      setToolbarMessage({
+        type: 'warning',
+        text: 'Trang hiện tại chưa có link MP3 nào để kiểm tra.',
+      });
+      return;
+    }
 
-        // Nghỉ 300ms sau mỗi file đẩy thành công để chống xung đột commit 409 / rate limit GitHub
-        if (index < totalMatched && !controller.signal.aborted) {
-          await sleepWithAbort(300, controller.signal);
+    checkAbortRef.current = false;
+    setIsCheckingLinks(true);
+    setToolbarMessage(null);
+    setCheckProgress({ checked: 0, total: tasks.length });
+
+    let cursor = 0;
+    let okCount = 0;
+    let failCount = 0;
+    const pageResults: Record<string, BrokenVoiceState> = {};
+
+    const concurrency = Math.min(4, tasks.length);
+    const worker = async () => {
+      while (!checkAbortRef.current) {
+        const idx = cursor++;
+        if (idx >= tasks.length) break;
+        const t = tasks[idx];
+        const ok = await probeAudioUrlMetadata(t.url, 8000);
+        if (checkAbortRef.current) break;
+
+        if (!pageResults[t.chapterId]) {
+          pageResults[t.chapterId] = {};
         }
-      } catch (err: any) {
-        if (err?.name === 'AbortError' || controller.signal.aborted) {
-          wasCancelled = true;
-          break;
-        }
-        const msg = err?.message || 'Lỗi tải lên không xác định';
-        errorCount += 1;
-        issues.push({
-          fileName: `${item.file.name} (Chương ${item.chapterNumber})`,
-          reason: msg,
-          type: 'error',
-        });
+        pageResults[t.chapterId][t.voice] = !ok;
+        if (ok) okCount += 1;
+        else failCount += 1;
 
-        setBulkState({
-          isRunning: true,
-          wasCancelled: false,
-          totalMatched,
-          currentIndex: index,
-          currentLabel: `Lỗi tại ${index}/${totalMatched} - Chương ${item.chapterNumber}`,
-          successCount,
-          skippedCount,
-          errorCount,
-          unmatchedCount,
-          ignoredNonMp3Count,
-          issues: [...issues],
-          summaryNotice: null,
-        });
+        setCheckProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
+      }
+    };
 
-        // Nếu lỗi xác thực GitHub Token (401/403) thì dừng sớm để tránh lặp lỗi vô ích
-        if (msg.includes('HTTP 401') || msg.includes('HTTP 403')) {
-          stoppedByAuthError = true;
-          break;
-        }
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
-        if (index < totalMatched && !controller.signal.aborted) {
-          await sleepWithAbort(300, controller.signal).catch(() => {});
+    if (!checkAbortRef.current) {
+      setBrokenLinksMap((prev) => {
+        const next = { ...prev };
+        for (const [chId, state] of Object.entries(pageResults)) {
+          next[chId] = { ...(next[chId] || {}), ...state };
         }
+        return next;
+      });
+      setToolbarMessage({
+        type: failCount > 0 ? 'warning' : 'success',
+        text: `Đã kiểm tra ${tasks.length} link trang ${safeCurrentPage}: ${okCount} link hợp lệ, ${failCount} link lỗi.`,
+      });
+    }
+    setIsCheckingLinks(false);
+  };
+
+  // Logic 4: Xuất file dự phòng (.txt) chuẩn "Chương <số> | <url>"
+  const handleExportTxtBackup = (voice: VoiceKey) => {
+    setShowExportMenu(false);
+    const lines: string[] = [];
+    for (const ch of sortedChapters) {
+      const url = voice === 'male' ? getMaleAudioUrl(ch) : getFemaleAudioUrl(ch);
+      if (url) {
+        lines.push(`Chương ${ch.number} | ${url}`);
       }
     }
 
-    bulkAbortRef.current = null;
-    const summaryNotice = stoppedByAuthError
-      ? 'Đã dừng sớm do lỗi xác thực kho âm thanh (HTTP 401/403). Vui lòng kiểm tra lại mã xác thực.'
-      : wasCancelled
-      ? `Đã dừng tải hàng loạt (${successCount} thành công, ${skippedCount} bỏ qua, ${errorCount} lỗi).`
-      : `Hoàn tất tải MP3 hàng loạt: ${successCount} thành công, ${skippedCount} bỏ qua, ${errorCount} lỗi, ${unmatchedCount} không khớp.`;
+    if (lines.length === 0) {
+      setToolbarMessage({
+        type: 'warning',
+        text: `Truyện này chưa có link MP3 nào cho giọng ${
+          voice === 'male' ? 'Nam Minh' : 'Hằng Nga'
+        } để xuất file.`,
+      });
+      return;
+    }
 
-    setBulkState({
-      isRunning: false,
-      wasCancelled,
-      totalMatched,
-      currentIndex: index,
-      currentLabel: summaryNotice,
-      successCount,
-      skippedCount,
-      errorCount,
-      unmatchedCount,
-      ignoredNonMp3Count,
-      issues: [...issues],
-      summaryNotice,
+    const content = lines.join('\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    const baseName = sanitizeDownloadFilename(novel.title);
+    const voiceSuffix = voice === 'male' ? 'NamMinh' : 'HangNga';
+    anchor.href = objectUrl;
+    anchor.download = `${baseName}_${voiceSuffix}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+
+    setToolbarMessage({
+      type: 'success',
+      text: `Đã xuất ${lines.length} link giọng ${
+        voice === 'male' ? 'Nam Minh' : 'Hằng Nga'
+      } ra file ${baseName}_${voiceSuffix}.txt.`,
     });
   };
 
-  const bulkProgressPct =
-    bulkState.totalMatched > 0
-      ? Math.min(100, Math.round((bulkState.currentIndex / bulkState.totalMatched) * 100))
-      : 0;
+  const renderPaginationBar = (positionLabel: 'top' | 'bottom') => {
+    if (filteredChapters.length === 0) return null;
+    const fromItem = pageStartIndex + 1;
+    const toItem = Math.min(pageStartIndex + CHAPTERS_PER_PAGE, filteredChapters.length);
 
-  const hasBulkActivity =
-    bulkState.isRunning ||
-    bulkState.summaryNotice !== null ||
-    bulkState.issues.length > 0;
+    const pageNumbers: (number | 'ellipsis')[] = [];
+    if (totalPages <= 7) {
+      for (let p = 1; p <= totalPages; p++) pageNumbers.push(p);
+    } else {
+      pageNumbers.push(1);
+      if (safeCurrentPage > 3) pageNumbers.push('ellipsis');
+      const start = Math.max(2, safeCurrentPage - 1);
+      const end = Math.min(totalPages - 1, safeCurrentPage + 1);
+      for (let p = start; p <= end; p++) pageNumbers.push(p);
+      if (safeCurrentPage < totalPages - 2) pageNumbers.push('ellipsis');
+      pageNumbers.push(totalPages);
+    }
+
+    return (
+      <div
+        key={positionLabel}
+        className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs"
+      >
+        <div className="text-slate-600 font-medium tabular-nums">
+          Trang <strong>{safeCurrentPage}/{totalPages}</strong> • Hiển thị{' '}
+          <strong>
+            {fromItem}–{toItem}
+          </strong>{' '}
+          / {filteredChapters.length} chương
+        </div>
+
+        {totalPages > 1 && (
+          <div className="flex items-center gap-1 flex-wrap">
+            <button
+              type="button"
+              disabled={safeCurrentPage <= 1}
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              <span>Trước</span>
+            </button>
+
+            {pageNumbers.map((item, idx) =>
+              item === 'ellipsis' ? (
+                <span key={`el-${idx}`} className="px-1.5 text-slate-400 font-bold">
+                  ...
+                </span>
+              ) : (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => setCurrentPage(item)}
+                  className={`min-w-[34px] min-h-[34px] px-2 py-1 rounded-lg font-bold tabular-nums cursor-pointer transition ${
+                    safeCurrentPage === item
+                      ? 'bg-pink-600 text-white shadow-xs'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {item}
+                </button>
+              )
+            )}
+
+            <button
+              type="button"
+              disabled={safeCurrentPage >= totalPages}
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              className="min-h-[34px] px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed transition"
+            >
+              <span>Sau</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-[10005] bg-black/65 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={() => {
-        if (!bulkState.isRunning) onClose();
-      }}
-    >
-      <div
-        className="w-full max-w-4xl h-[94dvh] sm:h-auto sm:max-h-[92vh] bg-slate-50 rounded-t-2xl sm:rounded-3xl border border-pink-200 shadow-2xl flex flex-col overflow-hidden text-slate-900"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 sm:px-6 py-3.5 sm:py-4 bg-white border-b border-slate-200 flex items-center justify-between gap-2.5 shrink-0">
-          <div className="min-w-0 flex-1">
-            <h3 className="font-black text-sm sm:text-base text-slate-900 flex items-center gap-2 min-w-0">
-              <Headphones className="w-4 h-4 text-pink-600 shrink-0" />
-              <span className="truncate">Quản lý MP3 — {novel.title}</span>
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Đã có MP3: <strong className="text-emerald-700">{mp3ReadyCount}/{chapters.length}</strong> chương
-            </p>
+    <div className="fixed inset-0 z-[105] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
+      <div className="w-full max-w-5xl max-h-[94dvh] bg-white rounded-2xl sm:rounded-3xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden text-slate-900">
+        {/* Header */}
+        <div className="px-4 sm:px-6 py-3.5 bg-slate-50 border-b border-slate-200 flex items-start sm:items-center justify-between gap-3 shrink-0">
+          <div className="flex items-start sm:items-center gap-3 min-w-0 flex-1">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <Headphones className="w-5 h-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <h3 className="font-extrabold text-sm sm:text-base text-slate-900 truncate">
+                Quản lý MP3: {novel.title}
+              </h3>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs mt-1 tabular-nums">
+                <span className="inline-flex items-center gap-1 font-bold text-sky-700">
+                  <UserRound className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                  <span>
+                    Nam Minh: {audioStats.maleCount}/{audioStats.total} chương
+                  </span>
+                </span>
+                <span className="text-slate-300 hidden sm:inline">|</span>
+                <span className="inline-flex items-center gap-1 font-bold text-pink-700">
+                  <UserRound className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+                  <span>
+                    Hằng Nga: {audioStats.femaleCount}/{audioStats.total} chương
+                  </span>
+                </span>
+              </div>
+            </div>
           </div>
+
           <button
             type="button"
-            onClick={() => {
-              if (bulkState.isRunning) {
-                handleCancelBulkUpload();
-              }
-              onClose();
-            }}
-            className="min-w-[40px] min-h-[40px] rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center cursor-pointer transition shrink-0"
-            title="Đóng"
+            onClick={onClose}
+            aria-label="Đóng quản lý MP3"
+            className="min-w-[44px] min-h-[44px] rounded-xl flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-200/70 transition cursor-pointer shrink-0"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-3.5 sm:p-6 pb-28 sm:pb-32 space-y-3.5 sm:space-y-4">
-          <AdminGitHubConfigCard defaultCollapsed />
+        {/* Action Toolbar + Search + Filters */}
+        <div className="px-4 sm:px-6 py-3 bg-white border-b border-slate-200 space-y-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Primary CTA: Dán link MP3 hàng loạt */}
+            <button
+              type="button"
+              onClick={() => {
+                setBulkReport(null);
+                setShowBulkPasteModal((prev) => !prev);
+                setShowBulkDeleteModal(false);
+              }}
+              className="min-h-[40px] px-4 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white font-bold text-xs inline-flex items-center gap-1.5 shadow-sm cursor-pointer transition"
+            >
+              <ClipboardPaste className="w-4 h-4 shrink-0" />
+              <span>Dán link MP3 hàng loạt</span>
+            </button>
 
-          {/* Thanh công cụ responsive Mobile-First: xếp dọc trên <640px, không tràn ngang */}
-          <div className="p-3.5 bg-white rounded-2xl border border-slate-200 space-y-3">
-            <input
-              ref={bulkFileInputRef}
-              type="file"
-              multiple
-              accept=".mp3,audio/mpeg"
-              onChange={handleBulkFilesSelected}
-              className="hidden"
-            />
+            {/* Tool 2: Kiểm tra link trang này */}
+            <button
+              type="button"
+              onClick={handleCheckLinksOnCurrentPage}
+              className={`min-h-[40px] px-3.5 py-2 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition ${
+                isCheckingLinks
+                  ? 'bg-amber-50 border-amber-300 text-amber-800'
+                  : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800'
+              }`}
+              title="Kiểm tra tốc độ & trạng thái toàn bộ link MP3 đang hiển thị ở trang hiện tại"
+            >
+              {isCheckingLinks ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600 shrink-0" />
+                  <span className="tabular-nums">
+                    Đang kiểm tra ({checkProgress.checked}/{checkProgress.total}) • Bấm để dừng
+                  </span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Kiểm tra link trang này</span>
+                </>
+              )}
+            </button>
 
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
-              <div className="relative flex-1 min-w-0">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Tìm nhanh theo tên hoặc số chương..."
-                  className="w-full min-h-[42px] bg-slate-50 border border-slate-300 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-900 focus:outline-none focus:border-pink-500 focus:bg-white"
-                />
-              </div>
+            {/* Tool 3: Xóa link hàng loạt */}
+            <button
+              type="button"
+              onClick={() => {
+                setShowBulkDeleteModal(true);
+                setShowBulkPasteModal(false);
+              }}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
+            >
+              <Trash2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Xóa link hàng loạt</span>
+            </button>
 
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 shrink-0">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs font-bold text-slate-700 whitespace-nowrap shrink-0">
-                    Giọng tạo MP3:
-                  </label>
-                  <select
-                    value={synthesisVoiceId}
-                    onChange={(e) => setSynthesisVoiceId(e.target.value)}
-                    disabled={bulkState.isRunning}
-                    className="flex-1 sm:flex-none min-h-[42px] bg-slate-50 border border-slate-300 rounded-xl px-2.5 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:border-pink-500 cursor-pointer disabled:opacity-50"
+            {/* Tool 4: Xuất file dự phòng (.txt) */}
+            <div className="relative" ref={exportMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowExportMenu((prev) => !prev)}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
+              >
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>Xuất file dự phòng (.txt)</span>
+              </button>
+
+              {showExportMenu && (
+                <div className="absolute left-0 sm:right-0 sm:left-auto top-full mt-1.5 w-60 bg-white rounded-2xl shadow-xl border border-slate-200 p-1.5 z-40 space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => handleExportTxtBackup('male')}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl text-left text-xs font-bold text-sky-800 hover:bg-sky-50 flex items-center justify-between gap-2 cursor-pointer"
                   >
-                    {EDGE_TTS_VOICES.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} ({v.tag})
-                      </option>
-                    ))}
-                  </select>
+                    <span className="inline-flex items-center gap-1.5">
+                      <UserRound className="w-3.5 h-3.5 text-sky-600" />
+                      <span>Xuất Nam Minh (.txt)</span>
+                    </span>
+                    <span className="text-[11px] text-slate-500 tabular-nums">
+                      {audioStats.maleCount}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportTxtBackup('female')}
+                    className="w-full min-h-[40px] px-3 py-2 rounded-xl text-left text-xs font-bold text-pink-800 hover:bg-pink-50 flex items-center justify-between gap-2 cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <UserRound className="w-3.5 h-3.5 text-pink-600" />
+                      <span>Xuất Hằng Nga (.txt)</span>
+                    </span>
+                    <span className="text-[11px] text-slate-500 tabular-nums">
+                      {audioStats.femaleCount}
+                    </span>
+                  </button>
                 </div>
+              )}
+            </div>
+          </div>
 
+          {toolbarMessage && (
+            <div
+              className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 border ${
+                toolbarMessage.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : toolbarMessage.type === 'warning'
+                  ? 'bg-amber-50 border-amber-300 text-amber-900'
+                  : 'bg-rose-50 border-rose-200 text-rose-700'
+              }`}
+            >
+              <span className="flex items-center gap-1.5 min-w-0">
+                {toolbarMessage.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                )}
+                <span>{toolbarMessage.text}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setToolbarMessage(null)}
+                className="p-1 rounded-lg hover:bg-black/5 cursor-pointer shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Panel: Dán link MP3 hàng loạt */}
+          {showBulkPasteModal && (
+            <form
+              onSubmit={handleBulkPasteSubmit}
+              className="p-3.5 rounded-2xl bg-slate-50 border border-pink-200 space-y-3"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <h4 className="text-xs sm:text-sm font-extrabold text-slate-900">
+                    Dán link MP3 hàng loạt
+                  </h4>
+                  <p className="text-[11px] text-slate-600">
+                    Hỗ trợ định dạng <code className="font-mono bg-white px-1 rounded">Chương 1 | https://...</code> (nhận diện dấu <code className="font-mono">|</code>, <code className="font-mono">:</code>, <code className="font-mono">-</code>) hoặc dán mỗi dòng 1 đường dẫn MP3 để tự đánh số từ Chương 1.
+                  </p>
+                </div>
                 <button
                   type="button"
-                  disabled={bulkState.isRunning || chapters.length === 0}
-                  onClick={() => {
-                    setBulkConfigError(null);
-                    bulkFileInputRef.current?.click();
-                  }}
-                  className="w-full sm:w-auto min-h-[42px] px-3.5 py-2 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shadow-sm cursor-pointer transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Chọn nhiều tệp .mp3 (vd: Chương_1.mp3, Chuong_02.mp3...) để tự khớp chương và tải tuần tự lên kho âm thanh"
+                  onClick={() => setShowBulkPasteModal(false)}
+                  className="self-end sm:self-auto p-1.5 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
-                  {bulkState.isRunning ? (
-                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                  ) : (
-                    <FolderUp className="w-4 h-4 shrink-0" />
-                  )}
-                  <span>Tải MP3 hàng loạt</span>
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-100">
-              <label className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 cursor-pointer select-none min-h-[32px]">
-                <input
-                  type="checkbox"
-                  checked={skipExistingMp3}
-                  disabled={bulkState.isRunning}
-                  onChange={(e) => setSkipExistingMp3(e.target.checked)}
-                  className="w-4 h-4 rounded accent-pink-600 cursor-pointer"
-                />
-                <span>Bỏ qua các chương đã có MP3</span>
-              </label>
-
-              <p className="text-[11px] text-slate-500 leading-snug">
-                Chỉ nhận file <code className="font-mono font-bold">.mp3</code>, tự tách số chương (<code className="font-mono">Chương_1</code>, <code className="font-mono">Chuong_01</code>...) và đẩy tuần tự an toàn.
-              </p>
-            </div>
-
-            {bulkConfigError && (
-              <div className="px-3 py-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-start justify-between gap-2">
-                <span className="flex items-start gap-1.5 min-w-0 break-words">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span className="break-words">{bulkConfigError}</span>
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold text-slate-700">Chọn giọng cần ghép:</span>
                 <button
                   type="button"
-                  onClick={() => setBulkConfigError(null)}
-                  className="p-1 text-rose-500 hover:text-rose-700 cursor-pointer shrink-0"
+                  onClick={() => setBulkVoice('male')}
+                  className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer border transition ${
+                    bulkVoice === 'male'
+                      ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-sky-50'
+                  }`}
+                >
+                  <UserRound className="w-3.5 h-3.5 shrink-0" />
+                  <span>Nam Minh</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBulkVoice('female')}
+                  className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer border transition ${
+                    bulkVoice === 'female'
+                      ? 'bg-pink-600 text-white border-pink-600 shadow-xs'
+                      : 'bg-white text-slate-700 border-slate-300 hover:bg-pink-50'
+                  }`}
+                >
+                  <UserRound className="w-3.5 h-3.5 shrink-0" />
+                  <span>Hằng Nga</span>
+                </button>
+              </div>
+
+              <textarea
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                rows={6}
+                placeholder={`Chương 1 | https://example.com/chuong-1.mp3\nChương 2 | https://example.com/chuong-2.mp3\n(Hoặc dán từng dòng chỉ chứa URL https://... để ghép tuần tự từ Chương 1)`}
+                className="w-full bg-white border border-slate-300 focus:border-pink-500 rounded-xl p-3 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none"
+              />
+
+              {bulkReport && (
+                <div
+                  className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+                    bulkReport.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-rose-50 border-rose-200 text-rose-700'
+                  }`}
+                >
+                  <div className="font-bold flex items-center gap-1.5">
+                    {bulkReport.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                    )}
+                    <span>{bulkReport.message}</span>
+                  </div>
+                  {bulkReport.details.length > 0 && (
+                    <ul className="list-disc pl-5 text-[11px] space-y-0.5 max-h-28 overflow-y-auto">
+                      {bulkReport.details.map((d, idx) => (
+                        <li key={idx}>{d}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBulkPasteModal(false)}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold cursor-pointer"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingBulk || !bulkText.trim()}
+                  className="min-h-[40px] px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  {isSavingBulk ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  <span>Ghép vào các chương</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Thanh tìm kiếm & 4 nút lọc nhanh */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Tìm nhanh theo số chương (vd: 15, 120) hoặc tên chương..."
+                className="w-full min-h-[40px] bg-slate-50 border border-slate-300 focus:border-pink-500 focus:bg-white rounded-xl pl-9 pr-8 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
-              </div>
-            )}
+              )}
+            </div>
 
-            {hasBulkActivity && (
-              <div className="p-3 rounded-2xl bg-slate-50 border border-pink-200/80 space-y-2.5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="text-xs font-bold text-slate-800 flex items-center gap-2 min-w-0">
-                    {bulkState.isRunning ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-pink-600 shrink-0" />
-                    ) : (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    )}
-                    <span className="break-words">{bulkState.currentLabel}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-                    {bulkState.totalMatched > 0 && (
-                      <span className="text-xs font-black text-pink-700 tabular-nums">
-                        {bulkProgressPct}%
-                      </span>
-                    )}
-                    {bulkState.isRunning ? (
-                      <button
-                        type="button"
-                        onClick={handleCancelBulkUpload}
-                        className="min-h-[36px] px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
-                      >
-                        <Square className="w-3 h-3 fill-current" />
-                        <span>Dừng/Hủy</span>
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setBulkState(INITIAL_BULK_STATE)}
-                        className="min-h-[34px] px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 text-[11px] font-bold cursor-pointer"
-                      >
-                        Đóng báo cáo
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {bulkState.totalMatched > 0 && (
-                  <div className="h-2.5 w-full rounded-full bg-pink-100 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-pink-500 to-rose-500 transition-all duration-200"
-                      style={{ width: `${Math.max(bulkState.isRunning ? 4 : 0, bulkProgressPct)}%` }}
-                    />
-                  </div>
-                )}
-
-                {/* Bộ đếm Thành công / Bỏ qua / Lỗi / Không khớp chương */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                  <div className="px-2.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200">
-                    <div className="text-[10px] font-bold text-emerald-700 uppercase">Thành công</div>
-                    <div className="text-sm font-black text-emerald-800 tabular-nums">
-                      {bulkState.successCount}
-                    </div>
-                  </div>
-                  <div className="px-2.5 py-2 rounded-xl bg-slate-100 border border-slate-200">
-                    <div className="text-[10px] font-bold text-slate-600 uppercase">Bỏ qua</div>
-                    <div className="text-sm font-black text-slate-800 tabular-nums">
-                      {bulkState.skippedCount}
-                    </div>
-                  </div>
-                  <div className="px-2.5 py-2 rounded-xl bg-rose-50 border border-rose-200">
-                    <div className="text-[10px] font-bold text-rose-700 uppercase">Lỗi</div>
-                    <div className="text-sm font-black text-rose-800 tabular-nums">
-                      {bulkState.errorCount}
-                    </div>
-                  </div>
-                  <div className="px-2.5 py-2 rounded-xl bg-amber-50 border border-amber-200">
-                    <div className="text-[10px] font-bold text-amber-800 uppercase">Không khớp</div>
-                    <div className="text-sm font-black text-amber-900 tabular-nums">
-                      {bulkState.unmatchedCount}
-                    </div>
-                  </div>
-                </div>
-
-                {bulkState.ignoredNonMp3Count > 0 && (
-                  <p className="text-[11px] text-slate-500">
-                    Đã tự động bỏ qua {bulkState.ignoredNonMp3Count} file không phải định dạng .mp3 (.txt, .srt...).
-                  </p>
-                )}
-
-                {bulkState.issues.length > 0 && (
-                  <div className="max-h-36 overflow-y-auto rounded-xl bg-white border border-slate-200 divide-y divide-slate-100 text-[11px]">
-                    {bulkState.issues.map((issue, idx) => (
-                      <div key={`${issue.fileName}-${idx}`} className="px-2.5 py-1.5 flex items-start gap-1.5">
-                        <span
-                          className={`px-1.5 py-0.5 rounded font-bold text-[10px] shrink-0 ${
-                            issue.type === 'error'
-                              ? 'bg-rose-100 text-rose-700'
-                              : 'bg-amber-100 text-amber-800'
-                          }`}
-                        >
-                          {issue.type === 'error' ? 'Lỗi' : 'Không khớp'}
-                        </span>
-                        <div className="min-w-0 flex-1 break-words">
-                          <span className="font-bold text-slate-800">{issue.fileName}:</span>{' '}
-                          <span className="text-slate-600">{issue.reason}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {(
+                [
+                  { id: 'all', label: `Tất cả (${audioStats.total})` },
+                  { id: 'missing_male', label: `Thiếu Nam Minh (${audioStats.missingMaleCount})` },
+                  {
+                    id: 'missing_female',
+                    label: `Thiếu Hằng Nga (${audioStats.missingFemaleCount})`,
+                  },
+                  { id: 'both_ready', label: `Đủ cả 2 giọng (${audioStats.bothReadyCount})` },
+                ] as { id: VoiceFilterMode; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setVoiceFilter(f.id)}
+                  className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums ${
+                    voiceFilter === f.id
+                      ? 'bg-pink-600 text-white border-pink-600 shadow-2xs'
+                      : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
+        </div>
+
+        {/* Chapters Body with Top & Bottom 100-chapter Pagination */}
+        <div className="flex-1 overflow-y-auto p-3 sm:p-5 space-y-3 bg-slate-50/70">
+          {renderPaginationBar('top')}
 
           {isLoadingChapters && chapters.length === 0 ? (
-            <div className="p-10 text-center bg-white rounded-2xl border border-slate-200 text-xs text-slate-500 space-y-2">
-              <Loader2 className="w-6 h-6 animate-spin text-pink-600 mx-auto" />
-              <p>Đang tải danh sách chương...</p>
+            <div className="py-12 text-center text-slate-500 text-xs flex flex-col items-center gap-2">
+              <Loader2 className="w-6 h-6 animate-spin text-pink-600" />
+              <span>Đang tải danh sách chương...</span>
             </div>
-          ) : filteredChapters.length === 0 ? (
-            <div className="p-10 text-center bg-white rounded-2xl border border-dashed border-slate-300 text-xs text-slate-500">
-              Không tìm thấy chương nào phù hợp.
+          ) : pageChapters.length === 0 ? (
+            <div className="py-12 text-center bg-white rounded-2xl border border-dashed border-slate-300 text-xs text-slate-500">
+              Không tìm thấy chương nào phù hợp với bộ lọc hiện tại.
             </div>
           ) : (
             <div className="space-y-2.5">
-              {filteredChapters.map((ch) => (
+              {pageChapters.map((ch) => (
                 <div
-                  key={ch.id || `chap-${ch.number}`}
-                  className="p-3 sm:p-3.5 rounded-2xl bg-white border border-slate-200 shadow-2xs min-w-0"
+                  key={ch.id}
+                  className="p-3.5 rounded-2xl bg-white border border-slate-200 shadow-2xs"
                 >
-                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-xs sm:text-sm text-slate-900 break-words">
-                          {ch.title || `Chương ${ch.number}`}
-                        </span>
-                        {ch.audioUrl && (
-                          <span className="bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded-full text-[10px] border border-emerald-300 inline-flex items-center gap-1 shrink-0">
-                            <Headphones className="w-2.5 h-2.5" />
-                            Đã có MP3
-                          </span>
-                        )}
+                      <div className="font-bold text-xs sm:text-sm text-slate-900 break-words">
+                        {ch.title || `Chương ${ch.number}`}
                       </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5 break-all">
-                        Chương {ch.number} • ID: <code className="font-mono">{ch.id}</code>
+                      <div className="text-[11px] text-slate-500 font-medium mt-0.5 tabular-nums">
+                        Chương {ch.number}
                       </div>
                     </div>
                   </div>
@@ -1390,16 +1498,151 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                   <AdminChapterMp3Actions
                     novel={novel}
                     chapter={ch}
-                    preferredVoiceId={synthesisVoiceId}
-                    disabledExternally={bulkState.isRunning}
-                    onAudioUrlUpdated={handleUpdated}
+                    brokenVoices={brokenLinksMap[ch.id]}
+                    onClearBrokenFlag={(chId, voice) => {
+                      setBrokenLinksMap((prev) => {
+                        if (!prev[chId]) return prev;
+                        return {
+                          ...prev,
+                          [chId]: { ...prev[chId], [voice]: false },
+                        };
+                      });
+                    }}
+                    onAudioLinksUpdated={(targetChap, links) => {
+                      const updated: Chapter = {
+                        ...targetChap,
+                        audioUrl: links.audioUrl,
+                        audioUrlMale: links.audioUrlMale,
+                        audioUrlFemale: links.audioUrlFemale,
+                      };
+                      setChapters((prev) =>
+                        prev.map((item) =>
+                          item.id === targetChap.id ||
+                          Number(item.number) === Number(targetChap.number)
+                            ? {
+                                ...item,
+                                audioUrl: links.audioUrl,
+                                audioUrlMale: links.audioUrlMale,
+                                audioUrlFemale: links.audioUrlFemale,
+                              }
+                            : item
+                        )
+                      );
+                      onChapterAudioUpdated(novel.id, updated);
+                    }}
                   />
                 </div>
               ))}
             </div>
           )}
+
+          {renderPaginationBar('bottom')}
         </div>
       </div>
+
+      {/* Modal: Xóa link hàng loạt */}
+      {showBulkDeleteModal && (
+        <div className="fixed inset-0 z-[115] bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-2xl p-5 space-y-4 text-slate-900">
+            <div className="flex items-center justify-between">
+              <h4 className="font-extrabold text-sm text-slate-900 flex items-center gap-2">
+                <Trash2 className="w-4 h-4 text-rose-600" />
+                <span>Xóa link MP3 hàng loạt</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Chọn giọng cần xóa link:
+                </label>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {(
+                    [
+                      { id: 'male', label: 'Nam Minh' },
+                      { id: 'female', label: 'Hằng Nga' },
+                      { id: 'both', label: 'Cả 2 giọng' },
+                    ] as { id: DeleteVoiceScope; label: string }[]
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setDeleteScope(opt.id)}
+                      className={`min-h-[38px] px-2.5 py-1.5 rounded-xl text-xs font-bold border cursor-pointer transition ${
+                        deleteScope === opt.id
+                          ? 'bg-rose-600 text-white border-rose-600'
+                          : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Từ chương:
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={deleteFromChapter}
+                    onChange={(e) => setDeleteFromChapter(Math.max(1, Number(e.target.value) || 1))}
+                    className="w-full min-h-[40px] bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-900 tabular-nums focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Đến chương:
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={deleteToChapter}
+                    onChange={(e) => setDeleteToChapter(Math.max(1, Number(e.target.value) || 1))}
+                    className="w-full min-h-[40px] bg-slate-50 border border-slate-300 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-900 tabular-nums focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 font-medium tabular-nums">
+                Sẽ xóa link của <strong>{deletePreviewCount}</strong> chương trong khoảng Chương{' '}
+                <strong>{Math.min(deleteFromChapter, deleteToChapter)}</strong> –{' '}
+                <strong>{Math.max(deleteFromChapter, deleteToChapter)}</strong>. Các chương và
+                giọng khác vẫn được giữ nguyên.
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteModal(false)}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingBulk || deletePreviewCount === 0}
+                onClick={handleBulkDeleteConfirm}
+                className="min-h-[40px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                {isDeletingBulk ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                <span>Xác nhận xóa ({deletePreviewCount} chương)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

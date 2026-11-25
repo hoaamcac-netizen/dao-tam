@@ -588,7 +588,7 @@ function DaoTamApp() {
             autoScroll: Boolean(parsed.autoScroll),
             autoNextChapter: parsed.autoNextChapter !== undefined ? Boolean(parsed.autoNextChapter) : true,
             voiceSpeed: parsed.voiceSpeed || 1.0,
-            selectedVoiceId: parsed.selectedVoiceId || 'vi-VN-HoaiMyNeural',
+            selectedVoiceId: parsed.selectedVoiceId || 'vi-VN-NamMinhNeural',
             autoHighlight: parsed.autoHighlight !== undefined ? Boolean(parsed.autoHighlight) : true,
             audioEngine: parsed.audioEngine || 'native',
           };
@@ -603,7 +603,7 @@ function DaoTamApp() {
       autoScroll: false,
       autoNextChapter: true,
       voiceSpeed: 1.0,
-      selectedVoiceId: 'vi-VN-HoaiMyNeural',
+      selectedVoiceId: 'vi-VN-NamMinhNeural',
       autoHighlight: true,
       audioEngine: 'native',
     };
@@ -2419,6 +2419,8 @@ function DaoTamApp() {
           const mergedChapter: Chapter = {
             ...matchedFullChapter,
             ...(detail.chapter.audioUrl ? { audioUrl: detail.chapter.audioUrl } : {}),
+            ...(detail.chapter.audioUrlMale ? { audioUrlMale: detail.chapter.audioUrlMale } : {}),
+            ...(detail.chapter.audioUrlFemale ? { audioUrlFemale: detail.chapter.audioUrlFemale } : {}),
             ...(detail.chapter.content && !matchedFullChapter.content
               ? { content: detail.chapter.content }
               : {}),
@@ -2785,14 +2787,21 @@ function DaoTamApp() {
     }
   };
 
-  // Đồng bộ tức thì audioUrl của 1 chương vào state của App sau khi Admin tải lên hoặc tạo MP3 GitHub
+  // Đồng bộ tức thì audioUrl / audioUrlMale / audioUrlFemale của 1 chương vào state của App
   const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
+    const mergeAudioFields = (c: Chapter): Chapter => ({
+      ...c,
+      audioUrl: updatedChapter.audioUrl,
+      audioUrlMale: updatedChapter.audioUrlMale,
+      audioUrlFemale: updatedChapter.audioUrlFemale,
+    });
+
     const patchChaptersList = (chaps?: Chapter[]) => {
       if (!Array.isArray(chaps)) return chaps;
       return chaps.map((c) =>
         (updatedChapter.id && c.id === updatedChapter.id) ||
         (Number(c.number) > 0 && Number(c.number) === Number(updatedChapter.number))
-          ? { ...c, audioUrl: updatedChapter.audioUrl }
+          ? mergeAudioFields(c)
           : c
       );
     };
@@ -2821,9 +2830,65 @@ function DaoTamApp() {
       prev &&
       ((updatedChapter.id && prev.id === updatedChapter.id) ||
         (Number(prev.number) > 0 && Number(prev.number) === Number(updatedChapter.number)))
-        ? { ...prev, audioUrl: updatedChapter.audioUrl }
+        ? mergeAudioFields(prev)
         : prev
     );
+  };
+
+  const handleBatchChaptersAudioUpdated = (novelId: string, updatedChapters: Chapter[]) => {
+    if (!Array.isArray(updatedChapters) || updatedChapters.length === 0) return;
+    const byId = new Map<string, Chapter>();
+    const byNumber = new Map<number, Chapter>();
+    for (const ch of updatedChapters) {
+      if (ch.id) byId.set(ch.id, ch);
+      if (Number(ch.number) > 0) byNumber.set(Number(ch.number), ch);
+    }
+
+    const patchChaptersList = (chaps?: Chapter[]) => {
+      if (!Array.isArray(chaps)) return chaps;
+      return chaps.map((c) => {
+        const matched = byId.get(c.id) || byNumber.get(Number(c.number));
+        if (!matched) return c;
+        return {
+          ...c,
+          audioUrl: matched.audioUrl,
+          audioUrlMale: matched.audioUrlMale,
+          audioUrlFemale: matched.audioUrlFemale,
+        };
+      });
+    };
+
+    setNovels((prev) => {
+      const next = (prev || []).map((n) =>
+        n.id === novelId
+          ? { ...n, chapters: patchChaptersList(n.chapters) || [], updatedAt: Date.now() }
+          : n
+      );
+      saveNovelsToStorage(next);
+      return next;
+    });
+
+    setSelectedNovel((prev) =>
+      prev && prev.id === novelId
+        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
+        : prev
+    );
+    setEditingNovel((prev) =>
+      prev && prev.id === novelId
+        ? { ...prev, chapters: patchChaptersList(prev.chapters) || [] }
+        : prev
+    );
+    setSelectedChapter((prev) => {
+      if (!prev) return prev;
+      const matched = byId.get(prev.id) || byNumber.get(Number(prev.number));
+      if (!matched) return prev;
+      return {
+        ...prev,
+        audioUrl: matched.audioUrl,
+        audioUrlMale: matched.audioUrlMale,
+        audioUrlFemale: matched.audioUrlFemale,
+      };
+    });
   };
 
   // Mở modal Báo Cáo Vi Phạm Truyện
@@ -4169,6 +4234,7 @@ function DaoTamApp() {
         }}
         onReloadNovels={reloadNovels}
         onChapterAudioUpdated={handleChapterAudioUpdated}
+        onBatchChaptersAudioUpdated={handleBatchChaptersAudioUpdated}
       />
 
       {/* Edit Novel & Chapters (Page View is primary in-web flow) */}

@@ -25,6 +25,8 @@ export interface Chapter {
   scheduledPublishAt?: number;
   isHidden?: boolean; // Ẩn chương khỏi độc giả, chỉ Tác giả và Quản trị viên mới thấy
   audioUrl?: string;
+  audioUrlMale?: string;
+  audioUrlFemale?: string;
   audioCache?: Record<string, Record<string, string>>;
 }
 

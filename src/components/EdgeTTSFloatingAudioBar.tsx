@@ -20,6 +20,7 @@ import {
   Clock,
   Check,
   WifiOff,
+  Smartphone,
 } from 'lucide-react';
 
 function formatAudioTime(seconds: number): string {
@@ -62,17 +63,14 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
   const {
     activeNovel,
     activeChapter,
-    isAudioMode,
     isDirectMp3,
     mp3CurrentTime,
     mp3Duration,
     isPlaying,
     isLoading,
-    retryAttempt,
-    retryStatusText,
     networkStatusMessage,
-    bufferedCount,
     audioError,
+    fallbackNotice,
     currentChunkIndex,
     totalChunks,
     currentChunkText,
@@ -98,6 +96,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
     setSleepTimer,
     setIsMinimized,
     clearAudioError,
+    clearFallbackNotice,
     closeBar,
   } = useAudio();
 
@@ -183,8 +182,8 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                 {networkStatusMessage
                   ? networkStatusMessage
                   : isDirectMp3
-                  ? `MP3 • ${formatAudioTime(mp3CurrentTime)}/${formatAudioTime(mp3Duration)}`
-                  : `${activeVoiceMeta.shortLabel} • Câu ${currentChunkIndex + 1}/${totalChunks}`}
+                  ? `${activeVoiceMeta.shortLabel} • ${formatAudioTime(mp3CurrentTime)}/${formatAudioTime(mp3Duration)}`
+                  : `${fallbackNotice ? 'Giọng Máy Google' : activeVoiceMeta.shortLabel} • Câu ${currentChunkIndex + 1}/${totalChunks}`}
               </div>
             </div>
           </button>
@@ -269,11 +268,6 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                     <RefreshCw className="w-3.5 h-3.5 shrink-0" />
                     <span>Thử lại</span>
                   </button>
-                  {!isDirectMp3 && (
-                    <span className="text-[11px] text-rose-600/90 dark:text-rose-300/80 leading-tight truncate">
-                      Giữ nguyên giọng {activeVoiceMeta.shortLabel}
-                    </span>
-                  )}
                 </div>
               </div>
             )}
@@ -288,13 +282,27 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
               </div>
             )}
 
-            {retryAttempt > 0 && isLoading && !isDirectMp3 && !networkStatusMessage && (
-              <div className="text-[11px] font-semibold text-pink-600 dark:text-pink-400 text-center truncate px-1">
-                {retryStatusText || `Đang kết nối lại máy chủ giọng đọc (lần ${retryAttempt})...`}
+            {fallbackNotice && !audioError && !networkStatusMessage && (
+              <div
+                role="status"
+                className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/70 text-[11px] font-medium text-amber-800 dark:text-amber-200"
+              >
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <Smartphone className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span className="truncate">{fallbackNotice}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={clearFallbackNotice}
+                  aria-label="Đóng thông báo giọng đọc"
+                  className="text-amber-600 hover:text-amber-800 dark:text-amber-300 cursor-pointer shrink-0 p-0.5"
+                >
+                  <X className="w-3 h-3" />
+                </button>
               </div>
             )}
 
-            {/* Hàng 1: Thông tin chương + nút Thu nhỏ & Đóng (tránh tràn chiều ngang trên điện thoại) */}
+            {/* Hàng 1: Thông tin chương + nút Thu nhỏ & Đóng */}
             <div className="flex items-center gap-2 min-w-0">
               <button
                 type="button"
@@ -330,14 +338,9 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   </div>
                   <span className="text-[10px] font-bold text-pink-600 dark:text-pink-400 whitespace-nowrap shrink-0 tabular-nums">
                     {isDirectMp3
-                      ? 'MP3'
+                      ? `${activeVoiceMeta.shortLabel} • MP3`
                       : `${totalChunks > 0 ? currentChunkIndex + 1 : 0}/${totalChunks} (${progress}%)`}
                   </span>
-                  {!isDirectMp3 && isAudioMode && bufferedCount > 0 && (
-                    <span className="hidden sm:inline text-[10px] text-emerald-600 dark:text-emerald-400 font-medium whitespace-nowrap shrink-0">
-                      Đệm +{bufferedCount}
-                    </span>
-                  )}
                 </div>
               </div>
 
@@ -385,7 +388,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
               </div>
             )}
 
-            {/* Hàng 2: Cụm nút điều khiển >= 44x44px (có nút -15s / +15s chỉ hiển thị trong web khi nghe MP3) */}
+            {/* Hàng 2: Cụm nút điều khiển >= 44x44px */}
             <div className="flex items-center justify-center gap-1.5 sm:gap-3">
               <button
                 type="button"
@@ -452,25 +455,18 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
               </button>
             </div>
 
-            {/* Hàng 3: Giọng đọc/MP3 + Tốc độ + Hẹn giờ tắt + Tự chuyển chương */}
+            {/* Hàng 3: Luôn hiển thị chọn giọng đọc + Tốc độ + Hẹn giờ tắt + Tự chuyển chương */}
             <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-pink-100/70 dark:border-slate-800 min-w-0">
               <div className="flex-1 min-w-0">
-                {isDirectMp3 ? (
-                  <div className="min-h-[44px] px-2.5 rounded-xl bg-emerald-50/80 dark:bg-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/60 text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold flex items-center justify-center truncate">
-                    <span className="truncate">MP3 • Nền ổn định</span>
-                  </div>
-                ) : (
-                  <VoiceSelectorDropdown
-                    selectedVoiceId={voiceId}
-                    onSelectVoice={setVoiceId}
-                    direction="up"
-                    variant="floatingBar"
-                  />
-                )}
+                <VoiceSelectorDropdown
+                  selectedVoiceId={voiceId}
+                  onSelectVoice={setVoiceId}
+                  direction="up"
+                  variant="floatingBar"
+                />
               </div>
 
               <div className="flex items-center gap-1 shrink-0">
-                {/* Tốc độ phát (0.75x -> 3.0x) */}
                 <div className="relative shrink-0" ref={speedMenuRef}>
                   <button
                     type="button"
@@ -509,7 +505,6 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   )}
                 </div>
 
-                {/* Hẹn giờ tắt (Sleep Timer) — Popover trên Desktop, Bottom Sheet trên Mobile */}
                 <div className="relative shrink-0" ref={sleepMenuRef}>
                   <button
                     type="button"
@@ -534,7 +529,6 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                     )}
                   </button>
 
-                  {/* Desktop Popover (>= 640px) */}
                   {showSleepMenu && (
                     <div
                       role="menu"
@@ -570,7 +564,6 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   )}
                 </div>
 
-                {/* Tự chuyển chương */}
                 <button
                   type="button"
                   onClick={() => setAutoNext(!autoNext)}
@@ -590,7 +583,6 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
         </div>
       </div>
 
-      {/* Mobile Bottom Sheet cho Hẹn giờ tắt (< 640px) — không bao giờ dùng dropdown absolute bị tràn màn hình */}
       {showSleepMenu && (
         <div className="sm:hidden">
           <div

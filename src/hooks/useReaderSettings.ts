@@ -21,7 +21,7 @@ export const DEFAULT_LOCAL_READER_SETTINGS: ReaderSettings = {
   autoScroll: false,
   autoNextChapter: true,
   voiceSpeed: 1.0,
-  selectedVoiceId: 'vi-VN-HoaiMyNeural',
+  selectedVoiceId: 'vi-VN-NamMinhNeural',
   autoHighlight: true,
   audioEngine: 'native',
 };

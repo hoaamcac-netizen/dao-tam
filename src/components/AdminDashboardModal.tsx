@@ -75,7 +75,7 @@ import {
   Headphones
 } from 'lucide-react';
 import { DaoTamLogo } from './DaoTamLogo';
-import { AdminGitHubConfigCard, AdminNovelMp3DrawerModal } from './AdminGitHubAudioManager';
+import { AdminNovelMp3DrawerModal } from './AdminGitHubAudioManager';
 
 interface AdminDashboardModalProps {
   isOpen: boolean;
@@ -112,6 +112,7 @@ interface AdminDashboardModalProps {
   onDonateCoinsSuccess?: (targetUserId: string, amount: number) => void;
   onReloadNovels?: () => Promise<void> | void;
   onChapterAudioUpdated?: (novelId: string, updatedChapter: Chapter) => void;
+  onBatchChaptersAudioUpdated?: (novelId: string, updatedChapters: Chapter[]) => void;
 }
 
 export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
@@ -142,6 +143,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   onDonateCoinsSuccess,
   onReloadNovels,
   onChapterAudioUpdated,
+  onBatchChaptersAudioUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<'requests' | 'submissions' | 'payouts' | 'reports' | 'novels' | 'batch' | 'comments' | 'tools' | 'users' | 'support_chat' | 'global_banner'>('requests');
   const [mp3ManagingNovel, setMp3ManagingNovel] = useState<Novel | null>(null);
@@ -2255,8 +2257,6 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
              ========================================================================= */}
           {activeTab === 'novels' && (
             <div className="space-y-4">
-              <AdminGitHubConfigCard defaultCollapsed />
-
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
                 <div className="flex-1 max-w-md relative">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -2336,7 +2336,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         type="button"
                         onClick={() => setMp3ManagingNovel(novel)}
                         className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
-                        title="Tải lên hoặc tự tạo tệp MP3 cho từng chương"
+                        title="Quản lý và dán link MP3 cho từng chương (Nam Minh & Hằng Nga)"
                       >
                         <Headphones className="w-3.5 h-3.5 text-emerald-600" />
                         <span>MP3 Chương</span>
@@ -2636,9 +2636,6 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 <strong className="text-pink-700">Khu vực công cụ kỹ thuật dành riêng cho Admin:</strong> Các chức năng này đã được ẩn hoàn toàn khỏi người dùng và độc giả bên ngoài để bảo vệ tính bảo mật và trải nghiệm gọn gàng cho trang web.
               </div>
 
-              {/* Cấu hình kho lưu trữ GitHub MP3 (chỉ hiện trong trang Admin, lưu trong localStorage) */}
-              <AdminGitHubConfigCard />
-
               {/* Cấu hình tỷ lệ nhuận bút */}
               <div className="p-5 sm:p-6 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100 flex-wrap gap-2">
@@ -2776,9 +2773,9 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   <div className="w-10 h-10 rounded-xl bg-pink-50 border border-pink-200 flex items-center justify-center text-pink-600">
                     <Layers className="w-5 h-5" />
                   </div>
-                  <h4 className="font-bold text-sm text-slate-900">Âm Thanh Edge TTS Chunking &amp; DRM Bản Quyền</h4>
+                  <h4 className="font-bold text-sm text-slate-900">Âm Thanh MP3 Song Giọng &amp; DRM Bản Quyền</h4>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Công nghệ chia nhỏ câu thông minh, phát đoạn 1 ngay lập tức, tải ngầm đoạn kế tiếp và đồng bộ Karaoke highlight chính xác 100%.
+                    Hỗ trợ liên kết MP3 trực tiếp theo 2 giọng đọc Nam Minh &amp; Hằng Nga kết hợp Giọng Máy Google mượt mà trên mọi thiết bị.
                   </p>
                   {onOpenArchitecture && (
                     <button
@@ -4193,13 +4190,43 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
               const nextChaps = Array.isArray(prev.chapters)
                 ? prev.chapters.map((c) =>
                     c.id === updatedChapter.id || Number(c.number) === Number(updatedChapter.number)
-                      ? { ...c, audioUrl: updatedChapter.audioUrl }
+                      ? {
+                          ...c,
+                          audioUrl: updatedChapter.audioUrl,
+                          audioUrlMale: updatedChapter.audioUrlMale,
+                          audioUrlFemale: updatedChapter.audioUrlFemale,
+                        }
                       : c
                   )
                 : prev.chapters;
               return { ...prev, chapters: nextChaps };
             });
             onChapterAudioUpdated?.(novelId, updatedChapter);
+          }}
+          onBatchChaptersAudioUpdated={(novelId, updatedChapters) => {
+            const byId = new Map<string, Chapter>();
+            const byNumber = new Map<number, Chapter>();
+            for (const ch of updatedChapters) {
+              if (ch.id) byId.set(ch.id, ch);
+              if (Number(ch.number) > 0) byNumber.set(Number(ch.number), ch);
+            }
+            setMp3ManagingNovel((prev) => {
+              if (!prev || prev.id !== novelId) return prev;
+              const nextChaps = Array.isArray(prev.chapters)
+                ? prev.chapters.map((c) => {
+                    const matched = byId.get(c.id) || byNumber.get(Number(c.number));
+                    if (!matched) return c;
+                    return {
+                      ...c,
+                      audioUrl: matched.audioUrl,
+                      audioUrlMale: matched.audioUrlMale,
+                      audioUrlFemale: matched.audioUrlFemale,
+                    };
+                  })
+                : prev.chapters;
+              return { ...prev, chapters: nextChaps };
+            });
+            onBatchChaptersAudioUpdated?.(novelId, updatedChapters);
           }}
         />
       )}

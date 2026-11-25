@@ -13,7 +13,7 @@
  * ==============================================================================
  */
 
-const CACHE_NAME = 'daotam-static-cache-v3';
+const CACHE_NAME = 'daotam-static-cache-v4';
 
 // Danh sách các tài nguyên tĩnh cơ bản của App Shell
 const PRECACHE_ASSETS = [
