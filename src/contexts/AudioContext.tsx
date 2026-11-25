@@ -33,7 +33,7 @@ const MP3_RESUME_POSITIONS_STORAGE_KEY = 'daotam_mp3_positions';
 const MP3_POSITION_SAVE_THROTTLE_MS = 5000;
 const MP3_POSITION_MAX_ENTRIES = 150;
 const NETWORK_RECOVERY_MAX_RETRIES = 1;
-const NETWORK_RECOVERY_RETRY_DELAY_MS = 1000;
+const NETWORK_RECOVERY_RETRY_DELAY_MS = 1500;
 
 export type SleepTimerMode = 'off' | '15' | '30' | '60' | 'end_of_chapter';
 

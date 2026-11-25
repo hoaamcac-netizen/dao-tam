@@ -338,7 +338,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
 
   return (
     <div 
-      className={`max-w-6xl mx-auto px-4 py-6 text-slate-800 dark:text-slate-100 transition-colors ${
+      className={`max-w-6xl mx-auto px-4 pt-6 pb-28 sm:pb-12 overflow-x-hidden text-slate-800 dark:text-slate-100 transition-colors ${
         isAdmin ? 'select-text' : 'select-none'
       }`}
       onContextMenu={!isAdmin ? (e) => e.preventDefault() : undefined}

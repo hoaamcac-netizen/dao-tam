@@ -277,7 +277,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
   }, [libraryItems]);
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-gradient-to-b from-pink-50/70 via-slate-50 to-pink-50/40 dark:from-[#180a14] dark:via-slate-950 dark:to-[#180a14] text-slate-900 dark:text-slate-100 transition-colors pb-16">
+    <div className="min-h-screen overflow-x-hidden bg-gradient-to-b from-pink-50/70 via-slate-50 to-pink-50/40 dark:from-[#180a14] dark:via-slate-950 dark:to-[#180a14] text-slate-900 dark:text-slate-100 transition-colors pb-28 sm:pb-16">
       {/* 1. Header Trang Tủ truyện của bạn */}
       <div className="sticky top-0 z-30 backdrop-blur-md bg-white/90 dark:bg-slate-950/90 border-b border-pink-100 dark:border-pink-950/60 shadow-xs">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">

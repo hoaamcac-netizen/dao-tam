@@ -43,31 +43,29 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 
   componentDidMount() {
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', this.handleVisibilityChange);
-    }
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', this.pingFirebaseConnection);
+      window.addEventListener('online', this.handleOnlineRecovery);
     }
   }
 
   componentWillUnmount() {
-    if (typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
-    }
     if (typeof window !== 'undefined') {
-      window.removeEventListener('online', this.pingFirebaseConnection);
+      window.removeEventListener('online', this.handleOnlineRecovery);
     }
   }
 
+  private handleOnlineRecovery = () => {
+    if (!this.state.hasError) return;
+    this.pingFirebaseConnection();
+  };
+
   private pingFirebaseConnection = async () => {
+    if (!this.state.hasError) return;
     const now = Date.now();
     if (now - this.lastPingAt < 10000) return;
     this.lastPingAt = now;
 
-    if (this.state.hasError) {
-      this.setState({ isReconnecting: true });
-    }
+    this.setState({ isReconnecting: true });
 
     try {
       await enableNetwork(db).catch(() => {});
@@ -85,13 +83,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     }
   };
 
-  private handleVisibilityChange = () => {
-    if (typeof document === 'undefined') return;
-    if (document.visibilityState === 'visible') {
-      this.pingFirebaseConnection();
-    }
-  };
-
   private handleReloadPage = () => {
     if (typeof window !== 'undefined') {
       window.location.reload();
@@ -100,7 +91,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   private handleTryReset = () => {
     this.setState({ hasError: false, error: null, isReconnecting: false });
-    this.pingFirebaseConnection();
   };
 
   render() {
