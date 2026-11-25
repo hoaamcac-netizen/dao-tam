@@ -5,6 +5,7 @@ import {
   aggregateUserPurchasedNovelsFromCache,
   readLocalSavedNovelsFromStorage,
 } from '../firebase/services';
+import { normalizeStoryId } from '../utils/rulesAndVoices';
 import { safeGetItem, safeJsonParse } from '../utils/safeStorage';
 
 interface SavedNovelsModalProps {
@@ -39,12 +40,24 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
     const registerNovel = (n: Novel) => {
       if (!n) return;
       if (n.id) {
-        lookup.set(n.id, n);
-        lowerLookup.set(String(n.id).trim().toLowerCase(), n);
+        const rawId = String(n.id).trim();
+        const normId = normalizeStoryId(rawId);
+        lookup.set(rawId, n);
+        lowerLookup.set(rawId.toLowerCase(), n);
+        if (normId) {
+          lookup.set(normId, n);
+          lowerLookup.set(normId.toLowerCase(), n);
+        }
       }
       if (n.slug) {
-        lookup.set(n.slug, n);
-        lowerLookup.set(String(n.slug).trim().toLowerCase(), n);
+        const rawSlug = String(n.slug).trim();
+        const normSlug = normalizeStoryId(rawSlug);
+        lookup.set(rawSlug, n);
+        lowerLookup.set(rawSlug.toLowerCase(), n);
+        if (normSlug) {
+          lookup.set(normSlug, n);
+          lowerLookup.set(normSlug.toLowerCase(), n);
+        }
       }
     };
 
@@ -55,13 +68,19 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
 
     const findCachedNovel = (idOrSlug: string): Novel | undefined => {
       const clean = String(idOrSlug || '').trim();
-      if (!clean) return undefined;
-      return lookup.get(clean) || lowerLookup.get(clean.toLowerCase());
+      const norm = normalizeStoryId(clean);
+      if (!clean && !norm) return undefined;
+      return (
+        lookup.get(clean) ||
+        lookup.get(norm) ||
+        lowerLookup.get(clean.toLowerCase()) ||
+        lowerLookup.get(norm.toLowerCase())
+      );
     };
 
     // 1. Lấy các bộ truyện đã mua từ tài khoản đã tải sẵn (0 Reads)
     const purchasedList = isLoggedIn ? aggregateUserPurchasedNovelsFromCache(user, novels) : [];
-    const purchasedById = new Map(purchasedList.map((p) => [p.storyId, p]));
+    const purchasedById = new Map(purchasedList.map((p) => [normalizeStoryId(p.storyId), p]));
 
     // 2. Kết hợp danh sách lưu cục bộ (localStorage) + bookmarks tài khoản
     const localSaved = readLocalSavedNovelsFromStorage();
@@ -82,21 +101,23 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
     >();
 
     for (const p of purchasedList) {
-      itemsMap.set(p.storyId, {
-        id: p.storyId,
+      const normKey = normalizeStoryId(p.storyId);
+      if (!p.storyTitle || /^Bộ truyện #/i.test(p.storyTitle)) continue;
+      itemsMap.set(normKey, {
+        id: normKey,
         title: p.storyTitle,
         author: p.storyAuthor,
         coverImage: p.storyCoverImage || DEFAULT_COVER,
         totalChapters: p.totalChapters,
         isPurchased: true,
         isSaved: false,
-        novel: p.novel || findCachedNovel(p.storyId),
+        novel: p.novel || findCachedNovel(normKey),
       });
     }
 
     const addSavedId = (rawId: string, fallbackMeta?: { title?: string; author?: string; cover?: string }) => {
       const matched = findCachedNovel(rawId);
-      const canonicalId = matched?.id || rawId;
+      const canonicalId = normalizeStoryId(matched?.id || rawId);
       if (!canonicalId) return;
 
       const existing = itemsMap.get(canonicalId);
@@ -105,10 +126,15 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
         return;
       }
 
+      const resolvedTitle = matched?.title || fallbackMeta?.title || '';
+      if (!resolvedTitle || /^Bộ truyện #/i.test(resolvedTitle.trim())) {
+        return;
+      }
+
       const purchased = purchasedById.get(canonicalId);
       itemsMap.set(canonicalId, {
         id: canonicalId,
-        title: matched?.title || fallbackMeta?.title || `Bộ truyện #${canonicalId}`,
+        title: resolvedTitle,
         author: matched?.author || fallbackMeta?.author || 'Đang cập nhật',
         coverImage: matched?.coverImage || fallbackMeta?.cover || DEFAULT_COVER,
         totalChapters: matched?.chapters?.length || matched?.totalChapters || 0,
@@ -154,11 +180,11 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
       return;
     }
     onSelectNovel({
-      id: entry.id,
+      id: normalizeStoryId(entry.id) || entry.id,
       title: entry.title,
       author: entry.author,
       coverImage: entry.coverImage,
-      slug: `story-${entry.id}`,
+      slug: normalizeStoryId(entry.id) || entry.id,
       totalChapters: entry.totalChapters,
       chapters: [],
       status: 'Đang ra',
@@ -307,10 +333,10 @@ export const SavedNovelsModal: React.FC<SavedNovelsModalProps> = ({
                     <button
                       onClick={() => onRemoveBookmark(entry.id)}
                       className="min-h-[40px] px-2 text-slate-400 hover:text-rose-500 text-xs flex items-center gap-1 transition cursor-pointer"
-                      title="Bỏ lưu truyện này"
+                      title="Xóa khỏi tủ truyện"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
-                      <span>Bỏ lưu</span>
+                      <span>Xóa khỏi tủ</span>
                     </button>
                   ) : (
                     <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">

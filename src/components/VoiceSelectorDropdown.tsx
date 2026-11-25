@@ -68,7 +68,7 @@ export const VoiceSelectorDropdown: React.FC<VoiceSelectorDropdownProps> = ({
 
   const triggerClasses =
     variant === 'readerHeader'
-      ? `px-2 sm:px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap border ${
+      ? `min-h-[40px] px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap border ${
           isFallbackActive
             ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
             : isFemaleActive

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Novel, Chapter } from '../types';
 import { getLatestChapterNumberFromFirestore } from '../firebase/services';
-import { safeSetItem } from '../utils/safeStorage';
+import { safeSetItem, makeChapterCacheKey, makeChapterCacheTsKey } from '../utils/safeStorage';
 import { filterOutDummyChapters } from '../utils/rulesAndVoices';
 import { 
   ArrowLeft, 
@@ -422,7 +422,16 @@ Nội dung chương 3 viết ở đây...`;
       // Caching nhẹ nhàng chạy ngầm sau khi lưu thành công (chỉ cache 1 chương đầu tiên, không làm nghẽn bộ nhớ)
       setTimeout(() => {
         if (formattedChapters[0]?.content) {
-          safeSetItem(`chapter_full_${novel.id}_${formattedChapters[0].number}`, formattedChapters[0].content);
+          const ch0 = formattedChapters[0];
+          safeSetItem(
+            makeChapterCacheKey(novel.id, ch0.number),
+            JSON.stringify({
+              content: ch0.content,
+              wordCount: ch0.wordCount || 0,
+              cachedAt: Date.now(),
+            })
+          );
+          safeSetItem(makeChapterCacheTsKey(novel.id, ch0.number), String(Date.now()));
         }
       }, 100);
 

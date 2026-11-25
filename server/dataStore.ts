@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { SAMPLE_NOVELS } from '../src/data/novels.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +30,8 @@ export function stripChapterTOC(chapter: any): any {
     isHidden: Boolean(chapter.isHidden),
     content: '', // Không chứa nội dung chữ trên root doc
     audioUrl: chapter.audioUrl || undefined,
+    audioUrlMale: chapter.audioUrlMale || undefined,
+    audioUrlFemale: chapter.audioUrlFemale || undefined,
   };
 }
 
@@ -57,55 +58,18 @@ export function initDataStore(): void {
           return;
         }
       } catch (readErr) {
-        console.warn('[DataStore] Đọc novels.json lỗi, sẽ nạp lại từ sample novels:', readErr);
+        console.warn('[DataStore] Đọc novels.json lỗi, khởi tạo danh sách rỗng:', readErr);
       }
     }
 
-    // Nếu chưa có file hoặc file rỗng, khởi tạo từ SAMPLE_NOVELS
-    console.log(`[DataStore] Khởi tạo kho dữ liệu truyện ban đầu từ SAMPLE_NOVELS (${SAMPLE_NOVELS.length} truyện)...`);
-    inMemoryNovels = SAMPLE_NOVELS.map((novel) => {
-      const strippedChapters = Array.isArray(novel.chapters)
-        ? novel.chapters.map(stripChapterTOC)
-        : [];
-
-      // Đồng thời lưu nội dung các chương mẫu có sẵn vào thư mục chapters
-      if (Array.isArray(novel.chapters) && novel.chapters.length > 0) {
-        const novelChapDir = path.join(CHAPTERS_DIR, novel.id);
-        if (!fs.existsSync(novelChapDir)) {
-          fs.mkdirSync(novelChapDir, { recursive: true });
-        }
-        novel.chapters.forEach((ch) => {
-          if (ch.content && ch.content.trim()) {
-            const chapFile = path.join(novelChapDir, `${ch.number}.json`);
-            if (!fs.existsSync(chapFile)) {
-              fs.writeFileSync(chapFile, JSON.stringify({
-                id: ch.id || `${novel.id}-c${ch.number}`,
-                number: ch.number,
-                title: ch.title,
-                content: ch.content,
-                wordCount: ch.wordCount || ch.content.split(/\s+/).filter(Boolean).length,
-                isVip: ch.isVip,
-                priceXu: ch.priceXu,
-                publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
-              }, null, 2), 'utf-8');
-            }
-          }
-        });
-      }
-
-      return {
-        ...novel,
-        chapters: strippedChapters,
-      };
-    });
-
-    // Ghi vào novels.json
-    fs.writeFileSync(NOVELS_FILE, JSON.stringify(inMemoryNovels, null, 2), 'utf-8');
+    inMemoryNovels = [];
+    if (!fs.existsSync(NOVELS_FILE)) {
+      fs.writeFileSync(NOVELS_FILE, JSON.stringify([], null, 2), 'utf-8');
+    }
     isInitialized = true;
-    console.log(`[DataStore] Đã khởi tạo hoàn tất kho truyện với ${inMemoryNovels.length} truyện.`);
   } catch (err) {
     console.error('[DataStore] Lỗi khởi tạo dataStore:', err);
-    inMemoryNovels = [...SAMPLE_NOVELS];
+    inMemoryNovels = [];
     isInitialized = true;
   }
 }

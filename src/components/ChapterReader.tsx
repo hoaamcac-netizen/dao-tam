@@ -202,17 +202,22 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         .then((res) => {
           if (!isCancelled && res) {
             let foundAudioMeta = false;
-            if (res.audioUrl && !chapter.audioUrl) {
-              chapter.audioUrl = res.audioUrl;
-              foundAudioMeta = true;
-            }
-            if (res.audioUrlMale && !chapter.audioUrlMale) {
-              chapter.audioUrlMale = res.audioUrlMale;
-              foundAudioMeta = true;
-            }
-            if (res.audioUrlFemale && !chapter.audioUrlFemale) {
-              chapter.audioUrlFemale = res.audioUrlFemale;
-              foundAudioMeta = true;
+            const audioKeys = [
+              'audioUrl',
+              'audioUrlMale',
+              'audioUrlFemale',
+              'mp3Url',
+              'maleAudioUrl',
+              'audio',
+              'femaleAudioUrl',
+              'mp3Female',
+            ] as const;
+            for (const key of audioKeys) {
+              const incoming = res[key];
+              if (typeof incoming === 'string' && incoming.trim() && !chapter[key]) {
+                chapter[key] = incoming.trim();
+                foundAudioMeta = true;
+              }
             }
             if (foundAudioMeta) {
               setChapterAudioMetaTick((t) => t + 1);
@@ -259,6 +264,11 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
           chapter.audioUrl = match.audioUrl;
           chapter.audioUrlMale = match.audioUrlMale;
           chapter.audioUrlFemale = match.audioUrlFemale;
+          chapter.mp3Url = match.mp3Url;
+          chapter.maleAudioUrl = match.maleAudioUrl;
+          chapter.audio = match.audio;
+          chapter.femaleAudioUrl = match.femaleAudioUrl;
+          chapter.mp3Female = match.mp3Female;
           setChapterAudioMetaTick((t) => t + 1);
         }
       }
@@ -817,7 +827,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   return (
     <div
-      className={`reader-container min-h-screen relative transition-colors duration-300 pt-14 ${
+      className={`reader-container min-h-screen overflow-x-hidden relative transition-colors duration-300 pt-14 ${
         audioContext.isBarVisible && !audioContext.isMinimized
           ? 'pb-64 sm:pb-48'
           : 'pb-36 sm:pb-40'
@@ -894,7 +904,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         <div className="max-w-4xl mx-auto min-h-[44px] flex items-center justify-between gap-1 sm:gap-2 flex-nowrap">
           <button
             onClick={onBackToNovel}
-            className="min-w-[36px] min-h-[40px] flex items-center justify-center gap-1 text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-white px-2 sm:px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 transition-colors cursor-pointer flex-shrink-0"
+            className="min-w-[40px] min-h-[40px] flex items-center justify-center gap-1 text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-white px-2 sm:px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 transition-colors cursor-pointer flex-shrink-0"
             title="Quay lại mục lục"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -915,7 +925,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                 }
               }}
               disabled={!prevChapter}
-              className={`min-w-[34px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
+              className={`min-w-[40px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
                 prevChapter
                   ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-blue-600 hover:text-white cursor-pointer'
                   : 'bg-slate-100/50 dark:bg-slate-800/40 text-slate-400 dark:text-slate-600 cursor-not-allowed'
@@ -949,7 +959,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                 }
               }}
               disabled={!nextChapter}
-              className={`min-w-[34px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
+              className={`min-w-[40px] min-h-[40px] px-1.5 sm:px-2 py-1.5 rounded-lg text-xs transition-colors flex-shrink-0 flex items-center justify-center ${
                 nextChapter
                   ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-blue-600 hover:text-white cursor-pointer'
                   : 'bg-slate-100/50 dark:bg-slate-800/40 text-slate-400 dark:text-slate-600 cursor-not-allowed'
@@ -991,7 +1001,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                   }
                 }
               }}
-              className={`min-w-[36px] min-h-[40px] px-2 sm:px-3 py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 transition-all cursor-pointer shadow-sm ${
+              className={`min-w-[40px] min-h-[40px] px-2 sm:px-3 py-1.5 rounded-lg text-xs flex items-center justify-center gap-1 transition-all cursor-pointer shadow-sm ${
                 isTtsPlaying || isTransitioningChapter
                   ? 'bg-gradient-to-r from-pink-600 to-rose-500 text-white font-bold shadow-pink-500/25'
                   : 'bg-pink-600 hover:bg-pink-500 text-white font-semibold'
@@ -1013,7 +1023,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {/* Settings */}
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className={`min-w-[36px] min-h-[40px] p-1.5 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-center ${
+              className={`min-w-[40px] min-h-[40px] p-1.5 rounded-lg text-xs transition-colors cursor-pointer flex items-center justify-center ${
                 showSettings
                   ? 'bg-blue-600 text-white'
                   : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600'
@@ -1026,7 +1036,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             {/* Manual Save */}
             <button
               onClick={handleManualSave}
-              className="hidden sm:flex min-w-[38px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer items-center justify-center"
+              className="hidden sm:flex min-w-[40px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer items-center justify-center"
               title="Lưu tiến trình đọc"
             >
               <Bookmark className="w-4 h-4" />
@@ -1052,7 +1062,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                   setTimeout(() => setDrmWarning(null), 3000);
                 }
               }}
-              className="min-w-[36px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer flex items-center justify-center"
+              className="min-w-[40px] min-h-[40px] p-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-blue-600 text-xs transition-colors cursor-pointer flex items-center justify-center"
               title="Chia sẻ / Sao chép link chương truyện"
             >
               <Share2 className="w-4 h-4" />
@@ -1449,7 +1459,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                     <button
                       onClick={handleQuickUnlockChapter}
                       disabled={isUnlockingDirectly}
-                      className="w-full sm:flex-1 py-3.5 px-5 rounded-2xl bg-gradient-to-r from-pink-500 via-rose-500 to-pink-600 hover:from-pink-600 hover:to-rose-700 text-white font-black text-xs sm:text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer disabled:opacity-50"
+                      className="w-full sm:flex-1 min-h-[44px] py-3.5 px-5 rounded-2xl bg-gradient-to-r from-pink-500 via-rose-500 to-pink-600 hover:from-pink-600 hover:to-rose-700 text-white font-black text-xs sm:text-sm shadow-lg shadow-pink-500/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer disabled:opacity-50"
                     >
                       <Coins className="w-4 h-4 text-pink-100" />
                       <span>
@@ -1459,7 +1469,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
                   ) : (
                     <button
                       onClick={onOpenTopUp}
-                      className="w-full sm:flex-1 py-3.5 px-5 rounded-2xl bg-gradient-to-r from-rose-600 via-pink-600 to-rose-700 hover:from-rose-500 hover:to-pink-500 text-white font-black text-xs sm:text-sm shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer"
+                      className="w-full sm:flex-1 min-h-[44px] py-3.5 px-5 rounded-2xl bg-gradient-to-r from-rose-600 via-pink-600 to-rose-700 hover:from-rose-500 hover:to-pink-500 text-white font-black text-xs sm:text-sm shadow-lg shadow-rose-600/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer"
                     >
                       <Coins className="w-4 h-4 text-amber-200" />
                       <span>Nạp Thêm Xu Vào Ví Ngay</span>
@@ -1468,7 +1478,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
                   <button
                     onClick={() => onOpenVipPurchase(novel, chapter, 'full_book_only')}
-                    className="w-full sm:w-auto py-3.5 px-5 rounded-2xl bg-white dark:bg-slate-800 hover:bg-pink-50 dark:hover:bg-slate-700 border-2 border-pink-400 dark:border-pink-500 text-pink-600 dark:text-pink-400 font-extrabold text-xs sm:text-sm transition-all cursor-pointer whitespace-nowrap shadow-xs hover:scale-[1.02]"
+                    className="w-full sm:w-auto min-h-[44px] py-3.5 px-5 rounded-2xl bg-white dark:bg-slate-800 hover:bg-pink-50 dark:hover:bg-slate-700 border-2 border-pink-400 dark:border-pink-500 text-pink-600 dark:text-pink-400 font-extrabold text-xs sm:text-sm transition-all cursor-pointer whitespace-nowrap shadow-xs hover:scale-[1.02]"
                   >
                     Chốt Đơn Trọn Bộ &rarr;
                   </button>

@@ -6,7 +6,7 @@ import {
   batchUpdateChapterAudioLinksInFirestore,
   type ChapterAudioLinkBatchItem,
 } from '../firebase/services';
-import { removeVietnameseTones } from '../utils/rulesAndVoices';
+import { removeVietnameseTones, getChapterAudioUrl } from '../utils/rulesAndVoices';
 import { sanitizeUserFacingErrorText } from '../utils/audioChunker';
 import {
   CheckCircle2,
@@ -50,11 +50,11 @@ interface BrokenLinkEntry {
 }
 
 function getMaleAudioUrl(chapter: Chapter): string {
-  return (chapter.audioUrlMale || chapter.audioUrl || '').trim();
+  return getChapterAudioUrl(chapter, 'male');
 }
 
 function getFemaleAudioUrl(chapter: Chapter): string {
-  return (chapter.audioUrlFemale || '').trim();
+  return getChapterAudioUrl(chapter, 'female');
 }
 
 function isValidHttpUrl(url: string): boolean {
@@ -834,6 +834,11 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
           audioUrl: matched.audioUrl,
           audioUrlMale: matched.audioUrlMale,
           audioUrlFemale: matched.audioUrlFemale,
+          mp3Url: matched.mp3Url,
+          maleAudioUrl: matched.maleAudioUrl,
+          audio: matched.audio,
+          femaleAudioUrl: matched.femaleAudioUrl,
+          mp3Female: matched.mp3Female,
         };
       })
     );
@@ -1038,8 +1043,18 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
           deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.audioUrl,
         audioUrlMale:
           deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.audioUrlMale,
+        mp3Url:
+          deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.mp3Url,
+        maleAudioUrl:
+          deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.maleAudioUrl,
+        audio:
+          deleteScope === 'male' || deleteScope === 'both' ? undefined : ch.audio,
         audioUrlFemale:
           deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.audioUrlFemale,
+        femaleAudioUrl:
+          deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.femaleAudioUrl,
+        mp3Female:
+          deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.mp3Female,
       }));
 
       setBrokenLinksMap((prev) => {

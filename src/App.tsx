@@ -23,8 +23,7 @@ import { ClientLiveChat } from './components/ClientLiveChat';
 import { AdminMessagesModal } from './components/AdminMessagesModal';
 import { fetchUnreadMessageCount } from './services/chatService';
 import { getStoredGenres, saveGenres, createGenreItem, INITIAL_HOT_GENRES } from './data/genres';
-import { SAMPLE_NOVELS, CHAPTER_1_TSTN60_FULL, generateChapters } from './data/novels';
-import { formatXu } from './utils/rulesAndVoices';
+import { formatXu, calculateChapterVip, filterOutDummyChapters, isDummyChapter, removeVietnameseTones, normalizeStoryId } from './utils/rulesAndVoices';
 import { Header } from './components/Header';
 import { NovelCard } from './components/NovelCard';
 import { NovelDetail } from './components/NovelDetail';
@@ -36,7 +35,6 @@ import { AdminDashboardModal } from './components/AdminDashboardModal';
 import { ArchitectureGuideModal } from './components/ArchitectureGuideModal';
 import { SubmitNovelModal } from './components/SubmitNovelModal';
 import { Top10HotSidebar } from './components/Top10HotSidebar';
-import { calculateChapterVip, filterOutDummyChapters, isDummyChapter, removeVietnameseTones } from './utils/rulesAndVoices';
 import { DaoTamLogo } from './components/DaoTamLogo';
 import { VipPolicyModal } from './components/VipPolicyModal';
 import { EditNovelModal } from './components/EditNovelModal';
@@ -160,6 +158,9 @@ import {
   isGenresCacheFresh,
   markGenresCacheFresh,
   clearChapterAudioCache,
+  makeChapterCacheKey,
+  makeChapterCacheTsKey,
+  clearNovelsStorageCache,
 } from './utils/safeStorage';
 import { 
   checkHasActiveBanNotice, 
@@ -212,15 +213,30 @@ function DaoTamApp() {
   const [isCategoriesLoading, setIsCategoriesLoading] = useState(true);
   const [categoriesError, setCategoriesError] = useState<string | null>(null);
 
-  // Dynamic Novels State: Khởi tạo từ cache an toàn và tự động đồng bộ thời gian thực từ Firestore (Single Source of Truth)
+  // Dynamic Novels State: Chỉ khởi tạo từ cache hợp lệ, tuyệt đối không dùng truyện mẫu
   const [novels, setNovels] = useState<Novel[]>(() => {
     try {
       const stored = safeGetItem('dao_tam_novels');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const valid = parsed.filter(
+            (n: any) =>
+              n &&
+              typeof n.id === 'string' &&
+              n.id.trim().length > 0 &&
+              typeof n.title === 'string' &&
+              n.title.trim().length > 0 &&
+              !n.isDummy &&
+              !/^Bộ truyện #/i.test(n.title.trim())
+          );
+          if (valid.length > 0) return valid;
+        }
+        clearNovelsStorageCache();
       }
-    } catch {}
+    } catch {
+      clearNovelsStorageCache();
+    }
     return [];
   });
   const deletingNovelIdsRef = useRef<Set<string>>(new Set());
@@ -675,7 +691,13 @@ function DaoTamApp() {
       const cachedFresh = getCachedNovelsIfFresh();
       if (Array.isArray(cachedFresh) && cachedFresh.length > 0) {
         const filteredCached = cachedFresh.filter(
-          (n) => !deletingNovelIdsRef.current.has(n.id) && (!n.slug || !deletingNovelIdsRef.current.has(n.slug))
+          (n) =>
+            n &&
+            n.id &&
+            n.title &&
+            !(n as any).isDummy &&
+            !deletingNovelIdsRef.current.has(n.id) &&
+            (!n.slug || !deletingNovelIdsRef.current.has(n.slug))
         );
         if (filteredCached.length > 0) {
           setNovels(filteredCached);
@@ -690,10 +712,17 @@ function DaoTamApp() {
     setNovelsError(null);
     try {
       const liveNovels = await fetchNovelsFromFirestore();
-      if (Array.isArray(liveNovels) && liveNovels.length > 0) {
-        const filteredLive = liveNovels.filter(
-          (n) => !deletingNovelIdsRef.current.has(n.id) && (!n.slug || !deletingNovelIdsRef.current.has(n.slug))
-        );
+      const filteredLive = (Array.isArray(liveNovels) ? liveNovels : []).filter(
+        (n) =>
+          n &&
+          n.id &&
+          n.title &&
+          !(n as any).isDummy &&
+          !deletingNovelIdsRef.current.has(n.id) &&
+          (!n.slug || !deletingNovelIdsRef.current.has(n.slug))
+      );
+
+      if (filteredLive.length > 0) {
         setNovels(() => {
           saveNovelsToStorage(filteredLive);
           return filteredLive;
@@ -701,7 +730,7 @@ function DaoTamApp() {
 
         setSelectedNovel((curr) => {
           if (!curr) return null;
-          const match = liveNovels.find((x) => x.id === curr.id || x.slug === curr.slug);
+          const match = filteredLive.find((x) => x.id === curr.id || x.slug === curr.slug);
           if (!match) {
             setSelectedChapter(null);
             return null;
@@ -718,10 +747,19 @@ function DaoTamApp() {
               : (Array.isArray(curr.chapters) ? curr.chapters : []),
           };
         });
+      } else {
+        clearNovelsStorageCache();
+        setNovels([]);
       }
     } catch (err: any) {
       console.warn('Lỗi tải danh sách truyện:', err);
-      setNovelsError(err?.message || 'Không thể tải danh sách truyện.');
+      setNovels((curr) => {
+        if (!Array.isArray(curr) || curr.length === 0) {
+          clearNovelsStorageCache();
+        }
+        return curr;
+      });
+      setNovelsError('Không thể tải danh sách truyện lúc này, vui lòng thử lại');
     } finally {
       setIsNovelsLoading(false);
     }
@@ -1212,16 +1250,21 @@ function DaoTamApp() {
   };
 
   const handleToggleBookmark = (novelId: string) => {
+    const targetNorm = normalizeStoryId(novelId);
     const baseBookmarks = Array.from(
-      new Set([
-        ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
-        ...localSavedIds,
-      ])
+      new Set(
+        [
+          ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
+          ...localSavedIds,
+        ]
+          .map((id) => normalizeStoryId(String(id || '')))
+          .filter(Boolean)
+      )
     );
-    const exists = baseBookmarks.includes(novelId);
+    const exists = baseBookmarks.some((id) => id === targetNorm || id === novelId);
     const nextBookmarks = exists
-      ? baseBookmarks.filter((id) => id !== novelId)
-      : [...baseBookmarks, novelId];
+      ? baseBookmarks.filter((id) => id !== targetNorm && id !== novelId)
+      : [...baseBookmarks, targetNorm || novelId];
 
     setLocalSavedIds(nextBookmarks);
     saveLocalSavedStoryIds(nextBookmarks);
@@ -1240,13 +1283,18 @@ function DaoTamApp() {
   };
 
   const handleRemoveBookmark = (novelId: string) => {
+    const targetNorm = normalizeStoryId(novelId);
     const baseBookmarks = Array.from(
-      new Set([
-        ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
-        ...localSavedIds,
-      ])
+      new Set(
+        [
+          ...(Array.isArray(activeUser?.bookmarks) ? activeUser.bookmarks : []),
+          ...localSavedIds,
+        ]
+          .map((id) => normalizeStoryId(String(id || '')))
+          .filter(Boolean)
+      )
     );
-    const nextBookmarks = baseBookmarks.filter((id) => id !== novelId);
+    const nextBookmarks = baseBookmarks.filter((id) => id !== targetNorm && id !== novelId);
 
     setLocalSavedIds(nextBookmarks);
     saveLocalSavedStoryIds(nextBookmarks);
@@ -1709,8 +1757,18 @@ function DaoTamApp() {
 
     try {
       if (newChapter.content) {
-        safeSetItem(`chapter_full_${novelId}_${newChapter.number}`, newChapter.content);
-        safeSetItem(`chapter_full_${novelId}_${newChapter.id}`, newChapter.content);
+        const chapPayload = JSON.stringify({
+          content: newChapter.content,
+          wordCount: newChapter.wordCount,
+          audioUrl: newChapter.audioUrl || '',
+          audioUrlMale: newChapter.audioUrlMale || '',
+          audioUrlFemale: newChapter.audioUrlFemale || '',
+        });
+        const tsStr = String(Date.now());
+        safeSetItem(makeChapterCacheKey(novelId, newChapter.number), chapPayload);
+        safeSetItem(makeChapterCacheTsKey(novelId, newChapter.number), tsStr);
+        safeSetItem(makeChapterCacheKey(novelId, newChapter.id), chapPayload);
+        safeSetItem(makeChapterCacheTsKey(novelId, newChapter.id), tsStr);
       }
       // Gom thao tác ghi 1 chương và cập nhật metadata của truyện vào DUY NHẤT 1 WriteBatch
       await addSingleChapterToFirestore(novelId, newChapter, updatedNovelTarget);
@@ -2335,8 +2393,18 @@ function DaoTamApp() {
     // 4. Đồng bộ trực tiếp lên Firestore: Cả document tổng và subcollection 'chapters'
     try {
       if (newChapter.content) {
-        safeSetItem(`chapter_full_${novelId}_${newChapter.number}`, newChapter.content);
-        safeSetItem(`chapter_full_${novelId}_${newChapter.id}`, newChapter.content);
+        const chapPayload = JSON.stringify({
+          content: newChapter.content,
+          wordCount: newChapter.wordCount,
+          audioUrl: newChapter.audioUrl || '',
+          audioUrlMale: newChapter.audioUrlMale || '',
+          audioUrlFemale: newChapter.audioUrlFemale || '',
+        });
+        const tsStr = String(Date.now());
+        safeSetItem(makeChapterCacheKey(novelId, newChapter.number), chapPayload);
+        safeSetItem(makeChapterCacheTsKey(novelId, newChapter.number), tsStr);
+        safeSetItem(makeChapterCacheKey(novelId, newChapter.id), chapPayload);
+        safeSetItem(makeChapterCacheTsKey(novelId, newChapter.id), tsStr);
       }
       await Promise.all([
         saveNovelToFirestore(updatedNovelTarget, { syncChapters: false }),
@@ -2405,7 +2473,7 @@ function DaoTamApp() {
 
   // Điều hướng mở chi tiết bộ truyện với URL riêng biệt (/truyen/:id-hoac-slug)
   const handleSelectNovel = (n: Novel) => {
-    const slugOrId = n.slug || n.id;
+    const slugOrId = (n.slug && n.slug.trim()) || normalizeStoryId(n.id) || n.id;
     navigate(`/truyen/${slugOrId}`);
     setSelectedNovel(n);
     setSelectedChapter(null);
@@ -2419,7 +2487,7 @@ function DaoTamApp() {
   // Điều hướng mở chương đọc truyện với URL riêng biệt (/truyen/:id/chuong-:so)
   // Hỗ trợ tham số ?autoPlay=true khi người dùng nhấn nút 'Nghe Audio'
   const handleSelectChapter = (novelWithChapters: Novel, chapter: Chapter, autoPlay?: boolean) => {
-    const slugOrId = novelWithChapters.slug || novelWithChapters.id;
+    const slugOrId = (novelWithChapters.slug && novelWithChapters.slug.trim()) || normalizeStoryId(novelWithChapters.id) || novelWithChapters.id;
     const searchParam = autoPlay ? '?autoPlay=true' : '';
     navigate(`/truyen/${slugOrId}/chuong-${chapter.number}${searchParam}`);
     setSelectedNovel(novelWithChapters);
@@ -2463,13 +2531,18 @@ function DaoTamApp() {
             ...(detail.chapter.audioUrl ? { audioUrl: detail.chapter.audioUrl } : {}),
             ...(detail.chapter.audioUrlMale ? { audioUrlMale: detail.chapter.audioUrlMale } : {}),
             ...(detail.chapter.audioUrlFemale ? { audioUrlFemale: detail.chapter.audioUrlFemale } : {}),
+            ...(detail.chapter.mp3Url ? { mp3Url: detail.chapter.mp3Url } : {}),
+            ...(detail.chapter.maleAudioUrl ? { maleAudioUrl: detail.chapter.maleAudioUrl } : {}),
+            ...(detail.chapter.audio ? { audio: detail.chapter.audio } : {}),
+            ...(detail.chapter.femaleAudioUrl ? { femaleAudioUrl: detail.chapter.femaleAudioUrl } : {}),
+            ...(detail.chapter.mp3Female ? { mp3Female: detail.chapter.mp3Female } : {}),
             ...(detail.chapter.content && !matchedFullChapter.content
               ? { content: detail.chapter.content }
               : {}),
           };
           selectedChapterRef.current = mergedChapter;
           setSelectedChapter(mergedChapter);
-          const slugOrId = (curNovel.slug && curNovel.slug.trim()) || curNovel.id;
+          const slugOrId = (curNovel.slug && curNovel.slug.trim()) || normalizeStoryId(curNovel.id) || curNovel.id;
           const targetPath = `/truyen/${encodeURIComponent(slugOrId)}/chuong-${mergedChapter.number}`;
           if (window.location.pathname !== targetPath) {
             navigate(targetPath, { replace: true });
@@ -2644,12 +2717,25 @@ function DaoTamApp() {
       );
 
       const target = rawId.trim().toLowerCase();
+      const normalizedTarget = normalizeStoryId(rawId).toLowerCase();
 
-      const findInList = (list: Novel[]) => list.find((n) => 
-        n.id.toLowerCase() === target ||
-        (n.slug && n.slug.toLowerCase() === target) ||
-        n.title.toLowerCase() === target
-      );
+      const findInList = (list: Novel[]) =>
+        list.find((n) => {
+          const idLow = (n.id || '').toLowerCase();
+          const normIdLow = normalizeStoryId(n.id || '').toLowerCase();
+          const slugLow = (n.slug || '').toLowerCase();
+          const normSlugLow = normalizeStoryId(n.slug || '').toLowerCase();
+          const titleLow = (n.title || '').toLowerCase();
+          return (
+            idLow === target ||
+            idLow === normalizedTarget ||
+            normIdLow === target ||
+            normIdLow === normalizedTarget ||
+            (slugLow && (slugLow === target || slugLow === normalizedTarget)) ||
+            (normSlugLow && (normSlugLow === target || normSlugLow === normalizedTarget)) ||
+            titleLow === target
+          );
+        });
 
       let foundNovel = findInList(novels);
 
@@ -2775,25 +2861,28 @@ function DaoTamApp() {
             });
             applyResolvedNovel(singleNovel);
           } else {
-            // Fallback: Kiểm tra thêm danh sách mới nhất từ Firestore
+            // Fallback: Kiểm tra thêm danh sách mới nhất từ máy chủ
             fetchNovelsFromFirestore().then((remoteNovels) => {
               const safeRemoteNovels = Array.isArray(remoteNovels) ? remoteNovels : [];
               const remoteFound = findInList(safeRemoteNovels);
               if (remoteFound) {
+                if (safeRemoteNovels.length > 0) {
+                  saveNovelsToStorage(safeRemoteNovels);
+                }
                 setNovels(safeRemoteNovels);
                 applyResolvedNovel(remoteFound);
               } else {
                 setIsResolvingRoute(false);
                 setRouteError(`Không tìm thấy bộ truyện "${rawId}". Bộ truyện này có thể đã bị xóa hoặc chưa xuất bản.`);
               }
-            }).catch((err) => {
+            }).catch(() => {
               setIsResolvingRoute(false);
               setRouteError(`Không tìm thấy bộ truyện "${rawId}". Bộ truyện này có thể đã bị xóa hoặc chưa xuất bản.`);
             });
           }
-        }).catch((err) => {
+        }).catch(() => {
           setIsResolvingRoute(false);
-          setRouteError(`Lỗi kết nối khi tải truyện: ${err.message || 'Vui lòng kiểm tra lại đường truyền mạng'}`);
+          setRouteError('Không thể tải nội dung truyện lúc này, vui lòng thử lại.');
         });
       }
       return;
@@ -3332,7 +3421,7 @@ function DaoTamApp() {
     // 0. Lọc truyện bị ẩn: Truyện đã ẩn được ẩn hoàn toàn khỏi trang chủ
     list = list.filter((n) => !n.isHidden && n.publishStatus !== 'hidden');
 
-    // 1. Khi đang có từ khóa tìm kiếm: Ưu tiên tìm kiếm TOÀN DIỆN (Hỗ trợ cả Tiếng Việt có dấu, không dấu, viết hoa/thường)
+    // 1. Khi đang có từ khóa tìm kiếm: CHỈ khớp đúng Tên truyện hoặc Tác giả (có dấu / không dấu)
     if (searchQuery.trim()) {
       const rawQ = searchQuery.toLowerCase().trim();
       const normQ = removeVietnameseTones(searchQuery);
@@ -3341,36 +3430,24 @@ function DaoTamApp() {
       const searchMatches = list.filter((novel) => {
         const titleRaw = (novel.title || '').toLowerCase();
         const authorRaw = (novel.author || '').toLowerCase();
-        const editorRaw = (novel.editor || '').toLowerCase();
-        const descRaw = (novel.description || '').toLowerCase();
-        const safeCats = Array.isArray(novel.categories) ? novel.categories : [];
-        const catRawList = (safeCats || []).map((c) => String(c || '').toLowerCase());
 
         const titleNorm = removeVietnameseTones(novel.title || '');
         const authorNorm = removeVietnameseTones(novel.author || '');
-        const editorNorm = removeVietnameseTones(novel.editor || '');
-        const descNorm = removeVietnameseTones(novel.description || '');
-        const catNormList = (safeCats || []).map(removeVietnameseTones);
-        const combinedText = `${titleNorm} ${authorNorm} ${editorNorm} ${catNormList.join(' ')} ${descNorm}`;
 
-        // 1. Khớp cụm từ nguyên văn (có dấu hoặc không dấu)
         if (
           titleRaw.includes(rawQ) ||
           titleNorm.includes(normQ) ||
           authorRaw.includes(rawQ) ||
-          authorNorm.includes(normQ) ||
-          editorRaw.includes(rawQ) ||
-          editorNorm.includes(normQ) ||
-          catRawList.some((c) => c.includes(rawQ)) ||
-          catNormList.some((c) => c.includes(normQ)) ||
-          descRaw.includes(rawQ) ||
-          descNorm.includes(normQ)
+          authorNorm.includes(normQ)
         ) {
           return true;
         }
 
-        // 2. Khớp tất cả các từ trong chuỗi tìm kiếm (AND matching)
-        if ((keywords?.length || 0) > 0 && keywords.every((kw) => combinedText.includes(kw))) {
+        if (
+          keywords.length > 0 &&
+          (keywords.every((kw) => titleNorm.includes(kw)) ||
+            keywords.every((kw) => authorNorm.includes(kw)))
+        ) {
           return true;
         }
 
@@ -3707,7 +3784,7 @@ function DaoTamApp() {
       )}
 
       {/* Main Content Area */}
-      <main className={isInChapterReader ? '' : 'pb-24'}>
+      <main className={isInChapterReader ? 'overflow-x-hidden' : 'pb-24 overflow-x-hidden'}>
         {isResolvingRoute ? (
           <div className="max-w-4xl mx-auto px-4 py-24 text-center">
             <div className="inline-block p-4 rounded-2xl bg-pink-500/10 text-pink-600 dark:text-pink-400 mb-4 animate-pulse">
@@ -3725,7 +3802,7 @@ function DaoTamApp() {
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">{routeError}</p>
             <button
               onClick={handleReturnToHome}
-              className="px-6 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-700 text-white font-bold text-sm shadow-lg shadow-pink-600/30 transition-all cursor-pointer"
+              className="px-6 py-2.5 min-h-[44px] rounded-xl bg-pink-600 hover:bg-pink-700 text-white font-bold text-sm shadow-lg shadow-pink-600/30 transition-all cursor-pointer"
             >
               Quay về trang chủ
             </button>
@@ -3739,7 +3816,7 @@ function DaoTamApp() {
             setReaderSettings={setReaderSettings}
             onSelectChapter={(novel, chapter) => handleSelectChapter(novel, chapter)}
             onBackToNovel={() => {
-              navigate(`/truyen/${selectedNovel.slug || selectedNovel.id}`);
+              navigate(`/truyen/${(selectedNovel.slug && selectedNovel.slug.trim()) || normalizeStoryId(selectedNovel.id) || selectedNovel.id}`);
               setSelectedChapter(null);
             }}
             onSaveProgress={handleSaveProgress}
@@ -3760,8 +3837,12 @@ function DaoTamApp() {
             novel={selectedNovel}
             savedProgress={(activeUser?.readingHistory || []).find((h) => h.novelId === selectedNovel.id)}
             isBookmarked={
-              (activeUser?.bookmarks || []).includes(selectedNovel.id) ||
-              localSavedIds.includes(selectedNovel.id)
+              (activeUser?.bookmarks || []).some(
+                (bid) => bid === selectedNovel.id || normalizeStoryId(bid) === normalizeStoryId(selectedNovel.id)
+              ) ||
+              localSavedIds.some(
+                (bid) => bid === selectedNovel.id || normalizeStoryId(bid) === normalizeStoryId(selectedNovel.id)
+              )
             }
             onToggleBookmark={handleToggleBookmark}
             onSelectChapter={(novelWithChapters, chapter, autoPlay) => {
@@ -4014,6 +4095,7 @@ function DaoTamApp() {
             onSelectNovel={(novel) => {
               handleSelectNovel(novel);
             }}
+            onRemoveBookmark={handleRemoveBookmark}
             onBackToHome={handleReturnToHome}
             onOpenTopUp={() => setIsTopUpOpen(true)}
             onOpenLogin={() => {
@@ -4025,7 +4107,7 @@ function DaoTamApp() {
           /* HOME CATALOG SCREEN WITH CONTINUE READING BANNER & TOP 10 HOT TRONG NGÀY RIGHT SIDEBAR */
           <>
             <ContinueReadingBanner onNavigateChapter={(url) => navigate(url)} />
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 sm:pt-8">
+            <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-6 sm:pt-8 overflow-x-hidden">
 
 
             {/* THÔNG BÁO TOÀN TRANG (GLOBAL BANNER - CHỈ ĐỌC 1 LẦN KHI LOAD TRANG CHỦ) */}
@@ -4174,29 +4256,43 @@ function DaoTamApp() {
                     <div className="animate-spin w-8 h-8 border-3 border-rose-500 border-t-transparent rounded-full mb-3" />
                     <span className="text-xs font-semibold text-rose-500">Đang tải danh sách truyện...</span>
                   </div>
+                ) : novelsError && (novels?.length || 0) === 0 ? (
+                  <div className="text-center py-16 bg-white dark:bg-[#13141c] rounded-2xl border border-rose-200 dark:border-neutral-800 p-6 sm:p-8 shadow-xs">
+                    <AlertCircle className="w-10 h-10 text-rose-500 mx-auto mb-3" />
+                    <h3 className="text-slate-800 dark:text-neutral-200 font-bold text-sm">
+                      Không thể tải danh sách truyện lúc này, vui lòng thử lại
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => reloadNovels(true)}
+                      className="mt-4 px-5 py-2.5 min-h-[44px] rounded-xl bg-gradient-to-r from-pink-600 to-rose-500 hover:from-pink-500 hover:to-rose-600 text-white font-bold text-xs cursor-pointer shadow-md transition"
+                    >
+                      Tải lại
+                    </button>
+                  </div>
                 ) : (filteredAndSortedNovels?.length || 0) === 0 ? (
-                  <div className="text-center py-16 bg-[#13141c] rounded-2xl border border-neutral-800 p-8">
+                  <div className="text-center py-16 bg-white dark:bg-[#13141c] rounded-2xl border border-slate-200 dark:border-neutral-800 p-6 sm:p-8 shadow-xs">
                     {searchQuery.trim() ? (
                       <>
-                        <Search className="w-10 h-10 text-neutral-500 mx-auto mb-3" />
-                        <h3 className="text-neutral-200 font-bold text-sm">
-                          Không tìm thấy tác phẩm nào khớp với &ldquo;{searchQuery}&rdquo;
+                        <Search className="w-10 h-10 text-slate-400 dark:text-neutral-500 mx-auto mb-3" />
+                        <h3 className="text-slate-800 dark:text-neutral-200 font-bold text-sm">
+                          Không tìm thấy kết quả
                         </h3>
-                        <p className="text-xs text-neutral-400 mt-1 mb-4">
-                          Hãy thử kiểm tra lại từ khóa hoặc tìm theo tên tác giả, tên nhân vật, thể loại khác.
+                        <p className="text-xs text-slate-500 dark:text-neutral-400 mt-1 mb-4">
+                          Không có tác phẩm nào khớp tên truyện hoặc tác giả với &ldquo;{searchQuery}&rdquo;.
                         </p>
                         <button
                           onClick={() => setSearchQuery('')}
-                          className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-bold text-xs cursor-pointer shadow-md"
+                          className="px-4 py-2 min-h-[40px] rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-bold text-xs cursor-pointer shadow-md"
                         >
                           Xem toàn bộ kho truyện
                         </button>
                       </>
                     ) : (
                       <>
-                        <BookOpen className="w-10 h-10 text-neutral-600 mx-auto mb-3" />
-                        <h3 className="text-neutral-300 font-bold text-sm">Hiện chưa có truyện nào thuộc mục này</h3>
-                        <p className="text-xs text-neutral-500 mt-1 mb-4">
+                        <BookOpen className="w-10 h-10 text-slate-400 dark:text-neutral-600 mx-auto mb-3" />
+                        <h3 className="text-slate-700 dark:text-neutral-300 font-bold text-sm">Hiện chưa có truyện nào thuộc mục này</h3>
+                        <p className="text-xs text-slate-500 dark:text-neutral-500 mt-1 mb-4">
                           {activeUser.role !== 'reader'
                             ? 'Bạn có thể là người đầu tiên đăng truyện mới vào danh mục này!'
                             : 'Vui lòng quay lại sau khi ban biên tập cập nhật thêm tác phẩm mới.'}
@@ -4209,7 +4305,7 @@ function DaoTamApp() {
                               setSelectedCreator(null);
                               setActivePageView('submit-novel');
                             }}
-                            className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs cursor-pointer shadow-md"
+                            className="px-4 py-2 min-h-[40px] rounded-xl bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs cursor-pointer shadow-md"
                           >
                             + Đăng Truyện Ngay
                           </button>

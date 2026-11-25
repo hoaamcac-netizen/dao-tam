@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { Novel } from '../types';
-import { SAMPLE_NOVELS } from '../data/novels';
+import { safeGetItem, safeJsonParse } from '../utils/safeStorage';
 import { 
   Search, 
   Sparkles, 
@@ -101,11 +101,9 @@ export function cleanPunctuation(str: string): string {
 }
 
 /**
- * Thuật toán tìm kiếm thông minh đa trường (Tên truyện, Tác giả, Editor, Thể loại, Mô tả nội dung)
- * - Không phân biệt hoa/thường (Case-insensitive)
- * - Không phân biệt có dấu / không dấu (Diacritics-insensitive)
- * - Bỏ qua dấu câu, chấp nhận gõ một phần hoặc các từ liên quan
- * - Xếp hạng độ liên quan (Relevance scoring)
+ * Thuật toán tìm kiếm chính xác theo Tên truyện và Tác giả
+ * - Không phân biệt hoa/thường, có dấu/không dấu, bỏ dấu câu
+ * - Chỉ trả về các truyện có Tên truyện hoặc Tác giả thực sự khớp từ khóa
  */
 export function searchNovelsSmart(novels: Novel[], rawQuery: string): Novel[] {
   const cleanQ = cleanPunctuation(rawQuery).toLowerCase();
@@ -118,87 +116,53 @@ export function searchNovelsSmart(novels: Novel[], rawQuery: string): Novel[] {
   const scoredList: { novel: Novel; score: number }[] = [];
 
   for (const novel of (novels || [])) {
+    if (!novel || novel.isHidden || novel.publishStatus === 'hidden') continue;
+
     const rawTitle = cleanPunctuation(novel.title || '').toLowerCase();
     const noAccentsTitle = removeVietnameseTones(rawTitle);
 
     const rawAuthor = cleanPunctuation(novel.author || '').toLowerCase();
     const noAccentsAuthor = removeVietnameseTones(rawAuthor);
 
-    const rawEditor = cleanPunctuation(novel.editor || '').toLowerCase();
-    const noAccentsEditor = removeVietnameseTones(rawEditor);
-
-    const rawCategories = (novel.categories || []).map(c => cleanPunctuation(c).toLowerCase()).join(' ');
-    const noAccentsCategories = removeVietnameseTones(rawCategories);
-
-    const rawDesc = cleanPunctuation(novel.description || '').toLowerCase();
-    const noAccentsDesc = removeVietnameseTones(rawDesc);
-
-    const fullRaw = `${rawTitle} ${rawAuthor} ${rawEditor} ${rawCategories} ${rawDesc}`;
-    const fullNoAccents = `${noAccentsTitle} ${noAccentsAuthor} ${noAccentsEditor} ${noAccentsCategories} ${noAccentsDesc}`;
-
-    let score = 0;
-
-    // 1. Khớp nguyên cụm từ (phrase match)
     const exactTitle = rawTitle === cleanQ || noAccentsTitle === noAccentsQ;
     const titleHasPhrase = rawTitle.includes(cleanQ) || noAccentsTitle.includes(noAccentsQ);
     const authorHasPhrase = rawAuthor.includes(cleanQ) || noAccentsAuthor.includes(noAccentsQ);
-    const editorHasPhrase = rawEditor.includes(cleanQ) || noAccentsEditor.includes(noAccentsQ);
-    const catHasPhrase = rawCategories.includes(cleanQ) || noAccentsCategories.includes(noAccentsQ);
-    const descHasPhrase = rawDesc.includes(cleanQ) || noAccentsDesc.includes(noAccentsQ);
 
-    if (exactTitle) {
-      score += 400;
-    } else if (titleHasPhrase) {
-      score += 200;
-    }
+    let titleMatchedWords = 0;
+    let authorMatchedWords = 0;
 
-    if (authorHasPhrase) score += 100;
-    if (editorHasPhrase) score += 80;
-    if (catHasPhrase) score += 90;
-    if (descHasPhrase) score += 60;
-
-    // 2. Khớp từng từ khóa trong cụm từ
-    let matchedWordsCount = 0;
-    for (let i = 0; i < (qWords?.length || 0); i++) {
+    for (let i = 0; i < qWords.length; i++) {
       const w = qWords[i];
       const nw = noAccentsWords[i] || removeVietnameseTones(w);
 
-      const inTitle = rawTitle.includes(w) || noAccentsTitle.includes(nw);
-      const inAuthor = rawAuthor.includes(w) || noAccentsAuthor.includes(nw);
-      const inCat = rawCategories.includes(w) || noAccentsCategories.includes(nw);
-      const inDesc = rawDesc.includes(w) || noAccentsDesc.includes(nw);
-      const inFull = fullRaw.includes(w) || fullNoAccents.includes(nw);
-
-      if (inTitle) score += 30;
-      if (inAuthor) score += 20;
-      if (inCat) score += 20;
-      if (inDesc) score += 10;
-
-      if (inFull) {
-        matchedWordsCount++;
+      if (rawTitle.includes(w) || noAccentsTitle.includes(nw)) {
+        titleMatchedWords++;
+      }
+      if (rawAuthor.includes(w) || noAccentsAuthor.includes(nw)) {
+        authorMatchedWords++;
       }
     }
 
-    // Điểm thưởng khi xuất hiện đầy đủ các từ trong cụm
-    if ((qWords?.length || 0) > 1 && matchedWordsCount === (qWords?.length || 0)) {
-      score += 50;
+    const allWordsInTitle = qWords.length > 0 && titleMatchedWords === qWords.length;
+    const allWordsInAuthor = qWords.length > 0 && authorMatchedWords === qWords.length;
+
+    if (!titleHasPhrase && !authorHasPhrase && !allWordsInTitle && !allWordsInAuthor) {
+      continue;
     }
 
-    // Điều kiện lọt vào danh sách kết quả:
-    // Khớp cụm từ hoặc khớp toàn bộ từ khóa hoặc khớp đa số từ khóa
-    const hasPhraseMatch = titleHasPhrase || authorHasPhrase || editorHasPhrase || catHasPhrase || descHasPhrase;
-    const hasAllWords = (qWords?.length || 0) > 0 && matchedWordsCount === (qWords?.length || 0);
-    const hasMostWords = (qWords?.length || 0) >= 3 && matchedWordsCount >= (qWords?.length || 0) - 1;
+    let score = 0;
+    if (exactTitle) score += 400;
+    else if (titleHasPhrase) score += 220;
+    else if (allWordsInTitle) score += 140;
 
-    if (score > 0 && (hasPhraseMatch || hasAllWords || hasMostWords)) {
-      scoredList.push({ novel, score });
-    }
+    if (authorHasPhrase) score += 100;
+    else if (allWordsInAuthor) score += 60;
+
+    scoredList.push({ novel, score });
   }
 
-  // Sắp xếp giảm dần theo điểm số độ liên quan
   scoredList.sort((a, b) => b.score - a.score);
-
-  return (scoredList || []).map(item => item.novel);
+  return scoredList.map((item) => item.novel);
 }
 
 // Bộ nhớ cache tạm thời để không bị gọi Firestore lặp lại (Quota Protection)
@@ -234,49 +198,48 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
     setSearchLabel(`"${term}"`);
 
     try {
-      // 1. Chuẩn bị kho dữ liệu truyện đầy đủ (ưu tiên props đã tải sẵn & cache để tốn 0 Reads)
       let combinedNovels: Novel[] = [];
 
       if ((initialNovels?.length || 0) > 0) {
-        const novelMap = new Map<string, Novel>();
-        (SAMPLE_NOVELS || []).forEach((n) => novelMap.set(n.id, n));
-        (initialNovels || []).forEach((n) => novelMap.set(n.id, n));
-        combinedNovels = Array.from(novelMap.values());
+        combinedNovels = initialNovels.filter((n) => n && !n.isHidden && n.publishStatus !== 'hidden');
         memoryNovelsCache = combinedNovels;
-      } else if (memoryNovelsCache && (memoryNovelsCache?.length || 0) > 0) {
-        combinedNovels = memoryNovelsCache;
       } else {
-        const novelMap = new Map<string, Novel>();
-        (SAMPLE_NOVELS || []).forEach((n) => novelMap.set(n.id, n));
-
-        try {
-          const novelsCol = collection(db, 'novels');
-          const snap = await getDocs(query(novelsCol, limit(100)));
-          (snap?.docs || []).forEach((docSnap) => {
-            const transformed = transformDocToNovel(docSnap);
-            novelMap.set(transformed.id, transformed);
-          });
-        } catch (fsErr) {
-          handleFirestoreError(fsErr, OperationType.LIST, 'novels');
-          console.warn('[SearchBar] Không thể tải thêm dữ liệu, sử dụng kho truyện hiện tại:', fsErr);
+        const cachedRaw = safeGetItem('dao_tam_novels');
+        const cachedList = cachedRaw ? safeJsonParse<Novel[]>(cachedRaw, []) : [];
+        if (Array.isArray(cachedList) && cachedList.length > 0) {
+          combinedNovels = cachedList.filter((n) => n && !n.isHidden && n.publishStatus !== 'hidden');
+          memoryNovelsCache = combinedNovels;
+        } else if (memoryNovelsCache && memoryNovelsCache.length > 0) {
+          combinedNovels = memoryNovelsCache;
+        } else {
+          try {
+            const novelsCol = collection(db, 'novels');
+            const snap = await getDocs(query(novelsCol, limit(100)));
+            const loaded = (snap?.docs || [])
+              .map((docSnap) => transformDocToNovel(docSnap))
+              .filter((n) => !n.isHidden && n.publishStatus !== 'hidden');
+            combinedNovels = loaded;
+            if (loaded.length > 0) {
+              memoryNovelsCache = loaded;
+            }
+          } catch (fsErr) {
+            handleFirestoreError(fsErr, OperationType.LIST, 'novels');
+            throw new Error('Không thể tải danh sách truyện lúc này, vui lòng thử lại.');
+          }
         }
-
-        combinedNovels = Array.from(novelMap.values());
-        memoryNovelsCache = combinedNovels;
       }
 
-      // 2. Chạy thuật toán tìm kiếm thông minh (không phân biệt hoa/thường, không cần dấu, tìm theo tên, tác giả, thể loại, văn án)
       const matched = searchNovelsSmart(combinedNovels, term);
 
       setResults(matched);
       setHasSearched(true);
     } catch (err: any) {
       console.warn('[SearchBar] Lỗi khi xử lý tìm kiếm:', err);
-      let msg = 'Đã xảy ra lỗi trong quá trình tìm kiếm. Vui lòng kiểm tra lại đường truyền mạng.';
+      let msg = 'Không thể tải danh sách truyện lúc này, vui lòng thử lại.';
       if (err?.message?.includes('Quota') || err?.message?.includes('RESOURCE_EXHAUSTED')) {
         msg = 'Hệ thống tìm kiếm đang tạm thời quá tải lưu lượng truy cập. Vui lòng thử lại sau ít phút.';
       } else if (err?.message) {
-        msg = `Lỗi tìm kiếm: ${err.message}`;
+        msg = err.message;
       }
       setError(msg);
     } finally {
@@ -319,7 +282,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
                 // TUYỆT ĐỐI KHÔNG gọi API Firebase mỗi khi người dùng gõ phím (onChange)
                 setKeyword(e.target.value);
               }}
-              placeholder="Tìm theo tên truyện, tác giả, thể loại, từ khóa..."
+              placeholder="Tìm theo tên truyện hoặc tác giả..."
               className="w-full pl-9 sm:pl-11 pr-8 sm:pr-10 py-2.5 sm:py-3 rounded-xl bg-white dark:bg-slate-900 border border-pink-200 dark:border-pink-900/80 text-xs sm:text-base text-slate-800 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-500 shadow-inner transition-all"
             />
 
@@ -397,12 +360,12 @@ export const SearchBar: React.FC<SearchBarProps> = ({ novels: initialNovels = []
           </div>
         )}
 
-        {/* THÔNG BÁO KHI KHÔNG TÌM THẤY TRUYỆN: "Không tìm thấy tác phẩm phù hợp" */}
+        {/* THÔNG BÁO KHI KHÔNG TÌM THẤY TRUYỆN: "Không tìm thấy kết quả" */}
         {hasSearched && (results?.length || 0) === 0 && !isLoading && !error && (
           <div className="mt-4 p-4 text-center rounded-xl bg-pink-50/60 dark:bg-pink-950/20 border border-dashed border-pink-200 dark:border-pink-900 text-xs sm:text-sm text-pink-700 dark:text-pink-300">
-            <span className="font-bold text-sm block">Không tìm thấy tác phẩm phù hợp</span>
+            <span className="font-bold text-sm block">Không tìm thấy kết quả</span>
             <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 block">
-              Không có truyện nào khớp với từ khóa {searchLabel}. Bạn có thể thử tìm theo tên tác giả, thể loại (ví dụ: Điền Văn, Cổ Đại, Đam Mỹ) hoặc các từ khóa nội dung khác.
+              Không có tác phẩm nào có tên truyện hoặc tác giả khớp với từ khóa {searchLabel}.
             </span>
           </div>
         )}

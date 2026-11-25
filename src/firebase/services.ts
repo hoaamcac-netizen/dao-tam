@@ -49,7 +49,7 @@ import {
   DonationRecord,
   SubmissionChapterDraft
 } from '../types';
-import { filterOutDummyChapters, formatXu } from '../utils/rulesAndVoices';
+import { filterOutDummyChapters, formatXu, getChapterAudioUrl, normalizeStoryId } from '../utils/rulesAndVoices';
 import {
   safeSetItem,
   safeGetItem,
@@ -61,25 +61,48 @@ import {
   saveNovelsToStorage,
   invalidateNovelsCache,
   clearChapterAudioCache,
+  CHAPTER_CACHE_PREFIX,
+  CHAPTER_CACHE_TS_PREFIX,
+  makeChapterCacheKey,
+  makeChapterCacheTsKey,
 } from '../utils/safeStorage';
 import { isGeneratedFallbackContent } from '../utils/chapterContentGenerator';
 import { invalidateGlobalBannerCache, type GlobalBannerConfig } from '../components/GlobalBanner';
 
+function extractChapterAudioFields(c: any): {
+  audioUrl?: string;
+  audioUrlMale?: string;
+  audioUrlFemale?: string;
+  mp3Url?: string;
+  maleAudioUrl?: string;
+  audio?: string;
+  femaleAudioUrl?: string;
+  mp3Female?: string;
+} {
+  if (!c || typeof c !== 'object') return {};
+  const cleanStr = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+  return {
+    audioUrl: cleanStr(c.audioUrl),
+    audioUrlMale: cleanStr(c.audioUrlMale),
+    audioUrlFemale: cleanStr(c.audioUrlFemale),
+    mp3Url: cleanStr(c.mp3Url),
+    maleAudioUrl: cleanStr(c.maleAudioUrl),
+    audio: cleanStr(c.audio),
+    femaleAudioUrl: cleanStr(c.femaleAudioUrl),
+    mp3Female: cleanStr(c.mp3Female),
+  };
+}
+
 function computeNovelAudioFlags(
-  chapters: Array<{ audioUrl?: string; audioUrlMale?: string; audioUrlFemale?: string }>,
+  chapters: Array<Record<string, any>>,
   existingData?: Partial<Novel> | null
 ): { hasMaleAudio: boolean; hasFemaleAudio: boolean; hasAudio: boolean } {
   let hasMaleAudio = Boolean(existingData?.hasMaleAudio);
   let hasFemaleAudio = Boolean(existingData?.hasFemaleAudio);
   if (Array.isArray(chapters) && chapters.length > 0) {
-    hasMaleAudio = chapters.some(
-      (c) =>
-        (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
-        (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
-    );
-    hasFemaleAudio = chapters.some(
-      (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
-    );
+    hasMaleAudio = chapters.some((c) => Boolean(getChapterAudioUrl(c as Chapter, 'male')));
+    hasFemaleAudio = chapters.some((c) => Boolean(getChapterAudioUrl(c as Chapter, 'female')));
   }
   return {
     hasMaleAudio,
@@ -2513,76 +2536,87 @@ export async function getLatestChapterNumberFromFirestore(novelId: string): Prom
  */
 export async function fetchChaptersForNovel(novelId: string): Promise<Chapter[]> {
   if (!novelId) return [];
+  const candidateNovelIds = Array.from(
+    new Set([novelId.trim(), normalizeStoryId(novelId)].filter(Boolean))
+  );
 
-  // 1. Kiểm tra mảng mục lục chapters trên root document 'novels/{novelId}' trước tiên (0ms, siêu nhẹ và luôn đồng bộ)
-  try {
-    const novelDoc = await getDoc(doc(db, 'novels', novelId));
-    if (novelDoc.exists()) {
-      const data = novelDoc.data();
-      if (Array.isArray(data.chapters) && (data.chapters?.length || 0) > 0) {
-        const cleaned = filterOutDummyChapters(data.chapters);
-        return (cleaned || []).map((c: any) => ({
-          ...c,
-          number: Number(c.number) || 0,
-          content: '', // Không giữ chuỗi văn bản khổng lồ trong mục lục
-        })).sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
-      }
-    }
-  } catch (e) {
-    console.warn(`Lỗi đọc root doc novels/${novelId}:`, e);
-  }
-
-  // 2. Nếu root doc chưa có mảng chapters (dữ liệu cũ), đọc từ subcollection 'novels/{novelId}/chapters'
-  try {
-    const novelChapsCol = collection(db, 'novels', novelId, 'chapters');
-    const snap1 = await getDocs(novelChapsCol);
-    if (!snap1.empty) {
-      const list: Chapter[] = [];
-      (snap1?.docs || []).forEach((d) => {
-        const data = d.data() as Chapter;
-        const num = Number(data.number) || 0;
-        if (num > 0) {
-          list.push({ 
-            ...data, 
-            id: d.id, 
-            number: num,
-            content: '', // Giữ mảng mục lục siêu nhẹ (<50KB), tránh đơ máy khi có hàng trăm chương
-          });
+  for (const targetNovelId of candidateNovelIds) {
+    // 1. Kiểm tra mảng mục lục chapters trên root document 'novels/{targetNovelId}'
+    try {
+      const novelDoc = await getDoc(doc(db, 'novels', targetNovelId));
+      if (novelDoc.exists()) {
+        const data = novelDoc.data();
+        if (Array.isArray(data.chapters) && (data.chapters?.length || 0) > 0) {
+          const cleaned = filterOutDummyChapters(data.chapters);
+          return (cleaned || [])
+            .map((c: any) => ({
+              ...c,
+              ...extractChapterAudioFields(c),
+              number: Number(c.number) || 0,
+              content: '', // Không giữ chuỗi văn bản khổng lồ trong mục lục
+            }))
+            .sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
         }
-      });
-      list.sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
-      return filterOutDummyChapters(list);
+      }
+    } catch (e) {
+      console.warn(`Lỗi đọc root doc novels/${targetNovelId}:`, e);
     }
-  } catch (e) {
-    console.warn(`Lỗi fetch chapters từ novels/${novelId}/chapters:`, e);
+
+    // 2. Nếu root doc chưa có mảng chapters, đọc từ subcollection 'novels/{targetNovelId}/chapters'
+    try {
+      const novelChapsCol = collection(db, 'novels', targetNovelId, 'chapters');
+      const snap1 = await getDocs(novelChapsCol);
+      if (!snap1.empty) {
+        const list: Chapter[] = [];
+        (snap1?.docs || []).forEach((d) => {
+          const data = d.data() as Chapter;
+          const num = Number(data.number) || 0;
+          if (num > 0) {
+            list.push({
+              ...data,
+              ...extractChapterAudioFields(data),
+              id: d.id,
+              number: num,
+              content: '',
+            });
+          }
+        });
+        list.sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
+        return filterOutDummyChapters(list);
+      }
+    } catch (e) {
+      console.warn(`Lỗi fetch chapters từ novels/${targetNovelId}/chapters:`, e);
+    }
+
+    try {
+      const subDoc = await getDoc(doc(db, 'novel_submissions', targetNovelId));
+      if (subDoc.exists()) {
+        const subData = subDoc.data();
+        if (Array.isArray(subData.chapters) && (subData.chapters?.length || 0) > 0) {
+          return (subData.chapters || []).map((c: any, idx: number) => ({
+            ...extractChapterAudioFields(c),
+            id: c.id || `chap-${targetNovelId}-${c.number || idx + 1}`,
+            number: c.number || idx + 1,
+            title: c.title || `Chương ${c.number || idx + 1}`,
+            slug: c.slug || `chuong-${c.number || idx + 1}`,
+            content: c.content || '',
+            wordCount: c.wordCount || (c.content ? (c.content.split(/\s+/)?.length || 0) : 0),
+            publishedDate: c.publishedDate || new Date().toISOString().split('T')[0],
+            isVip: !!c.isVip,
+            priceXu: c.priceXu || 0,
+          }));
+        }
+      }
+    } catch (e) {}
   }
 
-  try {
-    // 5. Kiểm tra novel_submissions nếu tác phẩm được đăng từ bản thảo
-    const subDoc = await getDoc(doc(db, 'novel_submissions', novelId));
-    if (subDoc.exists()) {
-      const subData = subDoc.data();
-      if (Array.isArray(subData.chapters) && (subData.chapters?.length || 0) > 0) {
-        return (subData.chapters || []).map((c: any, idx: number) => ({
-          id: c.id || `chap-${novelId}-${c.number || idx + 1}`,
-          number: c.number || idx + 1,
-          title: c.title || `Chương ${c.number || idx + 1}`,
-          slug: c.slug || `chuong-${c.number || idx + 1}`,
-          content: c.content || '',
-          wordCount: c.wordCount || (c.content ? (c.content.split(/\s+/)?.length || 0) : 0),
-          publishedDate: c.publishedDate || new Date().toISOString().split('T')[0],
-          isVip: !!c.isVip,
-          priceXu: c.priceXu || 0,
-        }));
-      }
-    }
-  } catch (e) {}
-
-  // 6. Chỉ kiểm tra cache localStorage khi thiết bị hoàn toàn ngoại tuyến (offline)
+  // Fallback cache localStorage khi thiết bị hoàn toàn ngoại tuyến (offline)
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     const cached = safeGetItem('dao_tam_novels');
     const list = safeJsonParse<Novel[]>(cached, []);
-    const target = (Array.isArray(list) ? list : []).find((n: Novel) => n.id === novelId);
+    const target = (Array.isArray(list) ? list : []).find(
+      (n: Novel) => candidateNovelIds.includes(n.id) || (n.slug && candidateNovelIds.includes(n.slug))
+    );
     if (target && Array.isArray(target.chapters) && (target.chapters?.length || 0) > 0) {
       return filterOutDummyChapters(target.chapters);
     }
@@ -2623,6 +2657,11 @@ export async function fetchFullChapterContent(
   audioUrl?: string;
   audioUrlMale?: string;
   audioUrlFemale?: string;
+  mp3Url?: string;
+  maleAudioUrl?: string;
+  audio?: string;
+  femaleAudioUrl?: string;
+  mp3Female?: string;
 } | null> {
   if (!novelId) return null;
 
@@ -2632,35 +2671,32 @@ export async function fetchFullChapterContent(
     audioUrl?: string;
     audioUrlMale?: string;
     audioUrlFemale?: string;
+    mp3Url?: string;
+    maleAudioUrl?: string;
+    audio?: string;
+    femaleAudioUrl?: string;
+    mp3Female?: string;
     cachedAt?: number;
   }
 
-  const saveChapterCache = (payload: {
-    content: string;
-    wordCount?: number;
-    audioUrl?: string;
-    audioUrlMale?: string;
-    audioUrlFemale?: string;
-  }) => {
+  const saveChapterCache = (payload: CachedChapterPayload) => {
     const nowTs = Date.now();
     const record: CachedChapterPayload = {
       content: payload.content,
       wordCount:
         payload.wordCount || payload.content.split(/\s+/).filter(Boolean)?.length || 0,
-      audioUrl: payload.audioUrl || undefined,
-      audioUrlMale: payload.audioUrlMale || undefined,
-      audioUrlFemale: payload.audioUrlFemale || undefined,
+      ...extractChapterAudioFields(payload),
       cachedAt: nowTs,
     };
     const serialized = JSON.stringify(record);
     const tsStr = String(nowTs);
     if (chapterNumber !== undefined) {
-      safeSetItem(`chapter_full_${novelId}_${chapterNumber}`, serialized);
-      safeSetItem(`chapter_full_ts_${novelId}_${chapterNumber}`, tsStr);
+      safeSetItem(makeChapterCacheKey(novelId, chapterNumber), serialized);
+      safeSetItem(makeChapterCacheTsKey(novelId, chapterNumber), tsStr);
     }
     if (chapterId) {
-      safeSetItem(`chapter_full_${novelId}_${chapterId}`, serialized);
-      safeSetItem(`chapter_full_ts_${novelId}_${chapterId}`, tsStr);
+      safeSetItem(makeChapterCacheKey(novelId, chapterId), serialized);
+      safeSetItem(makeChapterCacheTsKey(novelId, chapterId), tsStr);
     }
     trimChapterCacheEntries();
   };
@@ -2688,38 +2724,27 @@ export async function fetchFullChapterContent(
           content: parsed.content,
           wordCount:
             parsed.wordCount || parsed.content.split(/\s+/).filter(Boolean)?.length || 0,
-          audioUrl: parsed.audioUrl || undefined,
-          audioUrlMale: parsed.audioUrlMale || undefined,
-          audioUrlFemale: parsed.audioUrlFemale || undefined,
+          ...extractChapterAudioFields(parsed),
         };
       }
       return null;
     }
 
-    if (!isGeneratedFallbackContent(raw)) {
-      if (expectedUpdatedAt && storedTs > 0 && expectedUpdatedAt > storedTs + 2000) {
-        return null;
-      }
-      return {
-        content: raw,
-        wordCount: raw.split(/\s+/).filter(Boolean)?.length || 0,
-      };
-    }
     return null;
   };
 
-  // 1. Kiểm tra cache localStorage lưu trữ cục bộ (tốn 0 Reads khi tải lại / đọc lại)
+  // 1. Kiểm tra cache localStorage _v2 (tốn 0 Reads khi tải lại / đọc lại)
   if (chapterNumber !== undefined) {
     const cachedByNum = readChapterCacheKey(
-      `chapter_full_${novelId}_${chapterNumber}`,
-      `chapter_full_ts_${novelId}_${chapterNumber}`
+      makeChapterCacheKey(novelId, chapterNumber),
+      makeChapterCacheTsKey(novelId, chapterNumber)
     );
     if (cachedByNum) return cachedByNum;
   }
   if (chapterId) {
     const cachedById = readChapterCacheKey(
-      `chapter_full_${novelId}_${chapterId}`,
-      `chapter_full_ts_${novelId}_${chapterId}`
+      makeChapterCacheKey(novelId, chapterId),
+      makeChapterCacheTsKey(novelId, chapterId)
     );
     if (cachedById) return cachedById;
   }
@@ -2736,21 +2761,24 @@ export async function fetchFullChapterContent(
     candidateIds.push(chapterId);
   }
 
+  let audioOnlyFallback: ReturnType<typeof extractChapterAudioFields> | null = null;
+
   for (const cId of candidateIds) {
     try {
       const snap = await getDoc(doc(db, 'novels', novelId, 'chapters', cId));
       if (snap.exists()) {
         const data = snap.data();
+        const audioFields = extractChapterAudioFields(data);
         if (data.content && (data.content.trim()?.length || 0) > 0) {
           const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: data.audioUrl || undefined,
-            audioUrlMale: data.audioUrlMale || undefined,
-            audioUrlFemale: data.audioUrlFemale || undefined,
+            ...audioFields,
           };
           saveChapterCache(result);
           return result;
+        } else if (!audioOnlyFallback && (getChapterAudioUrl(data as Chapter, 'male') || getChapterAudioUrl(data as Chapter, 'female'))) {
+          audioOnlyFallback = audioFields;
         }
       }
     } catch {}
@@ -2759,16 +2787,17 @@ export async function fetchFullChapterContent(
       const snap = await getDoc(doc(db, 'stories', novelId, 'chapters', cId));
       if (snap.exists()) {
         const data = snap.data();
+        const audioFields = extractChapterAudioFields(data);
         if (data.content && (data.content.trim()?.length || 0) > 0) {
           const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: data.audioUrl || undefined,
-            audioUrlMale: data.audioUrlMale || undefined,
-            audioUrlFemale: data.audioUrlFemale || undefined,
+            ...audioFields,
           };
           saveChapterCache(result);
           return result;
+        } else if (!audioOnlyFallback && (getChapterAudioUrl(data as Chapter, 'male') || getChapterAudioUrl(data as Chapter, 'female'))) {
+          audioOnlyFallback = audioFields;
         }
       }
     } catch {}
@@ -2781,31 +2810,33 @@ export async function fetchFullChapterContent(
       const snapNum = await getDocs(query(chaptersCol, where('number', '==', Number(chapterNumber))));
       if (!snapNum.empty) {
         const data = snapNum.docs[0].data();
+        const audioFields = extractChapterAudioFields(data);
         if (data.content && (data.content.trim()?.length || 0) > 0) {
           const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: data.audioUrl || undefined,
-            audioUrlMale: data.audioUrlMale || undefined,
-            audioUrlFemale: data.audioUrlFemale || undefined,
+            ...audioFields,
           };
           saveChapterCache(result);
           return result;
+        } else if (!audioOnlyFallback && (getChapterAudioUrl(data as Chapter, 'male') || getChapterAudioUrl(data as Chapter, 'female'))) {
+          audioOnlyFallback = audioFields;
         }
       }
       const snapStr = await getDocs(query(chaptersCol, where('number', '==', String(chapterNumber))));
       if (!snapStr.empty) {
         const data = snapStr.docs[0].data();
+        const audioFields = extractChapterAudioFields(data);
         if (data.content && (data.content.trim()?.length || 0) > 0) {
           const result = {
             content: data.content,
             wordCount: data.wordCount || data.content.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: data.audioUrl || undefined,
-            audioUrlMale: data.audioUrlMale || undefined,
-            audioUrlFemale: data.audioUrlFemale || undefined,
+            ...audioFields,
           };
           saveChapterCache(result);
           return result;
+        } else if (!audioOnlyFallback && (getChapterAudioUrl(data as Chapter, 'male') || getChapterAudioUrl(data as Chapter, 'female'))) {
+          audioOnlyFallback = audioFields;
         }
       }
     }
@@ -2827,12 +2858,12 @@ export async function fetchFullChapterContent(
           const result = {
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: matched.audioUrl || undefined,
-            audioUrlMale: matched.audioUrlMale || undefined,
-            audioUrlFemale: matched.audioUrlFemale || undefined,
+            ...extractChapterAudioFields(matched),
           };
           saveChapterCache(result);
           return result;
+        } else if (matched && !audioOnlyFallback && (getChapterAudioUrl(matched as Chapter, 'male') || getChapterAudioUrl(matched as Chapter, 'female'))) {
+          audioOnlyFallback = extractChapterAudioFields(matched);
         }
       }
     }
@@ -2853,9 +2884,7 @@ export async function fetchFullChapterContent(
           const result = {
             content: text,
             wordCount: matched.wordCount || text.split(/\s+/).filter(Boolean)?.length || 0,
-            audioUrl: matched.audioUrl || undefined,
-            audioUrlMale: matched.audioUrlMale || undefined,
-            audioUrlFemale: matched.audioUrlFemale || undefined,
+            ...extractChapterAudioFields(matched),
           };
           saveChapterCache(result);
           return result;
@@ -2863,6 +2892,10 @@ export async function fetchFullChapterContent(
       }
     }
   } catch {}
+
+  if (audioOnlyFallback) {
+    return { content: '', wordCount: 0, ...audioOnlyFallback };
+  }
 
   return { content: '', wordCount: 0 };
 }
@@ -2875,7 +2908,6 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
   const path = 'novels';
   try {
     const novelsCol = collection(db, path);
-    // Tải toàn bộ collection novels không dùng orderBy/limit để Firestore không bỏ sót truyện cũ thiếu trường thời gian
     const snapshot = await getDocs(novelsCol);
 
     if (snapshot.empty) {
@@ -2885,8 +2917,7 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
     const novels: Novel[] = [];
     for (const docSnap of snapshot?.docs || []) {
       const novelData = (docSnap.data() || {}) as Novel;
-      
-      // Chỉ giữ mục lục chương siêu nhẹ (kèm audioUrl nếu có), tuyệt đối KHÔNG chứa content text dài
+
       const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
       const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
         id: c.id || `c-${docSnap.id}-${c.number}`,
@@ -2898,9 +2929,7 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         priceXu: Number(c.priceXu || 0),
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
-        audioUrl: c.audioUrl || undefined,
-        audioUrlMale: c.audioUrlMale || undefined,
-        audioUrlFemale: c.audioUrlFemale || undefined,
+        ...extractChapterAudioFields(c),
         content: '', // KHÔNG BAO GIỜ tải text nội dung trong danh sách truyện
       }));
 
@@ -2952,8 +2981,8 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
     });
     return novels;
   } catch (error) {
-    console.warn('Không thể tải truyện từ Firestore, giữ nguyên danh sách hiện tại:', error);
-    return [];
+    console.warn('Không thể tải danh sách truyện từ máy chủ:', error);
+    throw new Error('Không thể tải danh sách truyện lúc này, vui lòng thử lại');
   }
 }
 
@@ -2968,7 +2997,6 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
 export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | null> {
   if (!slugOrId || typeof slugOrId !== 'string') return null;
 
-  // 1. BẮT BUỘC giải mã URL
   let decodedSlug = '';
   try {
     decodedSlug = decodeURIComponent(slugOrId).trim();
@@ -2977,9 +3005,20 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
   }
   if (!decodedSlug) return null;
 
+  const strippedSlug = normalizeStoryId(decodedSlug);
+  const candidateTargets = Array.from(
+    new Set(
+      [
+        decodedSlug,
+        strippedSlug,
+        decodedSlug.toLowerCase(),
+        strippedSlug.toLowerCase(),
+      ].filter(Boolean)
+    )
+  );
+
   const novelsCol = collection(db, 'novels');
 
-  // Helper để map doc snapshot sang object Novel nhẹ
   const mapDocToNovel = (docSnap: any): Novel => {
     const novelData = (docSnap.data() || {}) as Novel;
     const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
@@ -2993,9 +3032,7 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       priceXu: Number(c.priceXu || 0),
       wordCount: Number(c.wordCount || 0),
       isHidden: Boolean(c.isHidden),
-      audioUrl: c.audioUrl || undefined,
-      audioUrlMale: c.audioUrlMale || undefined,
-      audioUrlFemale: c.audioUrlFemale || undefined,
+      ...extractChapterAudioFields(c),
       content: '',
     }));
 
@@ -3042,50 +3079,34 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
   };
 
   try {
-    // Bước 1: Query Firestore theo trường 'slug'
-    const qSlug = query(novelsCol, where('slug', '==', decodedSlug), limit(1));
-    const snapSlug = await getDocs(qSlug);
-    if (!snapSlug.empty) {
-      return mapDocToNovel(snapSlug.docs[0]);
-    }
-
-    // Nếu decodedSlug có viết hoa / thường khác biệt, thử với slug chữ thường
-    const lowerSlug = decodedSlug.toLowerCase();
-    if (lowerSlug !== decodedSlug) {
-      const qLowerSlug = query(novelsCol, where('slug', '==', lowerSlug), limit(1));
-      const snapLower = await getDocs(qLowerSlug);
-      if (!snapLower.empty) {
-        return mapDocToNovel(snapLower.docs[0]);
+    for (const candidate of candidateTargets) {
+      const qSlug = query(novelsCol, where('slug', '==', candidate), limit(1));
+      const snapSlug = await getDocs(qSlug);
+      if (!snapSlug.empty) {
+        return mapDocToNovel(snapSlug.docs[0]);
       }
     }
 
-    // Bước 2: Fallback query theo ID document
-    const docRef = doc(db, 'novels', decodedSlug);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      return mapDocToNovel(docSnap);
-    }
-
-    // Fallback: Nếu ID được lưu chữ thường
-    if (lowerSlug !== decodedSlug) {
-      const lowerDocRef = doc(db, 'novels', lowerSlug);
-      const lowerDocSnap = await getDoc(lowerDocRef);
-      if (lowerDocSnap.exists()) {
-        return mapDocToNovel(lowerDocSnap);
+    for (const candidate of candidateTargets) {
+      const docRef = doc(db, 'novels', candidate);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        return mapDocToNovel(docSnap);
       }
     }
 
-    // Bước 3: Fallback query theo stories collection
     try {
       const storiesCol = collection(db, 'stories');
-      const qStory = query(storiesCol, where('slug', '==', decodedSlug), limit(1));
-      const snapStory = await getDocs(qStory);
-      if (!snapStory.empty) {
-        return mapDocToNovel(snapStory.docs[0]);
-      }
-      const storyDoc = await getDoc(doc(db, 'stories', decodedSlug));
-      if (storyDoc.exists()) {
-        return mapDocToNovel(storyDoc);
+      for (const candidate of candidateTargets) {
+        const qStory = query(storiesCol, where('slug', '==', candidate), limit(1));
+        const snapStory = await getDocs(qStory);
+        if (!snapStory.empty) {
+          return mapDocToNovel(snapStory.docs[0]);
+        }
+        const storyDoc = await getDoc(doc(db, 'stories', candidate));
+        if (storyDoc.exists()) {
+          return mapDocToNovel(storyDoc);
+        }
       }
     } catch {}
 
@@ -3125,9 +3146,7 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         priceXu: Number(c.priceXu || 0),
         wordCount: Number(c.wordCount || 0),
         isHidden: Boolean(c.isHidden),
-        audioUrl: c.audioUrl || undefined,
-        audioUrlMale: c.audioUrlMale || undefined,
-        audioUrlFemale: c.audioUrlFemale || undefined,
+        ...extractChapterAudioFields(c),
         content: '',
       }));
 
@@ -3460,10 +3479,8 @@ export function stripChapterContent(chapter: Chapter): Chapter {
     priceXu: chapter.priceXu ? Number(chapter.priceXu) : 0,
     wordCount: chapter.wordCount || 0,
     isHidden: Boolean(chapter.isHidden),
-    content: '', // Không chứa nội dung chữ trên root doc
-    audioUrl: chapter.audioUrl || undefined,
-    audioUrlMale: chapter.audioUrlMale || undefined,
-    audioUrlFemale: chapter.audioUrlFemale || undefined,
+    content: '',
+    ...extractChapterAudioFields(chapter),
   };
 }
 
@@ -3511,9 +3528,18 @@ async function commitChaptersInSafeBatches(
       const chRef = doc(db, 'novels', novelId, 'chapters', chNumId);
       batch.set(chRef, docData, { merge: true });
 
-      // Cache nội dung vào localStorage để độc giả đọc lại tức thì không cần tốn lượt đọc Firestore
+      // Cache nội dung vào localStorage v2 để độc giả đọc lại tức thì không cần tốn lượt đọc Firestore
       if (text) {
-        safeSetItem(`chapter_full_${novelId}_${ch.number}`, text);
+        safeSetItem(
+          makeChapterCacheKey(novelId, ch.number),
+          JSON.stringify({
+            content: text,
+            wordCount: (text.split(/\s+/).filter(Boolean)?.length || 0) || ch.wordCount || 0,
+            ...extractChapterAudioFields(ch),
+            cachedAt: nowTs,
+          })
+        );
+        safeSetItem(makeChapterCacheTsKey(novelId, ch.number), String(nowTs));
       }
     });
 
@@ -3565,9 +3591,13 @@ async function pruneRemovedSubcollectionChapters(
       const batch = writeBatch(db);
       toDelete.slice(i, i + FIRESTORE_BATCH_LIMIT).forEach((d) => {
         batch.delete(d.ref);
+        safeRemoveItem(makeChapterCacheKey(novelId, d.id));
+        safeRemoveItem(makeChapterCacheTsKey(novelId, d.id));
         safeRemoveItem(`chapter_full_${novelId}_${d.id}`);
         const num = d.data()?.number;
         if (num !== undefined) {
+          safeRemoveItem(makeChapterCacheKey(novelId, num));
+          safeRemoveItem(makeChapterCacheTsKey(novelId, num));
           safeRemoveItem(`chapter_full_${novelId}_${num}`);
         }
       });
@@ -3716,9 +3746,7 @@ export async function saveNovelWithInitialChaptersBatch(
       publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
       isVip: !!ch.isVip,
       priceXu: ch.priceXu || 0,
-      audioUrl: ch.audioUrl || undefined,
-      audioUrlMale: ch.audioUrlMale || undefined,
-      audioUrlFemale: ch.audioUrlFemale || undefined,
+      ...extractChapterAudioFields(ch),
       content: typeof ch.content === 'string' ? ch.content : '',
       updatedAt: nowTs,
     });
@@ -3739,8 +3767,16 @@ export async function saveNovelWithInitialChaptersBatch(
   // Optimistic UI cache vào bộ nhớ máy để đọc được ngay tức khắc
   cleanChapters.forEach((ch) => {
     if (ch.content) {
-      safeSetItem(`chapter_full_${novel.id}_${ch.number}`, ch.content);
-      safeSetItem(`chapter_full_${novel.id}_${ch.id}`, ch.content);
+      const payload = JSON.stringify({
+        content: ch.content,
+        wordCount: ch.wordCount || 0,
+        ...extractChapterAudioFields(ch),
+        cachedAt: nowTs,
+      });
+      safeSetItem(makeChapterCacheKey(novel.id, ch.number), payload);
+      safeSetItem(makeChapterCacheTsKey(novel.id, ch.number), String(nowTs));
+      safeSetItem(makeChapterCacheKey(novel.id, ch.id), payload);
+      safeSetItem(makeChapterCacheTsKey(novel.id, ch.id), String(nowTs));
     }
   });
 }
@@ -3794,10 +3830,19 @@ export async function saveBatchChaptersToFirestore(
     chapters: mergedTOC,
   });
 
-  // 1. OPTIMISTIC UI: Lưu cache các chương vào localStorage tức thì để đọc được ngay mà không cần chờ mạng
+  // 1. OPTIMISTIC UI: Lưu cache các chương vào localStorage v2 tức thì
   newChapters.forEach((ch) => {
     if (ch.content) {
-      safeSetItem(`chapter_full_${updatedNovel.id}_${ch.number}`, ch.content);
+      safeSetItem(
+        makeChapterCacheKey(updatedNovel.id, ch.number),
+        JSON.stringify({
+          content: ch.content,
+          wordCount: ch.wordCount || 0,
+          ...extractChapterAudioFields(ch),
+          cachedAt: nowTs,
+        })
+      );
+      safeSetItem(makeChapterCacheTsKey(updatedNovel.id, ch.number), String(nowTs));
     }
   });
 
@@ -3898,10 +3943,14 @@ export async function deleteBatchChaptersFromFirestore(
 
   // 3. Xóa cache localStorage tức thì
   (chapterNumbers || []).forEach((num) => {
+    safeRemoveItem(makeChapterCacheKey(novelId, num));
+    safeRemoveItem(makeChapterCacheTsKey(novelId, num));
     safeRemoveItem(`chapter_full_${novelId}_${num}`);
     safeRemoveItem(`chapter_full_ts_${novelId}_${num}`);
   });
   (chapterIds || []).forEach((id) => {
+    safeRemoveItem(makeChapterCacheKey(novelId, id));
+    safeRemoveItem(makeChapterCacheTsKey(novelId, id));
     safeRemoveItem(`chapter_full_${novelId}_${id}`);
     safeRemoveItem(`chapter_full_ts_${novelId}_${id}`);
   });
@@ -4320,26 +4369,13 @@ export async function addSingleChapterToFirestore(
 /**
  * Nạp dữ liệu mẫu ban đầu vào Firestore nếu database đang trống.
  */
-export async function seedNovelsIfEmpty(sampleNovels: Novel[]): Promise<Novel[]> {
-  try {
-    const novelsCol = collection(db, 'novels');
-    const snap = await withTimeout(getDocs(novelsCol), 5000).catch(() => null);
-    if (snap && snap.empty && sampleNovels && (sampleNovels?.length || 0) > 0) {
-      console.log('Database chưa có truyện, tự động nạp các tác phẩm mẫu vào Firestore...');
-      for (const novel of sampleNovels) {
-        await saveNovelToFirestore(novel);
-      }
-      return sampleNovels;
-    }
-  } catch (error) {
-    console.warn('Seed novels error:', error);
-  }
+export async function seedNovelsIfEmpty(_sampleNovels: Novel[]): Promise<Novel[]> {
   return [];
 }
 
 /**
  * Xóa vĩnh viễn truyện khỏi Firestore siêu tốc:
- * - Xóa ngay root document (novels, stories, submissions) để truyện biến mất trong 0ms (Optimistic UI)
+ * - Xóa ngay root document (novels, submissions) để truyện biến mất trong 0ms (Optimistic UI)
  * - Dọn dẹp subcollection chapters bằng writeBatch chunking trong background không chặn UI
  */
 export async function deleteNovelFromFirestore(
@@ -4377,7 +4413,13 @@ export async function deleteNovelFromFirestore(
       const keysToRemove: string[] = [];
       for (let i = 0; i < (window.localStorage?.length || 0); i++) {
         const k = window.localStorage.key(i);
-        if (k && (k.startsWith(`chapter_full_${novelId}`) || k.includes(novelId))) {
+        if (
+          k &&
+          (k.startsWith(`${CHAPTER_CACHE_PREFIX}${novelId}`) ||
+            k.startsWith(`${CHAPTER_CACHE_TS_PREFIX}${novelId}`) ||
+            k.startsWith(`chapter_full_${novelId}`) ||
+            k.includes(novelId))
+        ) {
           keysToRemove.push(k);
         }
       }
@@ -6539,32 +6581,46 @@ export async function deleteNovelCommentFromFirestore(commentId: string): Promis
 // Set theo dõi các bộ truyện đã tính view trong phiên làm việc hiện tại
 const viewedNovelsInSession = new Set<string>();
 
+const VIEW_COOLDOWN_24H_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Tăng lượt view thật cho truyện (Throttled theo Session để tiết kiệm 95% quota ghi)
- * Mỗi độc giả trong 1 phiên chỉ kích hoạt tăng view 1 lần cho 1 truyện
+ * Tăng lượt view thật cho truyện (Tối đa 1 lần / 24 giờ / bộ truyện / thiết bị)
  */
 export async function incrementNovelRealViewsInFirestore(novelId: string): Promise<void> {
-  if (!novelId) return;
+  const canonicalId = normalizeStoryId(novelId) || String(novelId || '').trim();
+  if (!canonicalId) return;
 
-  const sessionKey = `daotam_viewed_${novelId}`;
+  if (viewedNovelsInSession.has(canonicalId)) return;
+
+  const storageKey = `daotam_viewed_24h_${canonicalId}`;
+  const sessionKey = `daotam_viewed_${canonicalId}`;
   if (safeSessionGetItem(sessionKey)) {
     return;
   }
 
-  if (viewedNovelsInSession.has(novelId)) return;
-  viewedNovelsInSession.add(novelId);
+  const lastViewedRaw = safeGetItem(storageKey);
+  if (lastViewedRaw) {
+    const lastTs = Number(lastViewedRaw);
+    if (Number.isFinite(lastTs) && Date.now() - lastTs < VIEW_COOLDOWN_24H_MS) {
+      viewedNovelsInSession.add(canonicalId);
+      safeSessionSetItem(sessionKey, '1');
+      return;
+    }
+  }
 
+  viewedNovelsInSession.add(canonicalId);
   safeSessionSetItem(sessionKey, '1');
+  safeSetItem(storageKey, String(Date.now()));
 
   try {
-    const novelRef = doc(db, 'novels', novelId);
+    const novelRef = doc(db, 'novels', canonicalId);
     await updateDoc(novelRef, {
       views: increment(1),
       dailyViews: increment(1),
     });
   } catch (err: any) {
     if (err?.message?.includes('quota') || err?.message?.includes('RESOURCE_EXHAUSTED')) {
-      console.warn('Spark Quota limit reached on view increment.');
+      console.warn('Quota limit reached on view increment.');
     }
   }
 }
@@ -6621,12 +6677,12 @@ export function readLocalSavedNovelsFromStorage(): LocalSavedNovelRecord[] {
 
     for (const item of parsed) {
       if (typeof item === 'string' || typeof item === 'number') {
-        const id = String(item).trim();
+        const id = normalizeStoryId(String(item));
         if (id && !seen.has(id)) {
           seen.set(id, { storyId: id });
         }
       } else if (item && typeof item === 'object') {
-        const id = String(item.storyId || item.novelId || item.id || '').trim();
+        const id = normalizeStoryId(String(item.storyId || item.novelId || item.id || ''));
         if (id && !seen.has(id)) {
           seen.set(id, {
             storyId: id,
@@ -6649,9 +6705,14 @@ export function readLocalSavedNovelsFromStorage(): LocalSavedNovelRecord[] {
  */
 export function saveLocalSavedStoryIds(storyIds: string[]): void {
   const uniqueIds = Array.from(
-    new Set((Array.isArray(storyIds) ? storyIds : []).map((id) => String(id || '').trim()).filter(Boolean))
+    new Set(
+      (Array.isArray(storyIds) ? storyIds : [])
+        .map((id) => normalizeStoryId(String(id || '')))
+        .filter(Boolean)
+    )
   );
   safeSetItem(LOCAL_SAVED_NOVELS_KEY, JSON.stringify(uniqueIds));
+  safeRemoveItem(LOCAL_BOOKMARKS_LEGACY_KEY);
 }
 
 /**
@@ -6669,12 +6730,22 @@ export function aggregateUserPurchasedNovelsFromCache(
   const registerNovelToLookup = (n: Novel) => {
     if (!n) return;
     if (n.id) {
+      const normId = normalizeStoryId(n.id);
       existingNovelsMap.set(n.id, n);
       existingNovelsLowerMap.set(String(n.id).trim().toLowerCase(), n);
+      if (normId) {
+        existingNovelsMap.set(normId, n);
+        existingNovelsLowerMap.set(normId.toLowerCase(), n);
+      }
     }
     if (n.slug) {
+      const normSlug = normalizeStoryId(n.slug);
       existingNovelsMap.set(n.slug, n);
       existingNovelsLowerMap.set(String(n.slug).trim().toLowerCase(), n);
+      if (normSlug) {
+        existingNovelsMap.set(normSlug, n);
+        existingNovelsLowerMap.set(normSlug.toLowerCase(), n);
+      }
     }
   };
 
@@ -6691,7 +6762,12 @@ export function aggregateUserPurchasedNovelsFromCache(
   const findCachedNovel = (key: string): Novel | undefined => {
     const clean = String(key || '').trim();
     if (!clean) return undefined;
-    return existingNovelsMap.get(clean) || existingNovelsLowerMap.get(clean.toLowerCase());
+    const stripped = normalizeStoryId(clean);
+    return (
+      existingNovelsMap.get(clean) ||
+      existingNovelsLowerMap.get(clean.toLowerCase()) ||
+      (stripped ? existingNovelsMap.get(stripped) || existingNovelsLowerMap.get(stripped.toLowerCase()) : undefined)
+    );
   };
 
   const rawPurchases: any[] = Array.isArray(user.purchases) ? [...user.purchases] : [];
@@ -6725,10 +6801,10 @@ export function aggregateUserPurchasedNovelsFromCache(
   >();
 
   const toCanonicalStoryId = (rawId: string): string => {
-    const clean = String(rawId || '').trim();
-    if (!clean) return '';
-    const matched = findCachedNovel(clean);
-    return matched?.id || clean;
+    const stripped = normalizeStoryId(rawId);
+    if (!stripped) return '';
+    const matched = findCachedNovel(stripped) || findCachedNovel(rawId);
+    return matched?.id || stripped;
   };
 
   rawPurchases.forEach((p) => {
@@ -6928,13 +7004,19 @@ export function aggregateUserPurchasedNovelsFromCache(
       ? 'full_book'
       : 'single_chapters';
 
+    const resolvedTitle = (
+      novel?.title ||
+      storyPurchases[0]?.novelTitle ||
+      storyMeta?.title ||
+      ''
+    ).trim();
+    if (!resolvedTitle || /^Bộ truyện #/i.test(resolvedTitle)) {
+      continue;
+    }
+
     summaries.push({
       storyId,
-      storyTitle:
-        novel?.title ||
-        storyPurchases[0]?.novelTitle ||
-        storyMeta?.title ||
-        `Bộ truyện #${storyId}`,
+      storyTitle: resolvedTitle,
       storyAuthor:
         novel?.author ||
         storyPurchases[0]?.authorName ||
@@ -6945,7 +7027,7 @@ export function aggregateUserPurchasedNovelsFromCache(
         novel?.coverImage ||
         storyMeta?.coverImage ||
         'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=300&q=80',
-      storySlug: novel?.slug || storyMeta?.slug,
+      storySlug: novel?.slug || storyMeta?.slug || normalizeStoryId(storyId),
       storyMainCategory: novel?.mainCategory,
       totalChapters,
       freeChaptersCount,

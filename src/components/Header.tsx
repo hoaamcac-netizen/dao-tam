@@ -31,6 +31,7 @@ import { db, auth, checkIsAdmin } from '../firebase/config';
 import { PWAHeaderInstallButton } from './PWAInstallPrompt';
 import { FilterMenu } from './FilterMenu';
 import type { CategoryFilterId } from '../data/genreConfig';
+import { removeVietnameseTones } from '../utils/rulesAndVoices';
 
 interface HeaderProps {
   currentTab: 'home' | 'completed' | 'latest';
@@ -217,20 +218,26 @@ export const Header: React.FC<HeaderProps> = ({
     : pendingCount;
   const alertBadgeLabel = totalAlerts > 99 ? '99+' : String(totalAlerts);
 
-  // Instant live search matches
+  // Instant live search matches (strictly title and author, accent-insensitive)
   const liveSearchResults = React.useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
+    const noAccentsQ = removeVietnameseTones(q);
     if (!q) return [];
+    const qWords = noAccentsQ.split(/\s+/).filter(Boolean);
     const safeNovels = Array.isArray(allNovels) ? allNovels : [];
     return safeNovels
-      .filter((n) => !n.isHidden && n.publishStatus !== 'hidden')
+      .filter((n) => n && !n.isHidden && n.publishStatus !== 'hidden')
       .filter((novel) => {
-        return (
-          (novel.title || '').toLowerCase().includes(q) ||
-          (novel.author || '').toLowerCase().includes(q) ||
-          (novel.editor && novel.editor.toLowerCase().includes(q)) ||
-          (novel.categories || []).some((c) => String(c || '').toLowerCase().includes(q))
-        );
+        const titleRaw = (novel.title || '').toLowerCase();
+        const titleNoAccents = removeVietnameseTones(titleRaw);
+        const authorRaw = (novel.author || '').toLowerCase();
+        const authorNoAccents = removeVietnameseTones(authorRaw);
+
+        if (titleRaw.includes(q) || titleNoAccents.includes(noAccentsQ)) return true;
+        if (authorRaw.includes(q) || authorNoAccents.includes(noAccentsQ)) return true;
+        if (qWords.length > 0 && qWords.every((w) => titleNoAccents.includes(w))) return true;
+        if (qWords.length > 0 && qWords.every((w) => authorNoAccents.includes(w))) return true;
+        return false;
       })
       .slice(0, 6);
   }, [searchQuery, allNovels]);
@@ -913,7 +920,7 @@ export const Header: React.FC<HeaderProps> = ({
               autoFocus
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm tên truyện, tác giả, thể loại..."
+              placeholder="Tìm tên truyện, tác giả..."
               className="w-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-xl py-2 pl-3.5 pr-16 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-pink-500 shadow-xs"
             />
             {searchQuery.trim() && (
@@ -978,7 +985,7 @@ export const Header: React.FC<HeaderProps> = ({
                 </>
               ) : (
                 <div className="p-4 text-center text-xs text-slate-500">
-                  Không tìm thấy truyện nào. Bấm Enter để tìm kiếm.
+                  Không tìm thấy kết quả. Bấm Enter để tìm kiếm.
                 </div>
               )}
             </div>

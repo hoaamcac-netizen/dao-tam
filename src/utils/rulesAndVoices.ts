@@ -174,16 +174,66 @@ export interface NovelAudioVoiceAvailability {
   availableVoiceIds: string[];
 }
 
-function isValidVoiceMp3Url(raw?: string | null): boolean {
+/**
+ * Chuẩn hóa ID truyện: cắt bỏ tiền tố thừa `story-` (vd: story-novel-123 -> novel-123)
+ */
+export function normalizeStoryId(rawId?: string | null): string {
+  const trimmed = String(rawId || '').trim();
+  if (!trimmed) return '';
+  return trimmed.replace(/^(story-)+/i, '');
+}
+
+function isValidVoiceMp3Url(raw?: string | null): string {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  if (!trimmed) return false;
-  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('blob:');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('blob:')) {
+    return trimmed;
+  }
+  return '';
+}
+
+/**
+ * Helper dùng chung DUY NHẤT cho cả Admin & Trang Đọc để lấy link MP3 theo giọng.
+ * - Nam Minh: audioUrlMale -> audioUrl -> mp3Url -> maleAudioUrl -> audio
+ * - Hằng Nga: audioUrlFemale -> femaleAudioUrl -> mp3Female
+ */
+export function getChapterAudioUrl(
+  chapter?: Partial<Chapter> | null,
+  voice?: string | null
+): string {
+  if (!chapter) return '';
+  const rawVoice = String(voice || '').trim();
+  if (rawVoice && isDeviceFallbackVoice(rawVoice)) {
+    return '';
+  }
+
+  const isFemale =
+    rawVoice.toLowerCase() === 'female' ||
+    normalizeEdgeVoiceId(rawVoice || undefined) === 'vi-VN-HoaiMyNeural';
+
+  if (isFemale) {
+    return (
+      isValidVoiceMp3Url(chapter.audioUrlFemale) ||
+      isValidVoiceMp3Url(chapter.femaleAudioUrl) ||
+      isValidVoiceMp3Url(chapter.mp3Female) ||
+      ''
+    );
+  }
+
+  return (
+    isValidVoiceMp3Url(chapter.audioUrlMale) ||
+    isValidVoiceMp3Url(chapter.audioUrl) ||
+    isValidVoiceMp3Url(chapter.mp3Url) ||
+    isValidVoiceMp3Url(chapter.maleAudioUrl) ||
+    isValidVoiceMp3Url(chapter.audio) ||
+    ''
+  );
 }
 
 /**
  * Kiểm tra xem bộ truyện (hoặc chương hiện tại) đã có link MP3 cho giọng nào.
  * Giọng nào chưa có bất kỳ link MP3 nào sẽ bị ẩn khỏi menu chọn giọng của người đọc.
- * Giọng Máy Google luôn khả dụng.
+ * Giọng Máy luôn khả dụng.
  */
 export function getNovelVoiceAvailability(
   novel?: Novel | null,
@@ -201,10 +251,10 @@ export function getNovelVoiceAvailability(
 
     for (const ch of chaptersToScan) {
       if (!ch) continue;
-      if (!hasMaleMp3 && (isValidVoiceMp3Url(ch.audioUrlMale) || isValidVoiceMp3Url(ch.audioUrl))) {
+      if (!hasMaleMp3 && getChapterAudioUrl(ch, 'male')) {
         hasMaleMp3 = true;
       }
-      if (!hasFemaleMp3 && isValidVoiceMp3Url(ch.audioUrlFemale)) {
+      if (!hasFemaleMp3 && getChapterAudioUrl(ch, 'female')) {
         hasFemaleMp3 = true;
       }
       if (hasMaleMp3 && hasFemaleMp3) break;

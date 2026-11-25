@@ -18,6 +18,7 @@ import {
   subscribeBrowserVoicesChanged,
   getNovelVoiceAvailability,
   resolveEffectiveVoiceForNovel,
+  getChapterAudioUrl,
 } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem, safeJsonParse } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
@@ -136,10 +137,9 @@ export function resolveChapterVoiceAudioUrl(
   if (isDeviceFallbackVoice(normalized)) {
     return '';
   }
-  if (normalized === 'vi-VN-HoaiMyNeural') {
-    return isValidAudioUrl(chapter.audioUrlFemale);
-  }
-  return isValidAudioUrl(chapter.audioUrlMale) || isValidAudioUrl(chapter.audioUrl);
+  const voiceKey: 'male' | 'female' =
+    normalized === 'vi-VN-HoaiMyNeural' ? 'female' : 'male';
+  return isValidAudioUrl(getChapterAudioUrl(chapter, voiceKey));
 }
 
 function preloadNextMp3LinkHint(mp3Url: string): void {
@@ -996,6 +996,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               audioUrl: match.audioUrl,
               audioUrlMale: match.audioUrlMale,
               audioUrlFemale: match.audioUrlFemale,
+              mp3Url: match.mp3Url,
+              maleAudioUrl: match.maleAudioUrl,
+              audio: match.audio,
+              femaleAudioUrl: match.femaleAudioUrl,
+              mp3Female: match.mp3Female,
             };
           });
 
@@ -1013,6 +1018,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               audioUrl: curMatch.audioUrl,
               audioUrlMale: curMatch.audioUrlMale,
               audioUrlFemale: curMatch.audioUrlFemale,
+              mp3Url: curMatch.mp3Url,
+              maleAudioUrl: curMatch.maleAudioUrl,
+              audio: curMatch.audio,
+              femaleAudioUrl: curMatch.femaleAudioUrl,
+              mp3Female: curMatch.mp3Female,
             };
             activeChapterRef.current = nextChap;
             setActiveChapter(nextChap);
@@ -1031,14 +1041,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         }
 
-        const hasMaleInNext = nextList.some(
-          (c) =>
-            (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
-            (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
-        );
-        const hasFemaleInNext = nextList.some(
-          (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
-        );
+        const hasMaleInNext = nextList.some((c) => Boolean(getChapterAudioUrl(c, 'male')));
+        const hasFemaleInNext = nextList.some((c) => Boolean(getChapterAudioUrl(c, 'female')));
         const nextNovel: Novel = {
           ...activeNovelRef.current,
           chapters: nextList,
@@ -1121,12 +1125,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             );
             if (fetched) {
               if (fetched.audioUrl && !chapter.audioUrl) chapter.audioUrl = fetched.audioUrl;
-              if (fetched.audioUrlMale && !chapter.audioUrlMale) {
-                chapter.audioUrlMale = fetched.audioUrlMale;
-              }
-              if (fetched.audioUrlFemale && !chapter.audioUrlFemale) {
-                chapter.audioUrlFemale = fetched.audioUrlFemale;
-              }
+              if (fetched.audioUrlMale && !chapter.audioUrlMale) chapter.audioUrlMale = fetched.audioUrlMale;
+              if (fetched.audioUrlFemale && !chapter.audioUrlFemale) chapter.audioUrlFemale = fetched.audioUrlFemale;
+              if (fetched.mp3Url && !chapter.mp3Url) chapter.mp3Url = fetched.mp3Url;
+              if (fetched.maleAudioUrl && !chapter.maleAudioUrl) chapter.maleAudioUrl = fetched.maleAudioUrl;
+              if (fetched.audio && !chapter.audio) chapter.audio = fetched.audio;
+              if (fetched.femaleAudioUrl && !chapter.femaleAudioUrl) chapter.femaleAudioUrl = fetched.femaleAudioUrl;
+              if (fetched.mp3Female && !chapter.mp3Female) chapter.mp3Female = fetched.mp3Female;
               if (fetched.content) {
                 textContent = fetched.content;
               }
@@ -2549,6 +2554,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           (chapter.audioUrlMale || matchedListChapter?.audioUrlMale || '').trim() || undefined,
         audioUrlFemale:
           (chapter.audioUrlFemale || matchedListChapter?.audioUrlFemale || '').trim() || undefined,
+        mp3Url: (chapter.mp3Url || matchedListChapter?.mp3Url || '').trim() || undefined,
+        maleAudioUrl:
+          (chapter.maleAudioUrl || matchedListChapter?.maleAudioUrl || '').trim() || undefined,
+        audio: (chapter.audio || matchedListChapter?.audio || '').trim() || undefined,
+        femaleAudioUrl:
+          (chapter.femaleAudioUrl || matchedListChapter?.femaleAudioUrl || '').trim() || undefined,
+        mp3Female: (chapter.mp3Female || matchedListChapter?.mp3Female || '').trim() || undefined,
       };
 
       setAudioError(null);
@@ -2581,7 +2593,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       let directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, currentVoice);
 
       try {
-        if (!directAudioUrl && !isDeviceFallbackVoice(currentVoice) && !effectiveChapter.content) {
+        if (!directAudioUrl && !isDeviceFallbackVoice(currentVoice)) {
           try {
             const fetched = await fetchFullChapterContent(
               novel.id,
@@ -2595,17 +2607,31 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 effectiveChapter.content = fetched.content;
               }
               let updatedLinks = false;
-              if (fetched.audioUrl && !effectiveChapter.audioUrl) {
-                effectiveChapter.audioUrl = fetched.audioUrl;
-                updatedLinks = true;
-              }
-              if (fetched.audioUrlMale && !effectiveChapter.audioUrlMale) {
-                effectiveChapter.audioUrlMale = fetched.audioUrlMale;
-                updatedLinks = true;
-              }
-              if (fetched.audioUrlFemale && !effectiveChapter.audioUrlFemale) {
-                effectiveChapter.audioUrlFemale = fetched.audioUrlFemale;
-                updatedLinks = true;
+              const audioKeys: Array<keyof Pick<
+                Chapter,
+                | 'audioUrl'
+                | 'audioUrlMale'
+                | 'audioUrlFemale'
+                | 'mp3Url'
+                | 'maleAudioUrl'
+                | 'audio'
+                | 'femaleAudioUrl'
+                | 'mp3Female'
+              >> = [
+                'audioUrl',
+                'audioUrlMale',
+                'audioUrlFemale',
+                'mp3Url',
+                'maleAudioUrl',
+                'audio',
+                'femaleAudioUrl',
+                'mp3Female',
+              ];
+              for (const k of audioKeys) {
+                if (fetched[k] && !effectiveChapter[k]) {
+                  effectiveChapter[k] = fetched[k];
+                  updatedLinks = true;
+                }
               }
               if (updatedLinks) {
                 directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, currentVoice);
@@ -2677,17 +2703,31 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     effectiveChapter.content = fetched.content;
                   }
                   let updatedLinks = false;
-                  if (fetched.audioUrl && !effectiveChapter.audioUrl) {
-                    effectiveChapter.audioUrl = fetched.audioUrl;
-                    updatedLinks = true;
-                  }
-                  if (fetched.audioUrlMale && !effectiveChapter.audioUrlMale) {
-                    effectiveChapter.audioUrlMale = fetched.audioUrlMale;
-                    updatedLinks = true;
-                  }
-                  if (fetched.audioUrlFemale && !effectiveChapter.audioUrlFemale) {
-                    effectiveChapter.audioUrlFemale = fetched.audioUrlFemale;
-                    updatedLinks = true;
+                  const audioKeys: Array<keyof Pick<
+                    Chapter,
+                    | 'audioUrl'
+                    | 'audioUrlMale'
+                    | 'audioUrlFemale'
+                    | 'mp3Url'
+                    | 'maleAudioUrl'
+                    | 'audio'
+                    | 'femaleAudioUrl'
+                    | 'mp3Female'
+                  >> = [
+                    'audioUrl',
+                    'audioUrlMale',
+                    'audioUrlFemale',
+                    'mp3Url',
+                    'maleAudioUrl',
+                    'audio',
+                    'femaleAudioUrl',
+                    'mp3Female',
+                  ];
+                  for (const k of audioKeys) {
+                    if (fetched[k] && !effectiveChapter[k]) {
+                      effectiveChapter[k] = fetched[k];
+                      updatedLinks = true;
+                    }
                   }
                   if (updatedLinks) {
                     const refreshedAvailability = getNovelVoiceAvailability(

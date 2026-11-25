@@ -10,20 +10,24 @@ import {
   Library,
   CheckCircle2,
   LogIn,
+  Trash2,
 } from 'lucide-react';
 import { Novel, UserProfile } from '../types';
 import {
   aggregateUserPurchasedNovelsFromCache,
   readLocalSavedNovelsFromStorage,
+  saveLocalSavedStoryIds,
+  fetchNovelsFromFirestore,
   PurchasedStorySummary,
 } from '../firebase/services';
-import { formatXu } from '../utils/rulesAndVoices';
-import { safeGetItem, safeJsonParse } from '../utils/safeStorage';
+import { formatXu, normalizeStoryId } from '../utils/rulesAndVoices';
+import { safeGetItem, safeJsonParse, saveNovelsToStorage } from '../utils/safeStorage';
 
 interface UserPurchasedNovelsPageProps {
   user: UserProfile;
   novels: Novel[];
   onSelectNovel: (novel: Novel) => void;
+  onRemoveBookmark?: (novelId: string) => void;
   onBackToHome: () => void;
   onOpenTopUp?: () => void;
   onOpenLogin?: () => void;
@@ -52,16 +56,49 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
   user,
   novels,
   onSelectNovel,
+  onRemoveBookmark,
   onBackToHome,
   onOpenTopUp,
   onOpenLogin,
 }) => {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [filterType, setFilterType] = useState<'all' | 'full_book' | 'single_chapters' | 'saved'>('all');
+  const [hydratedNovels, setHydratedNovels] = useState<Novel[]>([]);
+  const [savedEntriesVersion, setSavedEntriesVersion] = useState<number>(0);
+  const hydrationAttemptedRef = React.useRef<boolean>(false);
 
   const isLoggedIn = Boolean(user?.isLoggedIn && user?.id && user.id !== 'guest');
 
-  // Tổng hợp trực tiếp từ dữ liệu tài khoản đã nạp + danh sách lưu cục bộ (0 lượt đọc thêm)
+  // Chỉ gọi tối đa 1 lượt đọc máy chủ nếu cả props lẫn bộ nhớ đệm đều đang trống mà tủ truyện có ID
+  React.useEffect(() => {
+    if (hydrationAttemptedRef.current) return;
+    if (Array.isArray(novels) && novels.length > 0) return;
+    const cachedRaw = safeGetItem('dao_tam_novels');
+    const cachedList = cachedRaw ? safeJsonParse<Novel[]>(cachedRaw, []) : [];
+    if (Array.isArray(cachedList) && cachedList.length > 0) return;
+
+    const hasAnyIds =
+      readLocalSavedNovelsFromStorage().length > 0 ||
+      (isLoggedIn &&
+        ((Array.isArray(user?.bookmarks) && user.bookmarks.length > 0) ||
+          (Array.isArray(user?.unlockedFullBooks) && user.unlockedFullBooks.length > 0) ||
+          (Array.isArray(user?.unlockedChapters) && user.unlockedChapters.length > 0) ||
+          (Array.isArray(user?.purchasedChapters) && user.purchasedChapters.length > 0) ||
+          (Array.isArray(user?.purchases) && user.purchases.length > 0)));
+
+    if (!hasAnyIds) return;
+    hydrationAttemptedRef.current = true;
+    fetchNovelsFromFirestore()
+      .then((list) => {
+        if (Array.isArray(list) && list.length > 0) {
+          saveNovelsToStorage(list);
+          setHydratedNovels(list);
+        }
+      })
+      .catch(() => {});
+  }, [isLoggedIn, novels, user?.id]);
+
+  // Tổng hợp trực tiếp từ dữ liệu tài khoản đã nạp + danh sách lưu cục bộ (0 lượt đọc thêm khi có cache)
   const libraryItems = useMemo<LibraryCardItem[]>(() => {
     // 1. Kho tra cứu truyện từ props + bộ nhớ đệm cục bộ
     const lookup = new Map<string, Novel>();
@@ -69,35 +106,60 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
     const registerNovel = (n: Novel) => {
       if (!n) return;
       if (n.id) {
-        lookup.set(n.id, n);
-        lowerLookup.set(String(n.id).trim().toLowerCase(), n);
+        const rawId = String(n.id).trim();
+        const normId = normalizeStoryId(rawId);
+        lookup.set(rawId, n);
+        lowerLookup.set(rawId.toLowerCase(), n);
+        if (normId) {
+          lookup.set(normId, n);
+          lowerLookup.set(normId.toLowerCase(), n);
+        }
       }
       if (n.slug) {
-        lookup.set(n.slug, n);
-        lowerLookup.set(String(n.slug).trim().toLowerCase(), n);
+        const rawSlug = String(n.slug).trim();
+        const normSlug = normalizeStoryId(rawSlug);
+        lookup.set(rawSlug, n);
+        lowerLookup.set(rawSlug.toLowerCase(), n);
+        if (normSlug) {
+          lookup.set(normSlug, n);
+          lowerLookup.set(normSlug.toLowerCase(), n);
+        }
       }
     };
 
     const cachedRaw = safeGetItem('dao_tam_novels');
     const cachedList = cachedRaw ? safeJsonParse<Novel[]>(cachedRaw, []) : [];
     if (Array.isArray(cachedList)) cachedList.forEach(registerNovel);
+    if (Array.isArray(hydratedNovels)) hydratedNovels.forEach(registerNovel);
     if (Array.isArray(novels)) novels.forEach(registerNovel);
 
     const findCachedNovel = (idOrSlug: string): Novel | undefined => {
       const clean = String(idOrSlug || '').trim();
-      if (!clean) return undefined;
-      return lookup.get(clean) || lowerLookup.get(clean.toLowerCase());
+      const norm = normalizeStoryId(clean);
+      if (!clean && !norm) return undefined;
+      return (
+        lookup.get(clean) ||
+        lookup.get(norm) ||
+        lowerLookup.get(clean.toLowerCase()) ||
+        lowerLookup.get(norm.toLowerCase())
+      );
     };
 
-    // 2. Lấy toàn bộ truyện đã mua từ dữ liệu tài khoản (purchasedChapters / unlockedChapters / unlockedFullBooks / purchases / purchasedStories)
+    const effectiveNovelsForAgg =
+      Array.isArray(novels) && novels.length > 0 ? novels : hydratedNovels;
+
+    // 2. Lấy toàn bộ truyện đã mua từ dữ liệu tài khoản
     const purchasedSummaries = isLoggedIn
-      ? aggregateUserPurchasedNovelsFromCache(user, novels)
+      ? aggregateUserPurchasedNovelsFromCache(user, effectiveNovelsForAgg)
       : [];
 
     const mergedMap = new Map<string, LibraryCardItem>();
     for (const item of purchasedSummaries) {
-      mergedMap.set(item.storyId, {
+      const normKey = normalizeStoryId(item.storyId);
+      if (!item.storyTitle || /^Bộ truyện #/i.test(item.storyTitle)) continue;
+      mergedMap.set(normKey, {
         ...item,
+        storyId: normKey,
         isPurchased: true,
         isSavedLocal: false,
       });
@@ -108,21 +170,26 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
     const accountBookmarkIds = isLoggedIn && Array.isArray(user?.bookmarks) ? user.bookmarks : [];
 
     for (const bId of accountBookmarkIds) {
-      const cleanId = String(bId || '').trim();
+      const cleanId = normalizeStoryId(String(bId || ''));
       if (!cleanId) continue;
-      if (!localSavedEntries.some((e) => e.storyId === cleanId)) {
+      if (!localSavedEntries.some((e) => normalizeStoryId(e.storyId) === cleanId)) {
         localSavedEntries.push({ storyId: cleanId });
       }
     }
 
     for (const localEntry of localSavedEntries) {
       const matchedNovel = findCachedNovel(localEntry.storyId);
-      const canonicalId = matchedNovel?.id || localEntry.storyId;
+      const canonicalId = normalizeStoryId(matchedNovel?.id || localEntry.storyId);
       if (!canonicalId) continue;
 
       const existing = mergedMap.get(canonicalId);
       if (existing) {
         existing.isSavedLocal = true;
+        continue;
+      }
+
+      const resolvedTitle = matchedNovel?.title || localEntry.storyTitle || '';
+      if (!resolvedTitle || /^Bộ truyện #/i.test(resolvedTitle.trim())) {
         continue;
       }
 
@@ -133,7 +200,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
 
       mergedMap.set(canonicalId, {
         storyId: canonicalId,
-        storyTitle: matchedNovel?.title || localEntry.storyTitle || `Bộ truyện #${canonicalId}`,
+        storyTitle: resolvedTitle,
         storyAuthor: matchedNovel?.author || localEntry.storyAuthor || 'Đang cập nhật',
         storyEditor: matchedNovel?.editor,
         storyCoverImage: matchedNovel?.coverImage || localEntry.storyCoverImage || DEFAULT_COVER,
@@ -169,6 +236,8 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
     (user as any)?.purchasedStories,
     user?.bookmarks,
     novels,
+    hydratedNovels,
+    savedEntriesVersion,
   ]);
 
   // Bộ lọc tìm kiếm & phân loại
@@ -294,34 +363,34 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
         )}
 
         {/* 2. Hàng Thống kê tổng quan */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-          <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs">
-            <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <BookOpen className="w-3.5 h-3.5 text-pink-600" />
-              <span>Tổng Truyện Đã Mua</span>
+        <div className="grid grid-cols-3 gap-2 sm:gap-4">
+          <div className="p-2.5 sm:p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs min-w-0">
+            <div className="text-[10px] sm:text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tight sm:tracking-wider mb-1 flex items-center gap-1">
+              <BookOpen className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+              <span className="truncate">Đã mua</span>
             </div>
-            <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-slate-100">
-              {stats.totalPurchased} <span className="text-xs font-bold text-slate-400">bộ</span>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs">
-            <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <Crown className="w-3.5 h-3.5 text-amber-500" />
-              <span>Mua Trọn Bộ</span>
-            </div>
-            <div className="text-xl sm:text-2xl font-black text-amber-600 dark:text-amber-400">
-              {stats.fullBookCount} <span className="text-xs font-bold text-slate-400">bộ</span>
+            <div className="text-base sm:text-2xl font-black text-slate-900 dark:text-slate-100">
+              {stats.totalPurchased} <span className="text-[11px] sm:text-xs font-bold text-slate-400">bộ</span>
             </div>
           </div>
 
-          <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs">
-            <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1 flex items-center gap-1.5">
-              <Bookmark className="w-3.5 h-3.5 text-sky-500" />
-              <span>Mua Chương Lẻ</span>
+          <div className="p-2.5 sm:p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs min-w-0">
+            <div className="text-[10px] sm:text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tight sm:tracking-wider mb-1 flex items-center gap-1">
+              <Crown className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span className="truncate">Trọn Bộ</span>
             </div>
-            <div className="text-xl sm:text-2xl font-black text-sky-600 dark:text-sky-400">
-              {stats.singleChaptersCount} <span className="text-xs font-bold text-slate-400">bộ</span>
+            <div className="text-base sm:text-2xl font-black text-amber-600 dark:text-amber-400">
+              {stats.fullBookCount} <span className="text-[11px] sm:text-xs font-bold text-slate-400">bộ</span>
+            </div>
+          </div>
+
+          <div className="p-2.5 sm:p-4 rounded-2xl bg-white dark:bg-slate-900 border border-pink-200/70 dark:border-slate-800 shadow-xs min-w-0">
+            <div className="text-[10px] sm:text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-tight sm:tracking-wider mb-1 flex items-center gap-1">
+              <Bookmark className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+              <span className="truncate">Chương Lẻ</span>
+            </div>
+            <div className="text-base sm:text-2xl font-black text-sky-600 dark:text-sky-400">
+              {stats.singleChaptersCount} <span className="text-[11px] sm:text-xs font-bold text-slate-400">bộ</span>
             </div>
           </div>
         </div>
@@ -436,21 +505,27 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4.5">
             {(filteredStories || []).map((item) => {
+              const normItemId = normalizeStoryId(item.storyId);
               const matchedNovel =
                 item.novel ||
-                (novels || []).find((n) => n.id === item.storyId || (n.slug && n.slug === item.storySlug));
+                (novels || []).find(
+                  (n) =>
+                    n.id === item.storyId ||
+                    normalizeStoryId(n.id) === normItemId ||
+                    (n.slug && n.slug === item.storySlug)
+                );
 
               const handleClick = () => {
                 if (matchedNovel) {
                   onSelectNovel(matchedNovel);
                 } else {
                   const fallbackNovel: Novel = {
-                    id: item.storyId,
+                    id: normItemId || item.storyId,
                     title: item.storyTitle,
                     author: item.storyAuthor,
                     editor: item.storyEditor,
                     coverImage: item.storyCoverImage,
-                    slug: item.storySlug || `story-${item.storyId}`,
+                    slug: item.storySlug || normItemId || item.storyId,
                     totalChapters: item.totalChapters,
                     chapters: [],
                     status: 'Đang ra',
@@ -470,6 +545,16 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                 }
               };
 
+              const handleRemoveFromShelf = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                const currentSaved = readLocalSavedNovelsFromStorage()
+                  .map((s) => normalizeStoryId(s.storyId))
+                  .filter((id) => id && id !== normItemId && id !== item.storyId);
+                saveLocalSavedStoryIds(currentSaved);
+                setSavedEntriesVersion((v) => v + 1);
+                onRemoveBookmark?.(normItemId || item.storyId);
+              };
+
               return (
                 <div
                   key={item.storyId}
@@ -478,7 +563,7 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                 >
                   <div>
                     {/* Ảnh Bìa Truyện */}
-                    <div className="relative aspect-[3/4] w-full overflow-hidden bg-slate-100 dark:bg-slate-800">
+                    <div className="relative aspect-[2/3] w-full overflow-hidden bg-slate-100 dark:bg-slate-800">
                       <img
                         src={item.storyCoverImage}
                         alt={item.storyTitle}
@@ -555,12 +640,22 @@ export const UserPurchasedNovelsPage: React.FC<UserPurchasedNovelsPageProps> = (
                   </div>
 
                   {/* Nhãn trạng thái dưới cùng thẻ */}
-                  <div className="p-3 pt-0">
+                  <div className="p-2.5 sm:p-3 pt-0 space-y-1.5">
                     {!item.isPurchased ? (
-                      <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-bold bg-purple-50 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-200 dark:border-purple-800 shadow-2xs flex items-center justify-center gap-1.5">
-                        <Bookmark className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                        <span className="truncate">Đã lưu trong tủ</span>
-                      </div>
+                      <>
+                        <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-bold bg-purple-50 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-200 dark:border-purple-800 shadow-2xs flex items-center justify-center gap-1.5">
+                          <Bookmark className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                          <span className="truncate">Đã lưu trong tủ</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleRemoveFromShelf}
+                          className="w-full min-h-[40px] py-1.5 px-2 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-600 dark:bg-rose-950/40 dark:hover:bg-rose-900/60 dark:text-rose-300 border border-rose-200 dark:border-rose-800/80 transition flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>Xóa khỏi tủ</span>
+                        </button>
+                      </>
                     ) : item.purchaseBadgeType === 'full_book' ? (
                       <div className="w-full text-center py-2 px-2 rounded-xl text-xs font-black bg-rose-100 text-amber-700 dark:bg-rose-950/80 dark:text-amber-300 border border-rose-300 dark:border-rose-800 shadow-2xs flex items-center justify-center gap-1.5">
                         <Sparkles className="w-3.5 h-3.5 text-amber-500 fill-amber-500 shrink-0" />

@@ -27,6 +27,11 @@ export interface Chapter {
   audioUrl?: string;
   audioUrlMale?: string;
   audioUrlFemale?: string;
+  mp3Url?: string;
+  maleAudioUrl?: string;
+  audio?: string;
+  femaleAudioUrl?: string;
+  mp3Female?: string;
   audioCache?: Record<string, Record<string, string>>;
 }
 
