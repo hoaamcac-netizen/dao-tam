@@ -23,7 +23,7 @@ import { ClientLiveChat } from './components/ClientLiveChat';
 import { AdminMessagesModal } from './components/AdminMessagesModal';
 import { fetchUnreadMessageCount } from './services/chatService';
 import { getStoredGenres, saveGenres, createGenreItem, INITIAL_HOT_GENRES } from './data/genres';
-import { formatXu, calculateChapterVip, filterOutDummyChapters, isDummyChapter, removeVietnameseTones, normalizeStoryId } from './utils/rulesAndVoices';
+import { formatXu, calculateChapterVip, filterOutDummyChapters, isDummyChapter, removeVietnameseTones, normalizeStoryId, getChapterAudioUrl } from './utils/rulesAndVoices';
 import { Header } from './components/Header';
 import { NovelCard } from './components/NovelCard';
 import { NovelDetail } from './components/NovelDetail';
@@ -2918,21 +2918,23 @@ function DaoTamApp() {
     }
   };
 
-  // Đồng bộ tức thì audioUrl / audioUrlMale / audioUrlFemale + cờ hasMaleAudio / hasFemaleAudio của 1 chương vào state của App
+  // Đồng bộ tức thì tất cả các trường link MP3 + cờ hasMaleAudio / hasFemaleAudio của 1 chương vào state của App
   const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
     clearChapterAudioCache(novelId, [{ id: updatedChapter.id, number: updatedChapter.number }]);
 
+    const cleanOpt = (v?: string) =>
+      typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+
     const cleanUpdatedChapter: Chapter = {
       ...updatedChapter,
-      audioUrl: typeof updatedChapter.audioUrl === 'string' ? updatedChapter.audioUrl.trim() || undefined : undefined,
-      audioUrlMale:
-        typeof updatedChapter.audioUrlMale === 'string'
-          ? updatedChapter.audioUrlMale.trim() || undefined
-          : undefined,
-      audioUrlFemale:
-        typeof updatedChapter.audioUrlFemale === 'string'
-          ? updatedChapter.audioUrlFemale.trim() || undefined
-          : undefined,
+      audioUrl: cleanOpt(updatedChapter.audioUrl),
+      audioUrlMale: cleanOpt(updatedChapter.audioUrlMale),
+      audioUrlFemale: cleanOpt(updatedChapter.audioUrlFemale),
+      mp3Url: cleanOpt(updatedChapter.mp3Url),
+      maleAudioUrl: cleanOpt(updatedChapter.maleAudioUrl),
+      audio: cleanOpt(updatedChapter.audio),
+      femaleAudioUrl: cleanOpt(updatedChapter.femaleAudioUrl),
+      mp3Female: cleanOpt(updatedChapter.mp3Female),
     };
 
     const mergeAudioFields = (c: Chapter): Chapter => ({
@@ -2940,6 +2942,11 @@ function DaoTamApp() {
       audioUrl: cleanUpdatedChapter.audioUrl,
       audioUrlMale: cleanUpdatedChapter.audioUrlMale,
       audioUrlFemale: cleanUpdatedChapter.audioUrlFemale,
+      mp3Url: cleanUpdatedChapter.mp3Url,
+      maleAudioUrl: cleanUpdatedChapter.maleAudioUrl,
+      audio: cleanUpdatedChapter.audio,
+      femaleAudioUrl: cleanUpdatedChapter.femaleAudioUrl,
+      mp3Female: cleanUpdatedChapter.mp3Female,
     });
 
     const patchChaptersList = (chaps?: Chapter[]) => {
@@ -2952,24 +2959,20 @@ function DaoTamApp() {
       );
     };
 
+    const hasUpdatedMale = Boolean(getChapterAudioUrl(cleanUpdatedChapter, 'male'));
+    const hasUpdatedFemale = Boolean(getChapterAudioUrl(cleanUpdatedChapter, 'female'));
+
     const deriveVoiceFlags = (chaps: Chapter[], prevNovel: Novel) => {
-      const maleInChaps = chaps.some(
-        (c) =>
-          (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
-          (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
-      );
-      const femaleInChaps = chaps.some(
-        (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
-      );
-      const hasUpdatedMale = Boolean(
-        (cleanUpdatedChapter.audioUrlMale && cleanUpdatedChapter.audioUrlMale.trim()) ||
-          (cleanUpdatedChapter.audioUrl && cleanUpdatedChapter.audioUrl.trim())
-      );
-      const hasUpdatedFemale = Boolean(
-        cleanUpdatedChapter.audioUrlFemale && cleanUpdatedChapter.audioUrlFemale.trim()
-      );
-      const hasMaleAudio = chaps.length > 0 ? maleInChaps : Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
-      const hasFemaleAudio = chaps.length > 0 ? femaleInChaps : Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
+      const maleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'male')));
+      const femaleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'female')));
+      const hasMaleAudio =
+        chaps.length > 0
+          ? Boolean(maleInChaps || hasUpdatedMale)
+          : Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
+      const hasFemaleAudio =
+        chaps.length > 0
+          ? Boolean(femaleInChaps || hasUpdatedFemale)
+          : Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
       return {
         hasMaleAudio,
         hasFemaleAudio,
@@ -3028,13 +3031,19 @@ function DaoTamApp() {
       updatedChapters.map((c) => ({ id: c.id, number: c.number }))
     );
 
+    const cleanOpt = (v?: string) =>
+      typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+
     const cleanedChapters: Chapter[] = updatedChapters.map((ch) => ({
       ...ch,
-      audioUrl: typeof ch.audioUrl === 'string' ? ch.audioUrl.trim() || undefined : undefined,
-      audioUrlMale:
-        typeof ch.audioUrlMale === 'string' ? ch.audioUrlMale.trim() || undefined : undefined,
-      audioUrlFemale:
-        typeof ch.audioUrlFemale === 'string' ? ch.audioUrlFemale.trim() || undefined : undefined,
+      audioUrl: cleanOpt(ch.audioUrl),
+      audioUrlMale: cleanOpt(ch.audioUrlMale),
+      audioUrlFemale: cleanOpt(ch.audioUrlFemale),
+      mp3Url: cleanOpt(ch.mp3Url),
+      maleAudioUrl: cleanOpt(ch.maleAudioUrl),
+      audio: cleanOpt(ch.audio),
+      femaleAudioUrl: cleanOpt(ch.femaleAudioUrl),
+      mp3Female: cleanOpt(ch.mp3Female),
     }));
 
     const byId = new Map<string, Chapter>();
@@ -3044,10 +3053,10 @@ function DaoTamApp() {
     for (const ch of cleanedChapters) {
       if (ch.id) byId.set(ch.id, ch);
       if (Number(ch.number) > 0) byNumber.set(Number(ch.number), ch);
-      if ((ch.audioUrlMale && ch.audioUrlMale.trim()) || (ch.audioUrl && ch.audioUrl.trim())) {
+      if (getChapterAudioUrl(ch, 'male')) {
         batchHasMale = true;
       }
-      if (ch.audioUrlFemale && ch.audioUrlFemale.trim()) {
+      if (getChapterAudioUrl(ch, 'female')) {
         batchHasFemale = true;
       }
     }
@@ -3062,21 +3071,26 @@ function DaoTamApp() {
           audioUrl: matched.audioUrl,
           audioUrlMale: matched.audioUrlMale,
           audioUrlFemale: matched.audioUrlFemale,
+          mp3Url: matched.mp3Url,
+          maleAudioUrl: matched.maleAudioUrl,
+          audio: matched.audio,
+          femaleAudioUrl: matched.femaleAudioUrl,
+          mp3Female: matched.mp3Female,
         };
       });
     };
 
     const deriveBatchFlags = (chaps: Chapter[], prevNovel: Novel) => {
-      const maleInChaps = chaps.some(
-        (c) =>
-          (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
-          (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0)
-      );
-      const femaleInChaps = chaps.some(
-        (c) => typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0
-      );
-      const hasMaleAudio = chaps.length > 0 ? maleInChaps : Boolean(prevNovel.hasMaleAudio || batchHasMale);
-      const hasFemaleAudio = chaps.length > 0 ? femaleInChaps : Boolean(prevNovel.hasFemaleAudio || batchHasFemale);
+      const maleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'male')));
+      const femaleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'female')));
+      const hasMaleAudio =
+        chaps.length > 0
+          ? Boolean(maleInChaps || batchHasMale)
+          : Boolean(prevNovel.hasMaleAudio || batchHasMale);
+      const hasFemaleAudio =
+        chaps.length > 0
+          ? Boolean(femaleInChaps || batchHasFemale)
+          : Boolean(prevNovel.hasFemaleAudio || batchHasFemale);
       return {
         hasMaleAudio,
         hasFemaleAudio,
@@ -3119,6 +3133,11 @@ function DaoTamApp() {
         audioUrl: matched.audioUrl,
         audioUrlMale: matched.audioUrlMale,
         audioUrlFemale: matched.audioUrlFemale,
+        mp3Url: matched.mp3Url,
+        maleAudioUrl: matched.maleAudioUrl,
+        audio: matched.audio,
+        femaleAudioUrl: matched.femaleAudioUrl,
+        mp3Female: matched.mp3Female,
       };
     });
 

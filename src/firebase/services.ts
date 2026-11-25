@@ -2733,7 +2733,7 @@ export async function fetchFullChapterContent(
     return null;
   };
 
-  // 1. Kiểm tra cache localStorage _v2 (tốn 0 Reads khi tải lại / đọc lại)
+  // 1. Kiểm tra cache localStorage _v4 (tốn 0 Reads khi tải lại / đọc lại)
   if (chapterNumber !== undefined) {
     const cachedByNum = readChapterCacheKey(
       makeChapterCacheKey(novelId, chapterNumber),
@@ -4093,6 +4093,11 @@ export async function updateChapterAudioUrlInFirestore(
           return cleanUndefinedFields(nextEntry);
         });
         const flags = computeNovelAudioFlags(updatedChapters);
+        if (cleanUrl) {
+          if (voice === 'female') flags.hasFemaleAudio = true;
+          else flags.hasMaleAudio = true;
+          flags.hasAudio = true;
+        }
         await setDoc(
           novelRef,
           {
@@ -4119,6 +4124,32 @@ export async function updateChapterAudioUrlInFirestore(
     clearChapterAudioCache(novelId, [{ id: chapter.id, number: chapter.number }]);
   } catch (err) {
     console.warn('Lỗi đồng bộ liên kết audio lên mục lục truyện:', err);
+  }
+}
+
+/**
+ * Đảm bảo cờ hasMaleAudio / hasFemaleAudio (và hasAudio) trên novels/{novelId} được bật true
+ * khi Admin bấm Nghe thử thành công hoặc lưu link MP3 mới.
+ */
+export async function ensureNovelAudioVoiceFlagInFirestore(
+  novelId: string,
+  voice: 'male' | 'female'
+): Promise<void> {
+  if (!novelId) return;
+  try {
+    const payload: Record<string, any> = {
+      hasAudio: true,
+      updatedAt: Date.now(),
+    };
+    if (voice === 'female') {
+      payload.hasFemaleAudio = true;
+    } else {
+      payload.hasMaleAudio = true;
+    }
+    await setDoc(doc(db, 'novels', novelId), payload, { merge: true });
+    invalidateNovelsCache();
+  } catch (err) {
+    console.warn('Lỗi cập nhật cờ giọng MP3 trên truyện:', err);
   }
 }
 
@@ -4237,7 +4268,21 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         return cleanUndefinedFields(nextEntry);
       });
 
+      const anyMaleAdded = validItems.some(
+        (i) => typeof i.audioUrlMale === 'string' && i.audioUrlMale.trim().length > 0
+      );
+      const anyFemaleAdded = validItems.some(
+        (i) => typeof i.audioUrlFemale === 'string' && i.audioUrlFemale.trim().length > 0
+      );
       const flags = computeNovelAudioFlags(updatedChapters);
+      if (anyMaleAdded) {
+        flags.hasMaleAudio = true;
+        flags.hasAudio = true;
+      }
+      if (anyFemaleAdded) {
+        flags.hasFemaleAudio = true;
+        flags.hasAudio = true;
+      }
 
       await withTimeout(
         setDoc(

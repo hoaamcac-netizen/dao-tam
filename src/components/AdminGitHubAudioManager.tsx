@@ -4,6 +4,7 @@ import {
   fetchChaptersForNovel,
   updateChapterAudioUrlInFirestore,
   batchUpdateChapterAudioLinksInFirestore,
+  ensureNovelAudioVoiceFlagInFirestore,
   type ChapterAudioLinkBatchItem,
 } from '../firebase/services';
 import { removeVietnameseTones, getChapterAudioUrl } from '../utils/rulesAndVoices';
@@ -36,9 +37,16 @@ type VoiceKey = 'male' | 'female';
 type DeleteVoiceScope = 'male' | 'female' | 'both';
 type VoiceFilterMode = 'all' | 'missing_male' | 'missing_female' | 'both_ready' | 'broken';
 
+export type BrokenReason =
+  | 'Quá thời gian chờ'
+  | 'File không tải được'
+  | 'Sai định dạng link';
+
 export interface BrokenVoiceState {
   male?: boolean;
   female?: boolean;
+  maleReason?: BrokenReason;
+  femaleReason?: BrokenReason;
 }
 
 interface BrokenLinkEntry {
@@ -47,6 +55,8 @@ interface BrokenLinkEntry {
   chapterTitle: string;
   voice: VoiceKey;
   voiceLabel: string;
+  url: string;
+  reason?: BrokenReason;
 }
 
 function getMaleAudioUrl(chapter: Chapter): string {
@@ -74,11 +84,18 @@ function sanitizeDownloadFilename(title: string): string {
   return cleaned || 'TruyenDaoTam';
 }
 
-function probeAudioUrlMetadata(url: string, timeoutMs = 8000): Promise<boolean> {
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function probeAudioOnce(
+  url: string,
+  timeoutMs = 20000
+): Promise<{ ok: boolean; reason?: BrokenReason }> {
   return new Promise((resolve) => {
     const trimmed = url.trim();
     if (!isValidHttpUrl(trimmed)) {
-      resolve(false);
+      resolve({ ok: false, reason: 'Sai định dạng link' });
       return;
     }
 
@@ -87,7 +104,7 @@ function probeAudioUrlMetadata(url: string, timeoutMs = 8000): Promise<boolean> 
     probe.removeAttribute('crossorigin');
     probe.preload = 'metadata';
 
-    const finish = (ok: boolean) => {
+    const finish = (ok: boolean, reason?: BrokenReason) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -99,21 +116,44 @@ function probeAudioUrlMetadata(url: string, timeoutMs = 8000): Promise<boolean> 
         probe.removeAttribute('src');
         probe.load();
       } catch {}
-      resolve(ok);
+      resolve(ok ? { ok: true } : { ok: false, reason });
     };
 
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    const timer = setTimeout(() => finish(false, 'Quá thời gian chờ'), timeoutMs);
     probe.onloadedmetadata = () => finish(true);
     probe.oncanplay = () => finish(true);
-    probe.onerror = () => finish(false);
+    probe.onerror = () => finish(false, 'File không tải được');
 
     try {
       probe.src = trimmed;
       probe.load();
     } catch {
-      finish(false);
+      finish(false, 'File không tải được');
     }
   });
+}
+
+async function probeAudioUrlMetadata(
+  url: string,
+  timeoutMs = 20000,
+  shouldAbort?: () => boolean
+): Promise<{ ok: boolean; reason?: BrokenReason }> {
+  const trimmed = url.trim();
+  if (!isValidHttpUrl(trimmed)) {
+    return { ok: false, reason: 'Sai định dạng link' };
+  }
+
+  const firstAttempt = await probeAudioOnce(trimmed, timeoutMs);
+  if (firstAttempt.ok || shouldAbort?.()) {
+    return firstAttempt;
+  }
+
+  await sleepMs(1500);
+  if (shouldAbort?.()) {
+    return firstAttempt;
+  }
+
+  return probeAudioOnce(trimmed, timeoutMs);
 }
 
 interface AdminChapterMp3ActionsProps {
@@ -139,6 +179,9 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   onClearBrokenFlag,
 }) => {
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const activePreviewVoiceRef = useRef<VoiceKey | null>(null);
+  const activePreviewUrlRef = useRef<string>('');
+  const confirmedVoiceFlagKeysRef = useRef<Set<string>>(new Set());
 
   const [isBusy, setIsBusy] = useState(false);
   const [editingVoice, setEditingVoice] = useState<VoiceKey | null>(null);
@@ -150,7 +193,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
 
   useEffect(() => {
     return () => {
+      activePreviewVoiceRef.current = null;
+      activePreviewUrlRef.current = '';
       if (previewAudioRef.current) {
+        previewAudioRef.current.onended = null;
+        previewAudioRef.current.onerror = null;
+        previewAudioRef.current.onplaying = null;
+        previewAudioRef.current.oncanplay = null;
         previewAudioRef.current.pause();
         previewAudioRef.current.src = '';
         previewAudioRef.current = null;
@@ -179,10 +228,31 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
   const actionsDisabled = isBusy || disabledExternally;
 
   const stopPreview = () => {
+    activePreviewVoiceRef.current = null;
     if (previewAudioRef.current) {
       previewAudioRef.current.pause();
     }
     setPreviewVoice(null);
+  };
+
+  const confirmPreviewSuccessForVoice = (voice: VoiceKey, cleanUrl: string) => {
+    onClearBrokenFlag?.(chapter.id, voice);
+    const sessionFlagKey = `${novel.id}::${voice}`;
+    const alreadyFlaggedOnNovel =
+      voice === 'male' ? Boolean(novel.hasMaleAudio) : Boolean(novel.hasFemaleAudio);
+    if (!confirmedVoiceFlagKeysRef.current.has(sessionFlagKey)) {
+      confirmedVoiceFlagKeysRef.current.add(sessionFlagKey);
+      if (!alreadyFlaggedOnNovel) {
+        ensureNovelAudioVoiceFlagInFirestore(novel.id, voice).catch(() => {});
+      }
+      onAudioLinksUpdated(chapter, {
+        audioUrl: chapter.audioUrl,
+        audioUrlMale:
+          voice === 'male' ? chapter.audioUrlMale || cleanUrl : chapter.audioUrlMale,
+        audioUrlFemale:
+          voice === 'female' ? chapter.audioUrlFemale || cleanUrl : chapter.audioUrlFemale,
+      });
+    }
   };
 
   const handleTogglePreview = (voice: VoiceKey, url: string) => {
@@ -192,30 +262,55 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     if (!previewAudioRef.current) {
       previewAudioRef.current = new Audio();
       previewAudioRef.current.removeAttribute('crossorigin');
-      previewAudioRef.current.onended = () => setPreviewVoice(null);
-      previewAudioRef.current.onerror = () => {
-        setPreviewVoice(null);
-        setErrorMsg(
-          `Không phát được file MP3 (${voice === 'male' ? 'Nam Minh' : 'Hằng Nga'}). Vui lòng kiểm tra lại đường dẫn.`
-        );
-      };
     }
 
     const audioEl = previewAudioRef.current;
     audioEl.removeAttribute('crossorigin');
+    audioEl.onended = () => setPreviewVoice(null);
+    audioEl.oncanplay = () => {
+      const v = activePreviewVoiceRef.current;
+      const u = activePreviewUrlRef.current;
+      if (v && u) {
+        confirmPreviewSuccessForVoice(v, u);
+      }
+    };
+    audioEl.onplaying = () => {
+      const v = activePreviewVoiceRef.current;
+      const u = activePreviewUrlRef.current;
+      if (v) {
+        setPreviewVoice(v);
+        if (u) {
+          confirmPreviewSuccessForVoice(v, u);
+        }
+      }
+    };
+    audioEl.onerror = () => {
+      const v = activePreviewVoiceRef.current || voice;
+      setPreviewVoice(null);
+      setErrorMsg(
+        `Không phát được file MP3 (${v === 'male' ? 'Nam Minh' : 'Hằng Nga'}). Vui lòng kiểm tra lại đường dẫn.`
+      );
+    };
+
     if (previewVoice === voice) {
       audioEl.pause();
+      activePreviewVoiceRef.current = null;
       setPreviewVoice(null);
       return;
     }
 
+    activePreviewVoiceRef.current = voice;
+    activePreviewUrlRef.current = cleanUrl;
     setErrorMsg(null);
     audioEl.pause();
     audioEl.src = cleanUrl;
     audioEl.load();
     audioEl
       .play()
-      .then(() => setPreviewVoice(voice))
+      .then(() => {
+        setPreviewVoice(voice);
+        confirmPreviewSuccessForVoice(voice, cleanUrl);
+      })
       .catch((err) => {
         if (err?.name === 'AbortError' || /AbortError|interrupted/i.test(String(err?.message || ''))) {
           return;
@@ -324,6 +419,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     const isMale = voice === 'male';
     const voiceLabel = isMale ? 'Nam Minh' : 'Hằng Nga';
     const isBroken = isMale ? Boolean(brokenVoices?.male) : Boolean(brokenVoices?.female);
+    const brokenReason = isMale ? brokenVoices?.maleReason : brokenVoices?.femaleReason;
     const isThisPreviewPlaying = previewVoice === voice;
     const isThisConfirming = confirmClearVoice === voice;
 
@@ -351,9 +447,12 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
 
           {url ? (
             isBroken ? (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[10px] font-bold">
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[10px] font-bold"
+                title={brokenReason || 'Link chưa tải được'}
+              >
                 <AlertTriangle className="w-3 h-3 shrink-0" />
-                <span>Link lỗi</span>
+                <span>{brokenReason ? `Link lỗi: ${brokenReason}` : 'Link lỗi'}</span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
@@ -689,23 +788,29 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     for (const ch of sortedChapters) {
       const state = brokenLinksMap[ch.id];
       if (!state) continue;
-      if (state.male && getMaleAudioUrl(ch)) {
+      const maleUrl = getMaleAudioUrl(ch);
+      if (state.male && maleUrl) {
         entries.push({
           chapterId: ch.id,
           chapterNumber: Number(ch.number),
           chapterTitle: ch.title || `Chương ${ch.number}`,
           voice: 'male',
           voiceLabel: 'Nam Minh',
+          url: maleUrl,
+          reason: state.maleReason,
         });
         chapIds.add(ch.id);
       }
-      if (state.female && getFemaleAudioUrl(ch)) {
+      const femaleUrl = getFemaleAudioUrl(ch);
+      if (state.female && femaleUrl) {
         entries.push({
           chapterId: ch.id,
           chapterNumber: Number(ch.number),
           chapterTitle: ch.title || `Chương ${ch.number}`,
           voice: 'female',
           voiceLabel: 'Hằng Nga',
+          url: femaleUrl,
+          reason: state.femaleReason,
         });
         chapIds.add(ch.id);
       }
@@ -957,6 +1062,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
             next[ch.id] = {
               ...next[ch.id],
               [bulkVoice]: false,
+              [bulkVoice === 'male' ? 'maleReason' : 'femaleReason']: undefined,
             };
           }
         }
@@ -1061,10 +1167,13 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         const next = { ...prev };
         for (const ch of targets) {
           if (next[ch.id]) {
+            const clearMale = deleteScope === 'male' || deleteScope === 'both';
+            const clearFemale = deleteScope === 'female' || deleteScope === 'both';
             next[ch.id] = {
-              male: deleteScope === 'male' || deleteScope === 'both' ? false : next[ch.id].male,
-              female:
-                deleteScope === 'female' || deleteScope === 'both' ? false : next[ch.id].female,
+              male: clearMale ? false : next[ch.id].male,
+              female: clearFemale ? false : next[ch.id].female,
+              maleReason: clearMale ? undefined : next[ch.id].maleReason,
+              femaleReason: clearFemale ? undefined : next[ch.id].femaleReason,
             };
           }
         }
@@ -1096,7 +1205,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }
   };
 
-  // Logic 3: Quét kiểm tra toàn bộ link MP3 (tất cả trang, cả Nam Minh và Hằng Nga)
+  // Logic 3: Quét kiểm tra toàn bộ link MP3 (2 link/lần, nghỉ 300ms giữa các lượt, timeout 20s + tự thử lại 1 lần sau 1.5s)
   const handleCheckAllLinks = async () => {
     if (isCheckingLinks) {
       return;
@@ -1123,34 +1232,44 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     setToolbarMessage(null);
     setCheckProgress({ checked: 0, total: tasks.length });
 
-    let cursor = 0;
     let okCount = 0;
     let failCount = 0;
     let checkedCount = 0;
     const scanResults: Record<string, BrokenVoiceState> = {};
 
-    const concurrency = Math.min(8, tasks.length);
-    const worker = async () => {
-      while (!checkAbortRef.current) {
-        const idx = cursor++;
-        if (idx >= tasks.length) break;
-        const t = tasks[idx];
-        const ok = await probeAudioUrlMetadata(t.url, 8000);
-        if (checkAbortRef.current) break;
+    const BATCH_SIZE = 2;
+    for (let i = 0; i < tasks.length; i += BATCH_SIZE) {
+      if (checkAbortRef.current) break;
+      const batch = tasks.slice(i, i + BATCH_SIZE);
 
-        if (!scanResults[t.chapterId]) {
-          scanResults[t.chapterId] = {};
-        }
-        scanResults[t.chapterId][t.voice] = !ok;
-        if (ok) okCount += 1;
-        else failCount += 1;
-        checkedCount += 1;
+      await Promise.all(
+        batch.map(async (t) => {
+          const result = await probeAudioUrlMetadata(
+            t.url,
+            20000,
+            () => checkAbortRef.current
+          );
+          if (checkAbortRef.current) return;
 
-        setCheckProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
+          if (!scanResults[t.chapterId]) {
+            scanResults[t.chapterId] = {};
+          }
+          const reasonKey = t.voice === 'male' ? 'maleReason' : 'femaleReason';
+          scanResults[t.chapterId][t.voice] = !result.ok;
+          scanResults[t.chapterId][reasonKey] = result.ok ? undefined : result.reason;
+
+          if (result.ok) okCount += 1;
+          else failCount += 1;
+          checkedCount += 1;
+
+          setCheckProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
+        })
+      );
+
+      if (i + BATCH_SIZE < tasks.length && !checkAbortRef.current) {
+        await sleepMs(300);
       }
-    };
-
-    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    }
 
     const wasAborted = checkAbortRef.current;
     if (Object.keys(scanResults).length > 0) {
@@ -1174,6 +1293,72 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         type: failCount > 0 ? 'warning' : 'success',
         text: `Đã kiểm tra toàn bộ ${tasks.length} link: ${okCount} link hợp lệ, ${failCount} link lỗi.`,
         includeBrokenList: failCount > 0,
+      });
+    }
+    setIsCheckingLinks(false);
+  };
+
+  // Kiểm tra lại tuần tự từng link (1 link/lần) chỉ cho các chương/giọng đang báo lỗi
+  const handleRecheckBrokenLinks = async () => {
+    if (isCheckingLinks || brokenEntries.length === 0) return;
+
+    const targets = [...brokenEntries];
+    checkAbortRef.current = false;
+    setIsCheckingLinks(true);
+    setCheckProgress({ checked: 0, total: targets.length });
+
+    let okCount = 0;
+    let failCount = 0;
+    let checkedCount = 0;
+
+    for (let i = 0; i < targets.length; i++) {
+      if (checkAbortRef.current) break;
+      const entry = targets[i];
+      const result = await probeAudioUrlMetadata(
+        entry.url,
+        20000,
+        () => checkAbortRef.current
+      );
+      if (checkAbortRef.current) break;
+
+      const reasonKey = entry.voice === 'male' ? 'maleReason' : 'femaleReason';
+      setBrokenLinksMap((prev) => ({
+        ...prev,
+        [entry.chapterId]: {
+          ...(prev[entry.chapterId] || {}),
+          [entry.voice]: !result.ok,
+          [reasonKey]: result.ok ? undefined : result.reason,
+        },
+      }));
+
+      if (result.ok) okCount += 1;
+      else failCount += 1;
+      checkedCount += 1;
+      setCheckProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
+
+      if (i + 1 < targets.length && !checkAbortRef.current) {
+        await sleepMs(300);
+      }
+    }
+
+    const wasAborted = checkAbortRef.current;
+    if (wasAborted) {
+      setToolbarMessage({
+        type: failCount > 0 ? 'warning' : 'success',
+        text: `Đã dừng kiểm tra lại (${checkedCount}/${targets.length} link): ${okCount} link đã hoạt động, ${failCount} link vẫn lỗi.`,
+        includeBrokenList: failCount > 0,
+      });
+    } else if (failCount === 0) {
+      setToolbarMessage({
+        type: 'success',
+        text: `Đã kiểm tra lại ${targets.length} link: tất cả ${okCount} link đều hoạt động bình thường.`,
+        includeBrokenList: false,
+      });
+    } else {
+      setToolbarMessage({
+        type: 'warning',
+        text: `Đã kiểm tra lại ${targets.length} link lỗi: ${okCount} link đã hoạt động, còn ${failCount} link lỗi.`,
+        includeBrokenList: true,
       });
     }
     setIsCheckingLinks(false);
@@ -1495,25 +1680,38 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               </div>
 
               {toolbarMessage.includeBrokenList && brokenEntries.length > 0 && (
-                <div className="pt-1.5 border-t border-amber-200/80 flex flex-wrap items-center gap-1.5 max-h-28 overflow-y-auto">
-                  <span className="font-bold text-rose-700 shrink-0 tabular-nums">
-                    {brokenEntries.length} link lỗi:
-                  </span>
-                  {brokenEntries.map((entry, idx) => (
-                    <React.Fragment key={`${entry.chapterId}-${entry.voice}`}>
-                      <button
-                        type="button"
-                        onClick={() => handleJumpToBrokenChapter(entry)}
-                        className="inline-flex items-center px-2 py-0.5 rounded-lg bg-white hover:bg-rose-50 border border-rose-300 text-rose-700 font-bold text-[11px] cursor-pointer transition hover:underline underline-offset-2"
-                        title={`Nhảy tới Chương ${entry.chapterNumber} để sửa link ${entry.voiceLabel}`}
-                      >
-                        Chương {entry.chapterNumber} ({entry.voiceLabel})
-                      </button>
-                      {idx < brokenEntries.length - 1 ? (
-                        <span className="text-amber-700">,</span>
-                      ) : null}
-                    </React.Fragment>
-                  ))}
+                <div className="pt-1.5 border-t border-amber-200/80 space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-rose-700 shrink-0 tabular-nums">
+                      {brokenEntries.length} link lỗi:
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isCheckingLinks}
+                      onClick={handleRecheckBrokenLinks}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 disabled:opacity-50 border border-amber-400 text-amber-900 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer transition shadow-2xs"
+                    >
+                      <span>🔄 Kiểm tra lại {brokenEntries.length} link lỗi</span>
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 max-h-28 overflow-y-auto">
+                    {brokenEntries.map((entry, idx) => (
+                      <React.Fragment key={`${entry.chapterId}-${entry.voice}`}>
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToBrokenChapter(entry)}
+                          className="inline-flex items-center px-2 py-0.5 rounded-lg bg-white hover:bg-rose-50 border border-rose-300 text-rose-700 font-bold text-[11px] cursor-pointer transition hover:underline underline-offset-2"
+                          title={`Nhảy tới Chương ${entry.chapterNumber} để sửa link ${entry.voiceLabel}${entry.reason ? ` (${entry.reason})` : ''}`}
+                        >
+                          Chương {entry.chapterNumber} ({entry.voiceLabel})
+                          {entry.reason ? ` · ${entry.reason}` : ''}
+                        </button>
+                        {idx < brokenEntries.length - 1 ? (
+                          <span className="text-amber-700">,</span>
+                        ) : null}
+                      </React.Fragment>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -1749,9 +1947,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                     onClearBrokenFlag={(chId, voice) => {
                       setBrokenLinksMap((prev) => {
                         if (!prev[chId]) return prev;
+                        const reasonKey = voice === 'male' ? 'maleReason' : 'femaleReason';
                         return {
                           ...prev,
-                          [chId]: { ...prev[chId], [voice]: false },
+                          [chId]: {
+                            ...prev[chId],
+                            [voice]: false,
+                            [reasonKey]: undefined,
+                          },
                         };
                       });
                     }}

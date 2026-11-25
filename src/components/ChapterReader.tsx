@@ -213,9 +213,10 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
               'mp3Female',
             ] as const;
             for (const key of audioKeys) {
-              const incoming = res[key];
-              if (typeof incoming === 'string' && incoming.trim() && !chapter[key]) {
-                chapter[key] = incoming.trim();
+              const incoming = typeof res[key] === 'string' ? res[key]!.trim() : '';
+              const existing = typeof chapter[key] === 'string' ? chapter[key]!.trim() : '';
+              if (incoming && incoming !== existing) {
+                chapter[key] = incoming;
                 foundAudioMeta = true;
               }
             }
@@ -418,16 +419,25 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   const readerVoiceAvailability = useMemo(() => {
     void chapterAudioMetaTick;
-    return getNovelVoiceAvailability(
-      novel,
-      safeChapters,
-      audioContext.activeNovel?.id === novel.id ? audioContext.activeChapter || chapter : chapter
-    );
+    const mergedChapter: Chapter = isCurrentChapterAudio && audioContext.activeChapter
+      ? {
+          ...chapter,
+          audioUrl: chapter.audioUrl || audioContext.activeChapter.audioUrl,
+          audioUrlMale: chapter.audioUrlMale || audioContext.activeChapter.audioUrlMale,
+          audioUrlFemale: chapter.audioUrlFemale || audioContext.activeChapter.audioUrlFemale,
+          mp3Url: chapter.mp3Url || audioContext.activeChapter.mp3Url,
+          maleAudioUrl: chapter.maleAudioUrl || audioContext.activeChapter.maleAudioUrl,
+          audio: chapter.audio || audioContext.activeChapter.audio,
+          femaleAudioUrl: chapter.femaleAudioUrl || audioContext.activeChapter.femaleAudioUrl,
+          mp3Female: chapter.mp3Female || audioContext.activeChapter.mp3Female,
+        }
+      : chapter;
+    return getNovelVoiceAvailability(novel, safeChapters, mergedChapter);
   }, [
     novel,
     safeChapters,
     chapter,
-    audioContext.activeNovel?.id,
+    isCurrentChapterAudio,
     audioContext.activeChapter,
     chapterAudioMetaTick,
   ]);

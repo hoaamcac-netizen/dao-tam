@@ -17,8 +17,8 @@ export const NOVELS_CACHE_TS_KEY = 'dao_tam_novels_cached_at';
 export const GENRES_CACHE_TS_KEY = 'dao_tam_genres_cached_at';
 export const NOVELS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 phút
 export const MAX_CACHED_CHAPTER_KEYS = 25;
-export const CHAPTER_CACHE_PREFIX = 'chapter_full_v2_';
-export const CHAPTER_CACHE_TS_PREFIX = 'chapter_full_ts_v2_';
+export const CHAPTER_CACHE_PREFIX = 'chapter_full_v4_';
+export const CHAPTER_CACHE_TS_PREFIX = 'chapter_full_ts_v4_';
 
 export function makeChapterCacheKey(novelId: string, chapKey: string | number): string {
   return `${CHAPTER_CACHE_PREFIX}${novelId}_${chapKey}`;
@@ -101,8 +101,8 @@ export function safeSessionRemoveItem(key: string): void {
 }
 
 /**
- * Giữ lại tối đa N chương cache v2 gần nhất (LRU theo timestamp chapter_full_ts_v2_*),
- * đồng thời dọn key cache v1 cũ nếu còn sót.
+ * Giữ lại tối đa N chương cache v4 gần nhất (LRU theo timestamp chapter_full_ts_v4_*),
+ * đồng thời dọn key cache cũ (v1/v2/v3) nếu còn sót.
  */
 export function trimChapterCacheEntries(maxKeep: number = MAX_CACHED_CHAPTER_KEYS): void {
   if (typeof window === 'undefined') return;
@@ -146,7 +146,7 @@ export function trimChapterCacheEntries(maxKeep: number = MAX_CACHED_CHAPTER_KEY
 }
 
 /**
- * Tự động dọn dẹp các key cache nội dung chữ quá nặng (như chapter_full_v2_* & chapter_full_*)
+ * Tự động dọn dẹp các key cache nội dung chữ quá nặng (như chapter_full_v4_* & chapter_full_*)
  * để giải phóng dung lượng cho localStorage khi bộ nhớ đầy.
  */
 export function cleanHeavyStorageCache(): void {
@@ -401,29 +401,37 @@ export function clearChapterAudioCache(
 
   try {
     if (Array.isArray(chapters) && chapters.length > 0) {
+      const legacyPrefixes = [
+        'chapter_full_',
+        'chapter_full_ts_',
+        'chapter_full_v2_',
+        'chapter_full_ts_v2_',
+        'chapter_full_v3_',
+        'chapter_full_ts_v3_',
+      ];
       for (const ch of chapters) {
         if (!ch) continue;
         if (ch.number !== undefined && ch.number !== null && String(ch.number).trim() !== '') {
           const numKey = String(ch.number).trim();
           safeRemoveItem(makeChapterCacheKey(novelId, numKey));
           safeRemoveItem(makeChapterCacheTsKey(novelId, numKey));
-          safeRemoveItem(`chapter_full_${novelId}_${numKey}`);
-          safeRemoveItem(`chapter_full_ts_${novelId}_${numKey}`);
           safeSessionRemoveItem(makeChapterCacheKey(novelId, numKey));
           safeSessionRemoveItem(makeChapterCacheTsKey(novelId, numKey));
-          safeSessionRemoveItem(`chapter_full_${novelId}_${numKey}`);
-          safeSessionRemoveItem(`chapter_full_ts_${novelId}_${numKey}`);
+          for (const prefix of legacyPrefixes) {
+            safeRemoveItem(`${prefix}${novelId}_${numKey}`);
+            safeSessionRemoveItem(`${prefix}${novelId}_${numKey}`);
+          }
         }
         if (ch.id && String(ch.id).trim() !== '') {
           const idKey = String(ch.id).trim();
           safeRemoveItem(makeChapterCacheKey(novelId, idKey));
           safeRemoveItem(makeChapterCacheTsKey(novelId, idKey));
-          safeRemoveItem(`chapter_full_${novelId}_${idKey}`);
-          safeRemoveItem(`chapter_full_ts_${novelId}_${idKey}`);
           safeSessionRemoveItem(makeChapterCacheKey(novelId, idKey));
           safeSessionRemoveItem(makeChapterCacheTsKey(novelId, idKey));
-          safeSessionRemoveItem(`chapter_full_${novelId}_${idKey}`);
-          safeSessionRemoveItem(`chapter_full_ts_${novelId}_${idKey}`);
+          for (const prefix of legacyPrefixes) {
+            safeRemoveItem(`${prefix}${novelId}_${idKey}`);
+            safeSessionRemoveItem(`${prefix}${novelId}_${idKey}`);
+          }
         }
       }
     } else {
@@ -434,8 +442,8 @@ export function clearChapterAudioCache(
           k &&
           (k.startsWith(`${CHAPTER_CACHE_PREFIX}${novelId}_`) ||
             k.startsWith(`${CHAPTER_CACHE_TS_PREFIX}${novelId}_`) ||
-            k.startsWith(`chapter_full_${novelId}_`) ||
-            k.startsWith(`chapter_full_ts_${novelId}_`))
+            ((k.startsWith('chapter_full_') || k.startsWith('chapter_full_ts_')) &&
+              k.includes(`_${novelId}_`)))
         ) {
           localKeys.push(k);
         }
@@ -450,8 +458,8 @@ export function clearChapterAudioCache(
         k &&
         (k.startsWith(`${CHAPTER_CACHE_PREFIX}${novelId}_`) ||
           k.startsWith(`${CHAPTER_CACHE_TS_PREFIX}${novelId}_`) ||
-          k.startsWith(`chapter_full_${novelId}_`) ||
-          k.startsWith(`chapter_full_ts_${novelId}_`) ||
+          ((k.startsWith('chapter_full_') || k.startsWith('chapter_full_ts_')) &&
+            k.includes(`_${novelId}_`)) ||
           k.startsWith(`daotam_chapter_${novelId}_`))
       ) {
         sessionKeys.push(k);

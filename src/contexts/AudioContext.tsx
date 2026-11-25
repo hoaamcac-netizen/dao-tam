@@ -2582,18 +2582,22 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         chaptersListRef.current,
         effectiveChapter
       );
-      const currentVoice = resolveEffectiveVoiceForNovel(
+      let resolvedVoice = resolveEffectiveVoiceForNovel(
         preferredVoiceIdRef.current,
         initialAvailability
       );
-      if (voiceIdRef.current !== currentVoice) {
-        voiceIdRef.current = currentVoice;
-        setVoiceIdState(currentVoice);
+      if (voiceIdRef.current !== resolvedVoice) {
+        voiceIdRef.current = resolvedVoice;
+        setVoiceIdState(resolvedVoice);
       }
-      let directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, currentVoice);
+      let directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, resolvedVoice);
+      const preferredMissingOnChapter =
+        !isDeviceFallbackVoice(preferredVoiceIdRef.current) &&
+        !resolveChapterVoiceAudioUrl(effectiveChapter, preferredVoiceIdRef.current);
+      let effectiveNovel: Novel = novel;
 
       try {
-        if (!directAudioUrl && !isDeviceFallbackVoice(currentVoice)) {
+        if (!directAudioUrl || preferredMissingOnChapter) {
           try {
             const fetched = await fetchFullChapterContent(
               novel.id,
@@ -2628,13 +2632,48 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 'mp3Female',
               ];
               for (const k of audioKeys) {
-                if (fetched[k] && !effectiveChapter[k]) {
-                  effectiveChapter[k] = fetched[k];
+                const incoming = typeof fetched[k] === 'string' ? fetched[k]!.trim() : '';
+                if (incoming && !effectiveChapter[k]) {
+                  effectiveChapter[k] = incoming;
                   updatedLinks = true;
                 }
               }
               if (updatedLinks) {
-                directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, currentVoice);
+                const refreshedAvailability = getNovelVoiceAvailability(
+                  novel,
+                  chaptersListRef.current,
+                  effectiveChapter
+                );
+                resolvedVoice = resolveEffectiveVoiceForNovel(
+                  preferredVoiceIdRef.current,
+                  refreshedAvailability
+                );
+                if (voiceIdRef.current !== resolvedVoice) {
+                  voiceIdRef.current = resolvedVoice;
+                  setVoiceIdState(resolvedVoice);
+                }
+                directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, resolvedVoice);
+
+                if (
+                  (refreshedAvailability.hasMaleMp3 && !novel.hasMaleAudio) ||
+                  (refreshedAvailability.hasFemaleMp3 && !novel.hasFemaleAudio)
+                ) {
+                  effectiveNovel = {
+                    ...novel,
+                    hasMaleAudio: Boolean(novel.hasMaleAudio || refreshedAvailability.hasMaleMp3),
+                    hasFemaleAudio: Boolean(
+                      novel.hasFemaleAudio || refreshedAvailability.hasFemaleMp3
+                    ),
+                    hasAudio: Boolean(
+                      novel.hasAudio ||
+                        refreshedAvailability.hasMaleMp3 ||
+                        refreshedAvailability.hasFemaleMp3
+                    ),
+                  };
+                  activeNovelRef.current = effectiveNovel;
+                  setActiveNovel(effectiveNovel);
+                }
+
                 setActiveChapter({ ...effectiveChapter });
                 activeChapterRef.current = effectiveChapter;
               }
@@ -2646,7 +2685,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           setFallbackNotice(null);
           if (willActivateAudio) {
             safeSetItem('daotam_audio_active', 'true');
-            await playDirectMp3Url(novel, effectiveChapter, directAudioUrl, currentNonce, {
+            await playDirectMp3Url(effectiveNovel, effectiveChapter, directAudioUrl, currentNonce, {
               isAutoAdvance,
             });
           } else {
@@ -2669,11 +2708,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setMp3CurrentTime(0);
         setMp3Duration(0);
 
-        if (isDeviceFallbackVoice(currentVoice)) {
+        if (isDeviceFallbackVoice(resolvedVoice)) {
           setFallbackNotice(null);
         } else {
           const missingVoiceLabel =
-            currentVoice === 'vi-VN-HoaiMyNeural' ? 'Hằng Nga' : 'Nam Minh';
+            resolvedVoice === 'vi-VN-HoaiMyNeural' ? 'Hằng Nga' : 'Nam Minh';
           setFallbackNotice(
             `Chương ${effectiveChapter.number} chưa có link MP3 ${missingVoiceLabel} — đang đọc bằng Giọng Máy`
           );
@@ -2724,14 +2763,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     'mp3Female',
                   ];
                   for (const k of audioKeys) {
-                    if (fetched[k] && !effectiveChapter[k]) {
-                      effectiveChapter[k] = fetched[k];
+                    const incoming = typeof fetched[k] === 'string' ? fetched[k]!.trim() : '';
+                    if (incoming && !effectiveChapter[k]) {
+                      effectiveChapter[k] = incoming;
                       updatedLinks = true;
                     }
                   }
                   if (updatedLinks) {
                     const refreshedAvailability = getNovelVoiceAvailability(
-                      novel,
+                      effectiveNovel,
                       chaptersListRef.current,
                       effectiveChapter
                     );
@@ -2754,7 +2794,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                       if (willActivateAudio) {
                         safeSetItem('daotam_audio_active', 'true');
                         await playDirectMp3Url(
-                          novel,
+                          effectiveNovel,
                           effectiveChapter,
                           resolvedAfterFetch,
                           currentNonce,
