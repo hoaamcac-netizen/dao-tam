@@ -15,6 +15,7 @@ import {
   normalizeEdgeVoiceId,
   isDeviceFallbackVoice,
   getMatchingBrowserVoice,
+  subscribeBrowserVoicesChanged,
   getNovelVoiceAvailability,
   resolveEffectiveVoiceForNovel,
 } from '../utils/rulesAndVoices';
@@ -331,8 +332,10 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const isAdvancingChapterRef = useRef<boolean>(false);
 
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const selectedBrowserVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const speechKeepAliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const speechResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechVoiceWaitUnsubRef = useRef<(() => void) | null>(null);
 
   const preparedChaptersRef = useRef<Map<string, QueuedAudioChunk[]>>(new Map());
   const preloadPromisesRef = useRef<Map<string, Promise<QueuedAudioChunk[]>>>(new Map());
@@ -772,6 +775,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     (singleAudio as any).playsInline = true;
     applyPlaybackRateLock(singleAudio, playbackRateRef.current);
 
+    selectedBrowserVoiceRef.current = getMatchingBrowserVoice();
+    const unsubscribeVoicesChanged = subscribeBrowserVoicesChanged(() => {
+      selectedBrowserVoiceRef.current = getMatchingBrowserVoice();
+    });
+
     const handleBeforeUnload = () => {
       playbackSessionIdRef.current += 1;
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -919,6 +927,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         activeUtteranceRef.current.onerror = null;
         activeUtteranceRef.current = null;
       }
+      if (speechVoiceWaitUnsubRef.current) {
+        try {
+          speechVoiceWaitUnsubRef.current();
+        } catch {}
+        speechVoiceWaitUnsubRef.current = null;
+      }
+      if (typeof unsubscribeVoicesChanged === 'function') {
+        unsubscribeVoicesChanged();
+      }
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         try {
           window.speechSynthesis.cancel();
@@ -1048,6 +1065,12 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       clearTimeout(speechResumeTimerRef.current);
       speechResumeTimerRef.current = null;
     }
+    if (speechVoiceWaitUnsubRef.current) {
+      try {
+        speechVoiceWaitUnsubRef.current();
+      } catch {}
+      speechVoiceWaitUnsubRef.current = null;
+    }
     if (activeUtteranceRef.current) {
       activeUtteranceRef.current.onstart = null;
       activeUtteranceRef.current.onend = null;
@@ -1091,7 +1114,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const formatVoiceArtistLabel = useCallback((voice: string) => {
     const normalized = normalizeEdgeVoiceId(voice);
-    if (isDeviceFallbackVoice(normalized)) return 'Giọng Máy Google';
+    if (isDeviceFallbackVoice(normalized)) return 'Giọng Máy';
     return normalized === 'vi-VN-HoaiMyNeural' ? 'Hằng Nga (Nữ)' : 'Nam Minh (Nam)';
   }, []);
 
@@ -1244,7 +1267,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setIsPlaying(false);
         isPlaybackActiveRef.current = false;
         backgroundAudioManager.pauseBackgroundPlayback();
-        setAudioError('Trình duyệt trên thiết bị này không hỗ trợ Giọng Máy Google.');
+        setAudioError('Trình duyệt trên thiết bị này không hỗ trợ Giọng Máy.');
         return;
       }
 
@@ -1267,7 +1290,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         saveListeningProgressLocal(curNovel, curChap, chunk.chapterChunkIndex);
         backgroundAudioManager.startBackgroundPlayback({
           title: formatChapterTitleForTTS(curChap),
-          artist: `${curNovel.title} • Giọng Máy Google`,
+          artist: `${curNovel.title} • Giọng Máy`,
           album: 'Đạo Tâm',
           coverImage: curNovel.coverImage,
           onPlay: () => {
@@ -1316,8 +1339,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         utterance.rate = Math.max(0.5, Math.min(3.0, playbackRateRef.current || 1.0));
         utterance.pitch = 1.0;
 
-        const matchedVoice = getMatchingBrowserVoice(voiceAtSpeechStart);
+        const matchedVoice = getMatchingBrowserVoice() || selectedBrowserVoiceRef.current;
         if (matchedVoice) {
+          selectedBrowserVoiceRef.current = matchedVoice;
           utterance.voice = matchedVoice;
         }
 
@@ -1355,26 +1379,60 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const startSpeakingSegments = () => {
         if (!isCurrentSpeechValid()) return;
-        speakSegmentAt(0);
+        const beginPlayback = () => {
+          if (!isCurrentSpeechValid()) return;
+          speakSegmentAt(0);
 
-        const isMobileUa =
-          typeof navigator !== 'undefined' &&
-          /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
-        if (!isMobileUa) {
-          speechKeepAliveRef.current = setInterval(() => {
-            if (!isCurrentSpeechValid() || !window.speechSynthesis.speaking) {
-              if (speechKeepAliveRef.current) {
-                clearInterval(speechKeepAliveRef.current);
-                speechKeepAliveRef.current = null;
+          const isMobileUa =
+            typeof navigator !== 'undefined' &&
+            /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+          if (!isMobileUa) {
+            speechKeepAliveRef.current = setInterval(() => {
+              if (!isCurrentSpeechValid() || !window.speechSynthesis.speaking) {
+                if (speechKeepAliveRef.current) {
+                  clearInterval(speechKeepAliveRef.current);
+                  speechKeepAliveRef.current = null;
+                }
+                return;
               }
-              return;
+              try {
+                window.speechSynthesis.pause();
+                window.speechSynthesis.resume();
+              } catch {}
+            }, 10000);
+          }
+        };
+
+        const loadedVoices = window.speechSynthesis.getVoices() || [];
+        if (loadedVoices.length === 0) {
+          let settled = false;
+          const finishWait = () => {
+            if (settled) return;
+            settled = true;
+            if (speechVoiceWaitUnsubRef.current) {
+              try {
+                speechVoiceWaitUnsubRef.current();
+              } catch {}
+              speechVoiceWaitUnsubRef.current = null;
             }
-            try {
-              window.speechSynthesis.pause();
-              window.speechSynthesis.resume();
-            } catch {}
-          }, 10000);
+            if (speechResumeTimerRef.current) {
+              clearTimeout(speechResumeTimerRef.current);
+              speechResumeTimerRef.current = null;
+            }
+            selectedBrowserVoiceRef.current = getMatchingBrowserVoice();
+            beginPlayback();
+          };
+          const unsub = subscribeBrowserVoicesChanged(() => {
+            if ((window.speechSynthesis.getVoices() || []).length > 0) {
+              finishWait();
+            }
+          });
+          speechVoiceWaitUnsubRef.current = unsub;
+          speechResumeTimerRef.current = setTimeout(finishWait, 350);
+          return;
         }
+
+        beginPlayback();
       };
 
       if (wasSynthesisBusy) {
@@ -2342,7 +2400,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const missingVoiceLabel =
             currentVoice === 'vi-VN-HoaiMyNeural' ? 'Hằng Nga' : 'Nam Minh';
           setFallbackNotice(
-            `Chương ${effectiveChapter.number} chưa có link MP3 ${missingVoiceLabel} — đang đọc bằng Giọng Máy Google`
+            `Chương ${effectiveChapter.number} chưa có link MP3 ${missingVoiceLabel} — đang đọc bằng Giọng Máy`
           );
         }
 
@@ -2465,7 +2523,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           safeSetItem('daotam_audio_active', 'true');
           backgroundAudioManager.updateMetadata(
             formatChapterTitleForTTS(effectiveChapter),
-            `${novel.title} • Giọng Máy Google`,
+            `${novel.title} • Giọng Máy`,
             novel.coverImage,
             'Đạo Tâm'
           );

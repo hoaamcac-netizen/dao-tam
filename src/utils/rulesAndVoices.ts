@@ -124,8 +124,8 @@ export interface VoiceSelectorOption {
 
 export const DEVICE_FALLBACK_VOICE_META: VoiceSelectorOption = {
   id: DEVICE_FALLBACK_VOICE_ID,
-  label: 'Giọng Máy Google',
-  shortLabel: 'Giọng Máy Google',
+  label: 'Giọng Máy',
+  shortLabel: 'Giọng Máy',
   subtitle: 'Giọng đọc trực tiếp trên thiết bị (tiếng Việt)',
 };
 
@@ -273,35 +273,96 @@ export function getLoadedEdgeVoices(): VoiceOption[] {
 }
 
 /**
- * Tìm kiếm giọng đọc tiếng Việt tốt nhất trong Web Speech API của thiết bị
+ * Tìm kiếm giọng đọc tiếng Việt NỮ tốt nhất trong Web Speech API của thiết bị
+ * (Ưu tiên 1: Google Tiếng Việt / Google Vietnamese; Ưu tiên 2: HoaiMy, Linh, Female, Nữ, gft, vie;
+ * Loại trừ giọng nam: An, NamMinh, Male, Nam, vid trừ khi không còn giọng nào khác).
  */
 let cachedVoices: SpeechSynthesisVoice[] = [];
+const browserVoiceChangeListeners = new Set<() => void>();
+
+function notifyBrowserVoiceChangeListeners() {
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    const latest = window.speechSynthesis.getVoices() || [];
+    if (latest.length > 0) {
+      cachedVoices = latest;
+    }
+  }
+  browserVoiceChangeListeners.forEach((cb) => {
+    try {
+      cb();
+    } catch {}
+  });
+}
 
 if (typeof window !== 'undefined' && window.speechSynthesis) {
-  cachedVoices = window.speechSynthesis.getVoices();
-  window.speechSynthesis.onvoiceschanged = () => {
-    cachedVoices = window.speechSynthesis.getVoices();
+  cachedVoices = window.speechSynthesis.getVoices() || [];
+  try {
+    if (typeof window.speechSynthesis.addEventListener === 'function') {
+      window.speechSynthesis.addEventListener('voiceschanged', notifyBrowserVoiceChangeListeners);
+    } else {
+      window.speechSynthesis.onvoiceschanged = notifyBrowserVoiceChangeListeners;
+    }
+  } catch {
+    window.speechSynthesis.onvoiceschanged = notifyBrowserVoiceChangeListeners;
+  }
+}
+
+export function subscribeBrowserVoicesChanged(listener: () => void): () => void {
+  browserVoiceChangeListeners.add(listener);
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    try {
+      window.speechSynthesis.onvoiceschanged = notifyBrowserVoiceChangeListeners;
+    } catch {}
+  }
+  return () => {
+    browserVoiceChangeListeners.delete(listener);
   };
 }
 
-export function getMatchingBrowserVoice(voiceId: string): SpeechSynthesisVoice | null {
+function tokenizeBrowserVoiceText(text: string): string[] {
+  return (text || '')
+    .normalize('NFC')
+    .toLowerCase()
+    .split(/[^a-z0-9àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]+/i)
+    .filter(Boolean);
+}
+
+function isMaleVietnameseBrowserVoice(v: SpeechSynthesisVoice): boolean {
+  const rawName = (v.name || '').normalize('NFC').toLowerCase();
+  const rawUri = (v.voiceURI || '').normalize('NFC').toLowerCase();
+  if (
+    rawName.includes('namminh') ||
+    rawName.includes('nam minh') ||
+    rawUri.includes('namminh')
+  ) {
+    return true;
+  }
+  const allTokens = new Set([
+    ...tokenizeBrowserVoiceText(rawName),
+    ...tokenizeBrowserVoiceText(rawUri),
+  ]);
+  return (
+    allTokens.has('an') ||
+    allTokens.has('namminh') ||
+    allTokens.has('male') ||
+    allTokens.has('nam') ||
+    allTokens.has('vid')
+  );
+}
+
+export function getMatchingBrowserVoice(_voiceId?: string): SpeechSynthesisVoice | null {
   if (typeof window === 'undefined' || !window.speechSynthesis) return null;
   const freshVoices = window.speechSynthesis.getVoices() || [];
   const voices = freshVoices.length > 0 ? freshVoices : cachedVoices;
   if ((voices?.length || 0) === 0) return null;
   if (freshVoices.length > 0) cachedVoices = freshVoices;
 
-  const targetId = normalizeEdgeVoiceId(voiceId);
-  const isFallbackMode = targetId === DEVICE_FALLBACK_VOICE_ID;
-  const isMale = targetId === 'vi-VN-NamMinhNeural';
-
   const viVoices = voices.filter((v) => {
     const lang = (v.lang || '').toLowerCase();
-    const name = (v.name || '').toLowerCase();
+    const name = (v.name || '').normalize('NFC').toLowerCase();
     return (
-      lang.startsWith('vi') ||
+      lang.includes('vi') ||
       lang.includes('vn') ||
-      lang === 'vie' ||
       name.includes('vietnam') ||
       name.includes('việt') ||
       name.includes('tiếng việt')
@@ -310,36 +371,60 @@ export function getMatchingBrowserVoice(voiceId: string): SpeechSynthesisVoice |
 
   if (viVoices.length === 0) return null;
 
-  const scoreVoice = (v: SpeechSynthesisVoice): number => {
+  // Loại trừ các giọng nam; chỉ fallback sang giọng nam nếu thiết bị hoàn toàn không có giọng nữ nào khác
+  const nonMaleViVoices = viVoices.filter((v) => !isMaleVietnameseBrowserVoice(v));
+  const candidateVoices = nonMaleViVoices.length > 0 ? nonMaleViVoices : viVoices;
+
+  const scoreFemaleVoice = (v: SpeechSynthesisVoice): number => {
     const lang = (v.lang || '').toLowerCase();
-    const name = (v.name || '').toLowerCase();
+    const name = (v.name || '').normalize('NFC').toLowerCase();
+    const uri = (v.voiceURI || '').normalize('NFC').toLowerCase();
+    const tokens = new Set([
+      ...tokenizeBrowserVoiceText(name),
+      ...tokenizeBrowserVoiceText(uri),
+    ]);
     let score = 0;
 
+    // Ưu tiên 1: Google Tiếng Việt / Google Vietnamese
+    if (
+      name === 'google tiếng việt' ||
+      name === 'google vietnamese' ||
+      name.includes('google tiếng việt') ||
+      name.includes('google vietnamese') ||
+      uri.includes('google tiếng việt') ||
+      uri.includes('google vietnamese')
+    ) {
+      score += 1000;
+    }
+
+    // Ưu tiên 2: Các giọng nữ tiếng Việt phổ biến (HoaiMy, Linh, Female, Nữ, gft, vie)
+    if (
+      name.includes('hoaimy') ||
+      name.includes('hoài my') ||
+      uri.includes('hoaimy') ||
+      tokens.has('hoaimy') ||
+      tokens.has('linh') ||
+      tokens.has('female') ||
+      tokens.has('nữ') ||
+      tokens.has('gft') ||
+      tokens.has('vie')
+    ) {
+      score += 350;
+    }
+
+    if (name.includes('google')) score += 150;
     if (lang === 'vi-vn' || lang === 'vi_vn') score += 50;
-    else if (lang.startsWith('vi')) score += 30;
+    else if (lang.includes('vi')) score += 30;
 
-    if (name.includes('google')) score += 60;
-    if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 30;
-    if (name.includes('microsoft')) score += 15;
-    if (name.includes('linh') || name.includes('hoaimy') || name.includes('hoài my') || name.includes('namminh') || name.includes('nam minh') || name.includes('an')) {
-      score += 20;
-    }
-
-    if (!isFallbackMode) {
-      if (isMale && (name.includes('namminh') || name.includes('nam minh') || name.includes('male') || name.includes('nam') || name.includes('an'))) {
-        score += 40;
-      } else if (!isMale && (name.includes('hoaimy') || name.includes('hoài my') || name.includes('female') || name.includes('linh') || name.includes('mai'))) {
-        score += 40;
-      }
-    }
-
-    if (v.localService) score += 10;
+    if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 25;
+    if (name.includes('microsoft')) score += 10;
+    if (v.localService) score += 5;
     if (v.default) score += 5;
 
     return score;
   };
 
-  return [...viVoices].sort((a, b) => scoreVoice(b) - scoreVoice(a))[0] || null;
+  return [...candidateVoices].sort((a, b) => scoreFemaleVoice(b) - scoreFemaleVoice(a))[0] || null;
 }
 
 let activeAudioSample: HTMLAudioElement | null = null;

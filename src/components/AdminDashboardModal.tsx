@@ -2775,7 +2775,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                   </div>
                   <h4 className="font-bold text-sm text-slate-900">Âm Thanh MP3 Song Giọng &amp; DRM Bản Quyền</h4>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Hỗ trợ liên kết MP3 trực tiếp theo 2 giọng đọc Nam Minh &amp; Hằng Nga kết hợp Giọng Máy Google mượt mà trên mọi thiết bị.
+                    Hỗ trợ liên kết MP3 trực tiếp theo 2 giọng đọc Nam Minh &amp; Hằng Nga kết hợp Giọng Máy mượt mà trên mọi thiết bị.
                   </p>
                   {onOpenArchitecture && (
                     <button

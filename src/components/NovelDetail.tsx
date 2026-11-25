@@ -676,7 +676,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                         ? 'bg-gradient-to-r from-pink-600 via-rose-500 to-pink-600 text-white shadow-pink-500/30 ring-2 ring-pink-400'
                         : 'bg-gradient-to-r from-yellow-400 to-amber-500 hover:from-yellow-300 hover:to-amber-400 text-slate-900 shadow-amber-500/25'
                     }`}
-                    title={`Nghe Audio Chương ${targetAudioChapter.number} (Nam Minh, Hằng Nga & Giọng Máy Google)`}
+                    title={`Nghe Audio Chương ${targetAudioChapter.number} (Nam Minh, Hằng Nga & Giọng Máy)`}
                   >
                     <Headphones className="w-4 h-4 shrink-0" />
                     <span>

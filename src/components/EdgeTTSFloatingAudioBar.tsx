@@ -184,7 +184,7 @@ export const EdgeTTSFloatingAudioBar: React.FC<EdgeTTSFloatingAudioBarProps> = (
                   ? networkStatusMessage
                   : isDirectMp3
                   ? `${activeVoiceMeta.shortLabel} • ${formatAudioTime(mp3CurrentTime)}/${formatAudioTime(mp3Duration)}`
-                  : `${fallbackNotice ? 'Giọng Máy Google' : activeVoiceMeta.shortLabel} • Câu ${currentChunkIndex + 1}/${totalChunks}`}
+                  : `${fallbackNotice ? 'Giọng Máy' : activeVoiceMeta.shortLabel} • Câu ${currentChunkIndex + 1}/${totalChunks}`}
               </div>
             </div>
           </button>
