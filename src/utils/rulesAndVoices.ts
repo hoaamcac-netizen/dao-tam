@@ -832,33 +832,48 @@ export function getNovelChapterStats(novel?: Partial<Novel> | null): {
   }
 
   const chaptersList = Array.isArray(novel.chapters) ? novel.chapters : [];
-  const maxNumberInList = chaptersList.reduce((max, c) => Math.max(max, Number(c?.number) || 0), 0);
-  
-  const effectiveTotal = (novel.totalChapters !== undefined && Number(novel.totalChapters) > 0)
+  const publicChaptersList = chaptersList.filter(
+    (c) => !c?.isHidden && !isChapterScheduledPending(c)
+  );
+  const hasLoadedChapters = chaptersList.length > 0;
+  const maxNumberInPublic = publicChaptersList.reduce(
+    (max, c) => Math.max(max, Number(c?.number) || 0),
+    0
+  );
+
+  const effectiveTotal = hasLoadedChapters
+    ? Math.max(publicChaptersList.length, maxNumberInPublic)
+    : novel.totalChapters !== undefined && Number(novel.totalChapters) > 0
     ? Number(novel.totalChapters)
-    : Math.max(chaptersList?.length || 0, maxNumberInList, Number((novel as any)?.latestChapterNumber) || 0, 1);
+    : Math.max(Number((novel as any)?.latestChapterNumber) || 0, 0);
 
   const statusRaw = String(novel.status || '').trim().toLowerCase();
   const isCompleted = statusRaw === 'hoàn thành' || statusRaw === 'full' || statusRaw === 'completed';
 
-  // Tìm chương cao nhất trong mảng chapters nạp sẵn
-  const topChapterInList = chaptersList.find((c) => Number(c?.number) === effectiveTotal) ||
-    ((chaptersList?.length || 0) > 0 ? chaptersList[(chaptersList?.length || 0) - 1] : null);
+  // Tìm chương cao nhất ĐÃ PHÁT HÀNH trong mảng chapters nạp sẵn
+  const topChapterInList =
+    publicChaptersList.find((c) => Number(c?.number) === effectiveTotal) ||
+    (publicChaptersList.length > 0 ? publicChaptersList[publicChaptersList.length - 1] : null);
 
   let latestTitle = '';
 
   const rawLatest = (novel.latestChapterTitle || '').trim();
   const latestTitleNumMatch = rawLatest.match(/^(?:chương|hồi|chapter)\s+(\d+)/i);
   const latestTitleNum = latestTitleNumMatch ? parseInt(latestTitleNumMatch[1], 10) : null;
-  const isLatestTitleStale = latestTitleNum !== null && effectiveTotal > 0 && latestTitleNum < effectiveTotal;
+  const isLatestTitleStale =
+    latestTitleNum !== null && effectiveTotal > 0 && latestTitleNum < effectiveTotal;
+  const isLatestTitleAheadOfPublic =
+    hasLoadedChapters &&
+    latestTitleNum !== null &&
+    (publicChaptersList.length === 0 || latestTitleNum > maxNumberInPublic);
 
-  // 1. Ưu tiên tiêu đề chương mới nhất đã lưu trên novel nếu có và không bị cũ hơn tổng số chương
-  if (rawLatest !== '' && !isLatestTitleStale) {
-    latestTitle = rawLatest;
-  }
-  // 2. Nếu tìm thấy chương khớp chính xác với effectiveTotal trong mảng và có tiêu đề
-  else if (topChapterInList && topChapterInList.title) {
+  // 1. Nếu đã nạp danh sách chương, ưu tiên chương mới nhất đã phát hành thực tế
+  if (hasLoadedChapters && topChapterInList && topChapterInList.title) {
     latestTitle = topChapterInList.title;
+  }
+  // 2. Ưu tiên tiêu đề chương mới nhất đã lưu trên novel nếu không bị cũ hoặc vượt quá chương đã phát hành
+  else if (rawLatest !== '' && !isLatestTitleStale && !isLatestTitleAheadOfPublic) {
+    latestTitle = rawLatest;
   }
   // 3. Mặc định format theo số chương thực tế
   else {
@@ -872,13 +887,15 @@ export function getNovelChapterStats(novel?: Partial<Novel> | null): {
     !latestTitle.toLowerCase().startsWith('chương ') &&
     !latestTitle.toLowerCase().startsWith('hồi ')
   ) {
-    latestTitle = `Chương ${effectiveTotal || 1}: ${latestTitle}`;
+    latestTitle = `Chương ${topChapterInList?.number || effectiveTotal || 1}: ${latestTitle}`;
   }
 
   return {
     effectiveTotal,
     latestChapterTitle: latestTitle,
-    latestChapterNumber: Math.max(Number((novel as any)?.latestChapterNumber) || 0, effectiveTotal),
+    latestChapterNumber: hasLoadedChapters
+      ? Number(topChapterInList?.number || effectiveTotal || 0)
+      : Math.max(Number((novel as any)?.latestChapterNumber) || 0, effectiveTotal),
     isCompleted,
   };
 }
@@ -897,4 +914,214 @@ export function removeVietnameseTones(str: string): string {
     .toLowerCase()
     .trim();
 }
+
+/**
+ * Trả về mốc thời gian hẹn giờ xuất bản (epoch ms) của chương nếu có (hỗ trợ cả publishAt và scheduledPublishAt).
+ */
+export function getChapterPublishAt(chapter?: Partial<Chapter> | null): number | undefined {
+  if (!chapter) return undefined;
+  const raw = chapter.publishAt ?? chapter.scheduledPublishAt;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw;
+  }
+  return undefined;
+}
+
+/**
+ * Kiểm tra xem chương có đang ở trạng thái chờ hẹn giờ xuất bản hay không.
+ */
+export function isChapterScheduledPending(
+  chapter?: Partial<Chapter> | null,
+  nowMs: number = Date.now()
+): boolean {
+  const pubAt = getChapterPublishAt(chapter);
+  return typeof pubAt === 'number' && pubAt > nowMs;
+}
+
+/**
+ * Kiểm tra xem chương có được phép hiển thị cho độc giả thường hay không:
+ * - Tác giả / Editor sở hữu truyện hoặc Admin luôn thấy mọi chương.
+ * - Độc giả thường: ẩn chương có isHidden === true hoặc publishAt > Date.now().
+ */
+export function isChapterVisibleToReader(
+  chapter?: Partial<Chapter> | null,
+  isOwnerOrAdmin: boolean = false,
+  nowMs: number = Date.now()
+): boolean {
+  if (!chapter) return false;
+  if (isOwnerOrAdmin) return true;
+  if (chapter.isHidden) return false;
+  return !isChapterScheduledPending(chapter, nowMs);
+}
+
+/**
+ * Kiểm tra quyền Admin hoặc Chủ sở hữu (Tác giả / Editor / Người gửi truyện).
+ */
+export function isUserOwnerOrAdmin(user: any, novel?: Partial<Novel> | null): boolean {
+  if (!user) return false;
+  if (user.role === 'admin' || checkIsAdmin(user.email)) return true;
+  if (!novel) return false;
+
+  const userId = user.id && user.id !== 'guest' ? String(user.id).trim() : '';
+  const userEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
+  const userName = typeof user.displayName === 'string' ? user.displayName.trim().toLowerCase() : '';
+
+  if (
+    userId &&
+    ((novel as any).authorId === userId || novel.submittedBy?.userId === userId)
+  ) {
+    return true;
+  }
+  if (
+    userEmail &&
+    ((novel as any).authorEmail?.toLowerCase?.().trim() === userEmail ||
+      novel.submittedBy?.userEmail?.toLowerCase?.().trim() === userEmail)
+  ) {
+    return true;
+  }
+  if (
+    userName &&
+    (novel.author?.trim().toLowerCase() === userName ||
+      novel.editor?.trim().toLowerCase() === userName ||
+      novel.submittedBy?.userName?.trim().toLowerCase() === userName)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * Định dạng ngắn: DD/MM HH:mm
+ */
+export function formatScheduleShort(ms?: number | null): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * Định dạng đầy đủ: DD/MM/YYYY HH:mm
+ */
+export function formatScheduleFull(ms?: number | null): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * Chuyển timestamp ms sang chuỗi YYYY-MM-DDTHH:mm cho input datetime-local (giờ địa phương).
+ */
+export function toDatetimeLocalInput(ms?: number | null): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return '';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * Chuyển chuỗi YYYY-MM-DDTHH:mm từ input datetime-local sang timestamp ms.
+ */
+export function fromDatetimeLocalInput(val?: string | null): number | undefined {
+  if (!val || typeof val !== 'string') return undefined;
+  const trimmed = val.trim();
+  if (!trimmed) return undefined;
+  const parsed = new Date(trimmed).getTime();
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * Đếm số chương đã gắn MP3 theo từng giọng từ mảng chapters trong RAM (0 Firestore Reads).
+ */
+export function computeChapterAudioCounts(
+  chapters?: Array<Partial<Chapter>> | null
+): {
+  mp3NamMinhCount: number;
+  mp3HangNgaCount: number;
+  hasMaleAudio: boolean;
+  hasFemaleAudio: boolean;
+  hasAudio: boolean;
+} {
+  let mp3NamMinhCount = 0;
+  let mp3HangNgaCount = 0;
+  if (Array.isArray(chapters)) {
+    for (const ch of chapters) {
+      if (!ch) continue;
+      if (getChapterAudioUrl(ch, 'male')) mp3NamMinhCount += 1;
+      if (getChapterAudioUrl(ch, 'female')) mp3HangNgaCount += 1;
+    }
+  }
+  const hasMaleAudio = mp3NamMinhCount > 0;
+  const hasFemaleAudio = mp3HangNgaCount > 0;
+  return {
+    mp3NamMinhCount,
+    mp3HangNgaCount,
+    hasMaleAudio,
+    hasFemaleAudio,
+    hasAudio: hasMaleAudio || hasFemaleAudio,
+  };
+}
+
+/**
+ * Lấy mốc latestPublishAt cao nhất của bộ truyện (ưu tiên từ root doc hoặc quét chapters sẵn có, 0 Reads).
+ */
+export function getNovelLatestPublishAt(
+  novel?: Partial<Novel> | null,
+  extraChapters?: Array<Partial<Chapter>> | null
+): number {
+  let maxTs =
+    typeof novel?.latestPublishAt === 'number' && Number.isFinite(novel.latestPublishAt)
+      ? novel.latestPublishAt
+      : 0;
+  const scan = (list?: Array<Partial<Chapter>> | null) => {
+    if (!Array.isArray(list)) return;
+    for (const ch of list) {
+      const pubAt = getChapterPublishAt(ch);
+      if (typeof pubAt === 'number' && pubAt > maxTs) {
+        maxTs = pubAt;
+      }
+    }
+  };
+  scan(novel?.chapters);
+  scan(extraChapters);
+  return maxTs;
+}
+
+/**
+ * Lấy thống kê trạng thái MP3 của 1 truyện từ root metadata (0 Firestore Reads).
+ */
+export function getNovelMp3Counts(novel?: Partial<Novel> | null): {
+  totalChapters: number;
+  namMinhCount: number;
+  hangNgaCount: number;
+} {
+  const chaps = Array.isArray(novel?.chapters) ? novel.chapters : [];
+  const totalChapters = Math.max(Number(novel?.totalChapters || 0), chaps.length);
+
+  let namMinhCount = 0;
+  if (typeof novel?.mp3NamMinhCount === 'number' && Number.isFinite(novel.mp3NamMinhCount)) {
+    namMinhCount = Math.max(0, novel.mp3NamMinhCount);
+  } else if (chaps.length > 0) {
+    namMinhCount = computeChapterAudioCounts(chaps).mp3NamMinhCount;
+  }
+
+  let hangNgaCount = 0;
+  if (typeof novel?.mp3HangNgaCount === 'number' && Number.isFinite(novel.mp3HangNgaCount)) {
+    hangNgaCount = Math.max(0, novel.mp3HangNgaCount);
+  } else if (chaps.length > 0) {
+    hangNgaCount = computeChapterAudioCounts(chaps).mp3HangNgaCount;
+  }
+
+  return {
+    totalChapters,
+    namMinhCount,
+    hangNgaCount,
+  };
+}
+
 

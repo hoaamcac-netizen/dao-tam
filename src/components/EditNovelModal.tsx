@@ -2,6 +2,15 @@ import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { Novel, Chapter, MainCategory, StoryRole, GenreItem } from '../types';
 import {
   calculateChapterVip,
+  computeChapterAudioCounts,
+  formatScheduleFull,
+  formatScheduleShort,
+  fromDatetimeLocalInput,
+  getChapterPublishAt,
+  getNovelLatestPublishAt,
+  isChapterScheduledPending,
+  isChapterVisibleToReader,
+  toDatetimeLocalInput,
 } from '../utils/rulesAndVoices';
 import { AdminChapterMp3Actions } from './AdminGitHubAudioManager';
 import { 
@@ -9,7 +18,8 @@ import {
   deleteChapterFromFirestore, 
   deleteBatchChaptersFromFirestore,
   toggleHideChapterInFirestore,
-  toggleHideBatchChaptersInFirestore
+  toggleHideBatchChaptersInFirestore,
+  saveEditedChaptersToSubcollection
 } from '../firebase/services';
 import { 
   X, 
@@ -39,7 +49,10 @@ import {
   Loader2,
   Eye,
   EyeOff,
-  Headphones
+  Headphones,
+  Clock,
+  Wand2,
+  AlertCircle
 } from 'lucide-react';
 
 export interface EditNovelModalProps {
@@ -124,6 +137,9 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   // Single Chapter Editing state
   const [editingChapter, setEditingChapter] = useState<Chapter | null>(null);
   const [isNewChapter, setIsNewChapter] = useState(false);
+  const [editScheduleMode, setEditScheduleMode] = useState<'immediate' | 'scheduled'>('immediate');
+  const [editScheduleInput, setEditScheduleInput] = useState<string>('');
+  const modifiedChaptersMapRef = useRef<Map<string, Chapter>>(new Map());
 
   // Success & Error message state
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
@@ -134,6 +150,7 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   // Synchronize state whenever novel prop changes or changes ID
   useEffect(() => {
     if (novel) {
+      modifiedChaptersMapRef.current.clear();
       setHasChapterChanges(false);
       setTitle(novel.title || '');
       setAuthor(novel.author || 'Khuyết danh');
@@ -478,11 +495,68 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
     }
   };
 
+  const editScheduleBounds = useMemo(() => {
+    if (!editingChapter) {
+      return { prevMaxTs: 0, nextMinTs: Infinity, error: '', selectedTs: undefined as number | undefined };
+    }
+    let prevMaxTs = 0;
+    let nextMinTs = Infinity;
+    const curNum = Number(editingChapter.number) || 0;
+    for (const c of chapters || []) {
+      if (c.id === editingChapter.id) continue;
+      const pubAt = getChapterPublishAt(c);
+      if (!pubAt) continue;
+      const cNum = Number(c.number) || 0;
+      if (cNum < curNum && pubAt > prevMaxTs) {
+        prevMaxTs = pubAt;
+      } else if (cNum > curNum && pubAt < nextMinTs) {
+        nextMinTs = pubAt;
+      }
+    }
+
+    if (editScheduleMode !== 'scheduled') {
+      return { prevMaxTs, nextMinTs, error: '', selectedTs: undefined as number | undefined };
+    }
+
+    const selectedTs = fromDatetimeLocalInput(editScheduleInput);
+    let error = '';
+    if (!selectedTs) {
+      error = 'Vui lòng chọn ngày giờ hợp lệ.';
+    } else if (prevMaxTs > 0 && selectedTs < prevMaxTs + 60_000) {
+      error = `Thời gian hẹn giờ phải trễ hơn chương trước ít nhất 1 phút (${formatScheduleFull(prevMaxTs + 60_000)}).`;
+    } else if (nextMinTs < Infinity && selectedTs > nextMinTs - 60_000) {
+      error = `Thời gian hẹn giờ phải sớm hơn chương sau ít nhất 1 phút (${formatScheduleFull(nextMinTs - 60_000)}).`;
+    }
+
+    return { prevMaxTs, nextMinTs, error, selectedTs };
+  }, [editingChapter, chapters, editScheduleMode, editScheduleInput]);
+
+  const handleAutoFixEditSchedule = () => {
+    const { prevMaxTs, nextMinTs } = editScheduleBounds;
+    let suggested: number;
+    if (nextMinTs < Infinity) {
+      if (prevMaxTs > 0 && nextMinTs > prevMaxTs + 2000) {
+        suggested = Math.floor((prevMaxTs + nextMinTs) / 2);
+      } else {
+        suggested = Math.max(Date.now() + 60_000, prevMaxTs + 60_000);
+        if (suggested >= nextMinTs) {
+          suggested = Math.max(prevMaxTs + 60_000, nextMinTs - 60_000);
+        }
+      }
+    } else {
+      suggested = Math.max(Date.now() + 60_000, prevMaxTs + 60_000);
+    }
+    setEditScheduleInput(toDatetimeLocalInput(suggested));
+  };
+
   // Open Chapter Editor for new chapter
   const handleAddNewChapter = () => {
     const safeChaps = Array.isArray(chapters) ? chapters : [];
     const nextNumber = (safeChaps?.length || 0) > 0 ? Math.max(...safeChaps.map((c) => c.number || 0)) + 1 : 1;
     const { isVip, priceXu } = calculateChapterVip(nextNumber, novel.totalChapters || safeChaps?.length || 100);
+    const maxExistingTs = getNovelLatestPublishAt(novel, safeChaps);
+    setEditScheduleMode('immediate');
+    setEditScheduleInput(toDatetimeLocalInput(Math.max(Date.now() + 30 * 60_000, maxExistingTs + 60_000)));
     
     setEditingChapter({
       id: `${novel.id}-c${nextNumber}-${Date.now()}`,
@@ -502,13 +576,21 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   const handleSaveChapterEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingChapter) return;
+    if (editScheduleMode === 'scheduled' && editScheduleBounds.error) {
+      return;
+    }
 
+    const effectivePublishAt = editScheduleMode === 'scheduled' ? editScheduleBounds.selectedTs : undefined;
     const wordCount = (editingChapter.content || '').split(/\s+/).filter(Boolean)?.length || 0;
     const updatedChapter: Chapter = {
       ...editingChapter,
       wordCount,
       title: (editingChapter.title || '').trim() || `Chương ${editingChapter.number}`,
+      publishAt: effectivePublishAt,
+      scheduledPublishAt: effectivePublishAt,
     };
+
+    modifiedChaptersMapRef.current.set(updatedChapter.id, updatedChapter);
 
     if (isNewChapter) {
       setChapters((prev) => [...(prev || []), updatedChapter].sort((a, b) => a.number - b.number));
@@ -548,10 +630,19 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
       ? Math.max(chapsLen, Number(safeChaps[chapsLen - 1]?.number) || 0)
       : 0;
 
-    const latestChap = chapsLen > 0 ? safeChaps[chapsLen - 1] : null;
-    const latestChapterTitle = latestChap?.title
-      ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`)
+    const visibleChaps = safeChaps.filter((c) => isChapterVisibleToReader(c, false));
+    const publicLatestChap =
+      visibleChaps.length > 0
+        ? visibleChaps[visibleChaps.length - 1]
+        : chapsLen > 0
+        ? safeChaps[chapsLen - 1]
+        : null;
+    const latestChapterTitle = publicLatestChap?.title
+      ? (publicLatestChap.title.startsWith('Chương') ? publicLatestChap.title : `Chương ${publicLatestChap.number}: ${publicLatestChap.title}`)
       : 'Chưa có chương';
+
+    const latestPublishAt = getNovelLatestPublishAt(undefined, safeChaps) || undefined;
+    const audioCounts = computeChapterAudioCounts(safeChaps);
 
     const updatedNovel: Novel = {
       ...novel,
@@ -569,7 +660,9 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
       categories: selectedGenres,
       totalChapters: effectiveTotal,
       latestChapterTitle,
-      latestChapterNumber: latestChap?.number || 0,
+      latestChapterNumber: publicLatestChap?.number || 0,
+      latestPublishAt,
+      ...(chapsLen > 0 ? audioCounts : {}),
       fullBookPriceXu: effectiveListedPrice,
       fullBookDiscountPriceXu: effectiveDiscountPrice,
       chapters,
@@ -588,6 +681,13 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
     }, 30000);
 
     try {
+      if (modifiedChaptersMapRef.current.size > 0) {
+        await saveEditedChaptersToSubcollection(
+          novel.id,
+          Array.from(modifiedChaptersMapRef.current.values())
+        );
+        modifiedChaptersMapRef.current.clear();
+      }
       await onSaveNovel(updatedNovel);
       setSaveSuccessMsg('Đã lưu thành công tất cả thay đổi của truyện và các chương!');
       setTimeout(() => {
@@ -1346,6 +1446,11 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                                   <EyeOff className="w-2.5 h-2.5 text-amber-700" /> Đã ẩn
                                 </span>
                               )}
+                              {isChapterScheduledPending(ch) && (
+                                <span className="bg-amber-50 text-amber-800 font-extrabold px-2 py-0.5 rounded-full text-[10px] border border-amber-300 flex items-center gap-1">
+                                  <Clock className="w-2.5 h-2.5 text-amber-600" /> Hẹn giờ: {formatScheduleShort(getChapterPublishAt(ch))}
+                                </span>
+                              )}
                               {(ch.audioUrlMale || ch.audioUrl) && (
                                 <span className="bg-sky-100 text-sky-800 font-extrabold px-2.5 py-0.5 rounded-full text-[10px] border border-sky-300 flex items-center gap-1">
                                   <Headphones className="w-2.5 h-2.5 text-sky-700" /> Nam Minh
@@ -1385,6 +1490,13 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                           <button
                             type="button"
                             onClick={() => {
+                              const pubAt = getChapterPublishAt(ch);
+                              setEditScheduleMode(pubAt ? 'scheduled' : 'immediate');
+                              setEditScheduleInput(
+                                pubAt
+                                  ? toDatetimeLocalInput(pubAt)
+                                  : toDatetimeLocalInput(Math.max(Date.now() + 30 * 60_000, getNovelLatestPublishAt(novel, chapters) + 60_000))
+                              );
                               setEditingChapter({ ...ch });
                               setIsNewChapter(false);
                             }}
@@ -1599,6 +1711,72 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                 )}
               </div>
 
+              {/* Schedule Configuration */}
+              <div className={`p-3.5 rounded-2xl border space-y-2.5 ${
+                editScheduleBounds.error
+                  ? 'bg-rose-50 border-rose-500'
+                  : 'bg-slate-50 border-slate-200'
+              }`}>
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+                  <Clock className="w-4 h-4 text-pink-600" />
+                  <span>Cấu hình Lịch đăng chương</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditScheduleMode('immediate')}
+                    className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center gap-1.5 ${
+                      editScheduleMode === 'immediate'
+                        ? 'bg-emerald-600 border-emerald-600 text-white shadow-2xs'
+                        : 'bg-white border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Đăng ngay lập tức</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditScheduleMode('scheduled')}
+                    className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center gap-1.5 ${
+                      editScheduleMode === 'scheduled'
+                        ? 'bg-amber-500 border-amber-500 text-slate-950 shadow-2xs'
+                        : 'bg-white border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>Lên lịch đăng tự động</span>
+                  </button>
+                </div>
+                {editScheduleMode === 'scheduled' && (
+                  <div className="space-y-2 pt-1">
+                    <input
+                      type="datetime-local"
+                      value={editScheduleInput}
+                      onChange={(e) => setEditScheduleInput(e.target.value)}
+                      className={`w-full sm:w-auto min-h-[44px] px-3 py-2 rounded-xl border bg-white text-xs sm:text-sm font-bold text-slate-900 focus:outline-none ${
+                        editScheduleBounds.error ? 'border-rose-500' : 'border-slate-300 focus:border-pink-500'
+                      }`}
+                    />
+                    {editScheduleBounds.error && (
+                      <div className="p-2.5 rounded-xl bg-rose-100 border border-rose-400 text-rose-900 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                        <div className="flex items-start gap-1.5">
+                          <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0 mt-0.5" />
+                          <span className="font-bold">{editScheduleBounds.error}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAutoFixEditSchedule}
+                          className="min-h-[44px] px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
+                        >
+                          <Wand2 className="w-3.5 h-3.5" />
+                          <span>Tự động sắp xếp lại giờ tăng dần</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {/* Content Editor */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
@@ -1625,13 +1803,14 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setEditingChapter(null)}
-                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
                 >
                   Hủy Bỏ
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-700 text-white font-bold text-xs shadow-md cursor-pointer flex items-center gap-1.5"
+                  disabled={Boolean(editScheduleBounds.error)}
+                  className="min-h-[44px] px-5 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs shadow-md cursor-pointer flex items-center gap-1.5"
                 >
                   <Save className="w-4 h-4" />
                   <span>Lưu Chương Này</span>

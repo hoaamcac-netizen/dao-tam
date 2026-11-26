@@ -22,7 +22,9 @@ export interface Chapter {
   publishedDate?: string;
   isVip?: boolean; // Rule: >= 51 if total >= 200, >= 31 if total < 200
   priceXu?: number;
+  publishAt?: number;
   scheduledPublishAt?: number;
+  authorNote?: string;
   isHidden?: boolean; // Ẩn chương khỏi độc giả, chỉ Tác giả và Quản trị viên mới thấy
   audioUrl?: string;
   audioUrlMale?: string;
@@ -73,6 +75,9 @@ export interface Novel {
   hasAudio: boolean;
   hasMaleAudio?: boolean;
   hasFemaleAudio?: boolean;
+  mp3NamMinhCount?: number;
+  mp3HangNgaCount?: number;
+  latestPublishAt?: number;
   flowerCount?: number; // Số hoa được bạn đọc và BQT đề cử
   coinCount?: number; // Tổng số xu được bạn đọc donate
   fullBookPriceXu: number;

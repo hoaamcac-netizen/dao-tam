@@ -23,7 +23,20 @@ import { ClientLiveChat } from './components/ClientLiveChat';
 import { AdminMessagesModal } from './components/AdminMessagesModal';
 import { fetchUnreadMessageCount } from './services/chatService';
 import { getStoredGenres, saveGenres, createGenreItem, INITIAL_HOT_GENRES } from './data/genres';
-import { formatXu, calculateChapterVip, filterOutDummyChapters, isDummyChapter, removeVietnameseTones, normalizeStoryId, getChapterAudioUrl } from './utils/rulesAndVoices';
+import {
+  formatXu,
+  calculateChapterVip,
+  filterOutDummyChapters,
+  isDummyChapter,
+  removeVietnameseTones,
+  normalizeStoryId,
+  getChapterAudioUrl,
+  getNovelLatestPublishAt,
+  isChapterVisibleToReader,
+  isUserOwnerOrAdmin,
+  getChapterPublishAt,
+  computeChapterAudioCounts,
+} from './utils/rulesAndVoices';
 import { Header } from './components/Header';
 import { NovelCard } from './components/NovelCard';
 import { NovelDetail } from './components/NovelDetail';
@@ -1710,9 +1723,11 @@ function DaoTamApp() {
     content: string;
     isVip: boolean;
     priceXu: number;
+    publishAt?: number;
     scheduledPublishAt?: number;
     status: 'draft' | 'pending' | 'published';
   }) => {
+    const effectivePublishAt = chapterData.publishAt ?? chapterData.scheduledPublishAt;
     const newChapter: Chapter = {
       id: `${novelId}-c${chapterData.number}-${Date.now()}`,
       number: chapterData.number,
@@ -1723,7 +1738,8 @@ function DaoTamApp() {
       isVip: chapterData.isVip,
       priceXu: chapterData.isVip ? chapterData.priceXu : 0,
       content: chapterData.content,
-      scheduledPublishAt: chapterData.scheduledPublishAt,
+      publishAt: effectivePublishAt,
+      scheduledPublishAt: effectivePublishAt,
     };
 
     const currentNovel = (novels || []).find((n) => n.id === novelId) || (selectedNovel && selectedNovel.id === novelId ? selectedNovel : null);
@@ -1732,15 +1748,25 @@ function DaoTamApp() {
     const chapters = exists
       ? (existingChapters || []).map((c) => (Number(c.number) === Number(chapterData.number) ? { ...c, ...newChapter } : c))
       : [...existingChapters, newChapter].sort((a, b) => Number(a.number) - Number(b.number));
-    const latestChap = (chapters?.length || 0) > 0 ? chapters[(chapters?.length || 0) - 1] : undefined;
+    const visibleChaps = chapters.filter((c) => isChapterVisibleToReader(c, false));
+    const latestChap =
+      visibleChaps.length > 0
+        ? visibleChaps[visibleChaps.length - 1]
+        : (chapters?.length || 0) > 0
+        ? chapters[(chapters?.length || 0) - 1]
+        : undefined;
+    const latestPublishAt = getNovelLatestPublishAt(currentNovel, chapters) || undefined;
 
     const fallback = createFallbackNovel(novelId, user?.displayName || 'Tác giả');
     const updatedNovelTarget: Novel = {
       ...(currentNovel || fallback),
       chapters,
       totalChapters: Math.max(currentNovel?.totalChapters || 0, chapters?.length || 0),
-      latestChapterTitle: latestChap?.title ? `Chương ${latestChap.number}: ${latestChap.title}` : undefined,
-      latestChapterNumber: latestChap?.number,
+      latestChapterTitle: latestChap?.title
+        ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`)
+        : currentNovel?.latestChapterTitle,
+      latestChapterNumber: latestChap?.number ?? currentNovel?.latestChapterNumber,
+      latestPublishAt,
       updatedAt: Date.now(),
       lastChapterUpdatedAt: Date.now(),
       lastUpdated: 'Vừa xong',
@@ -1839,22 +1865,31 @@ function DaoTamApp() {
       content: '', // Không chứa nội dung chữ trong state tổng để tối ưu bộ nhớ trình duyệt
     }));
     const combined = Array.from(chapterMap.values()).sort((a, b) => Number(a.number) - Number(b.number));
-    const latestChap = combined[(combined?.length || 0) - 1];
+    const maxChapNum = combined.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 0);
+    const visibleCombined = combined.filter((c) => isChapterVisibleToReader(c, false));
+    const latestChap =
+      visibleCombined.length > 0
+        ? visibleCombined[visibleCombined.length - 1]
+        : combined[(combined?.length || 0) - 1];
+    const latestPublishAt = getNovelLatestPublishAt(currentNovel, combined) || undefined;
 
     const fallback = createFallbackNovel(novelId, user?.displayName || 'Tác giả');
     const finalStatus = isCompleted !== undefined
       ? (isCompleted ? 'Hoàn thành' : 'Đang ra')
       : (currentNovel?.status || 'Đang ra');
 
-    const totalCount = Math.max(currentNovel?.totalChapters || 0, combined?.length || 0, latestChap?.number || 0);
+    const totalCount = Math.max(currentNovel?.totalChapters || 0, combined?.length || 0, maxChapNum);
 
     const updatedNovelTarget: Novel = {
       ...(currentNovel || fallback),
       status: finalStatus,
       chapters: combined,
       totalChapters: totalCount,
-      latestChapterTitle: latestChap?.title ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`) : `Chương ${totalCount}`,
-      latestChapterNumber: latestChap?.number || totalCount,
+      latestChapterTitle: latestChap?.title
+        ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`)
+        : currentNovel?.latestChapterTitle || `Chương ${totalCount}`,
+      latestChapterNumber: latestChap?.number || currentNovel?.latestChapterNumber || totalCount,
+      latestPublishAt,
       updatedAt: Date.now(),
       lastChapterUpdatedAt: Date.now(),
       lastUpdated: 'Vừa xong',
@@ -2316,7 +2351,7 @@ function DaoTamApp() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Xuất bản chương mới cho bộ truyện (Đồng bộ vào State, localStorage và Firestore)
+  // Xuất bản chương mới cho bộ truyện (Đồng bộ vào State, localStorage và máy chủ)
   const handlePublishNewChapter = async (novelId: string, chapterData: {
     title: string;
     number: number;
@@ -2324,7 +2359,10 @@ function DaoTamApp() {
     isVip: boolean;
     priceXu: number;
     authorNote?: string;
+    publishAt?: number;
+    scheduledPublishAt?: number;
   }, isCompleted?: boolean) => {
+    const effectivePublishAt = chapterData.publishAt ?? chapterData.scheduledPublishAt;
     const newChapter: Chapter = {
       id: `${novelId}-c${chapterData.number}`,
       number: chapterData.number,
@@ -2335,6 +2373,9 @@ function DaoTamApp() {
       isVip: chapterData.isVip,
       priceXu: chapterData.isVip ? chapterData.priceXu : 0,
       content: chapterData.content,
+      authorNote: chapterData.authorNote,
+      publishAt: effectivePublishAt,
+      scheduledPublishAt: effectivePublishAt,
     };
 
     const currentNovel = (novels || []).find((n) => n.id === novelId) 
@@ -2356,7 +2397,13 @@ function DaoTamApp() {
       ? (existingChapters || []).map((c) => (Number(c.number) === Number(chapterData.number) ? { ...c, ...newChapter } : c))
       : [...(existingChapters || []), newChapter].sort((a, b) => Number(a.number) - Number(b.number));
 
-    const latestChap = mergedChapters[(mergedChapters?.length || 0) - 1];
+    const visibleMerged = mergedChapters.filter((c) => isChapterVisibleToReader(c, false));
+    const latestChap =
+      visibleMerged.length > 0
+        ? visibleMerged[visibleMerged.length - 1]
+        : mergedChapters[(mergedChapters?.length || 0) - 1];
+    const latestPublishAt = getNovelLatestPublishAt(currentNovel, mergedChapters) || undefined;
+
     const finalStatus = isCompleted !== undefined
       ? (isCompleted ? 'Hoàn thành' : 'Đang ra')
       : (currentNovel?.status || 'Đang ra');
@@ -2369,8 +2416,11 @@ function DaoTamApp() {
       status: finalStatus,
       chapters: mergedChapters,
       totalChapters: totalCount,
-      latestChapterTitle: latestChap?.title ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`) : `Chương ${chapterData.number}: ${chapterData.title}`,
-      latestChapterNumber: latestChap?.number || chapterData.number,
+      latestChapterTitle: latestChap?.title
+        ? (latestChap.title.startsWith('Chương') ? latestChap.title : `Chương ${latestChap.number}: ${latestChap.title}`)
+        : currentNovel?.latestChapterTitle || `Chương ${chapterData.number}: ${chapterData.title}`,
+      latestChapterNumber: latestChap?.number || currentNovel?.latestChapterNumber || chapterData.number,
+      latestPublishAt,
       updatedAt: Date.now(),
       lastChapterUpdatedAt: Date.now(),
       lastUpdated: 'Vừa xong',
@@ -2390,7 +2440,7 @@ function DaoTamApp() {
     // 3. Cập nhật lại state của novel đang soạn
     setPublishingChapterNovel(updatedNovelTarget);
 
-    // 4. Đồng bộ trực tiếp lên Firestore: Cả document tổng và subcollection 'chapters'
+    // 4. Đồng bộ trực tiếp lên hệ thống trong 1 lần ghi nguyên tử (kèm latestPublishAt & publishAt)
     try {
       if (newChapter.content) {
         const chapPayload = JSON.stringify({
@@ -2406,12 +2456,9 @@ function DaoTamApp() {
         safeSetItem(makeChapterCacheKey(novelId, newChapter.id), chapPayload);
         safeSetItem(makeChapterCacheTsKey(novelId, newChapter.id), tsStr);
       }
-      await Promise.all([
-        saveNovelToFirestore(updatedNovelTarget, { syncChapters: false }),
-        addSingleChapterToFirestore(novelId, newChapter),
-      ]);
+      await addSingleChapterToFirestore(novelId, newChapter, updatedNovelTarget);
     } catch (err) {
-      console.warn('Could not sync novel and new chapter to Firestore:', err);
+      console.warn('Could not sync novel and new chapter:', err);
     }
 
     // Thông báo cho tác giả
@@ -2487,8 +2534,13 @@ function DaoTamApp() {
   // Điều hướng mở chương đọc truyện với URL riêng biệt (/truyen/:id/chuong-:so)
   // Hỗ trợ tham số ?autoPlay=true khi người dùng nhấn nút 'Nghe Audio'
   const handleSelectChapter = (novelWithChapters: Novel, chapter: Chapter, autoPlay?: boolean) => {
+    const canPlayChapter = isChapterVisibleToReader(
+      chapter,
+      isUserOwnerOrAdmin(user, novelWithChapters)
+    );
+    const effectiveAutoPlay = Boolean(autoPlay && canPlayChapter);
     const slugOrId = (novelWithChapters.slug && novelWithChapters.slug.trim()) || normalizeStoryId(novelWithChapters.id) || novelWithChapters.id;
-    const searchParam = autoPlay ? '?autoPlay=true' : '';
+    const searchParam = effectiveAutoPlay ? '?autoPlay=true' : '';
     navigate(`/truyen/${slugOrId}/chuong-${chapter.number}${searchParam}`);
     setSelectedNovel(novelWithChapters);
     setSelectedChapter(chapter);
@@ -2496,7 +2548,7 @@ function DaoTamApp() {
     setActivePageView(null);
     setRouteError(null);
     setIsResolvingRoute(false);
-    if (autoPlay) {
+    if (effectiveAutoPlay) {
       safeSetItem('daotam_audio_active', 'true');
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2504,10 +2556,12 @@ function DaoTamApp() {
 
   const selectedNovelRef = useRef<Novel | null>(selectedNovel);
   const selectedChapterRef = useRef<Chapter | null>(selectedChapter);
+  const currentUserRef = useRef<UserProfile | null>(user);
   useEffect(() => {
     selectedNovelRef.current = selectedNovel;
     selectedChapterRef.current = selectedChapter;
-  }, [selectedNovel, selectedChapter]);
+    currentUserRef.current = user;
+  }, [selectedNovel, selectedChapter, user]);
 
   useEffect(() => {
     const handleSilentAudioChapterChanged = (event: Event) => {
@@ -2540,6 +2594,11 @@ function DaoTamApp() {
               ? { content: detail.chapter.content }
               : {}),
           };
+          const canAccessAudioChapter = isChapterVisibleToReader(
+            mergedChapter,
+            isUserOwnerOrAdmin(currentUserRef.current, curNovel)
+          );
+          if (!canAccessAudioChapter) return;
           selectedChapterRef.current = mergedChapter;
           setSelectedChapter(mergedChapter);
           const slugOrId = (curNovel.slug && curNovel.slug.trim()) || normalizeStoryId(curNovel.id) || curNovel.id;
@@ -2802,20 +2861,31 @@ function DaoTamApp() {
         } else if (chapterMatch) {
           const rawChapParam = decodeURIComponent(chapterMatch[2]);
           const chapNum = parseInt(rawChapParam.replace(/[^0-9]/g, ''), 10);
+          const ownerOrAdmin = isUserOwnerOrAdmin(currentUserRef.current, fullNovel);
+          const visibleFallbackChapter =
+            fullNovel.chapters?.find((c) => isChapterVisibleToReader(c, ownerOrAdmin)) ||
+            fullNovel.chapters?.[0] ||
+            null;
 
-          const matchedChap = fullNovel.chapters?.find((c) => 
-            (chapNum > 0 && c.number === chapNum) ||
-            c.slug === rawChapParam ||
-            c.id === rawChapParam ||
-            c.slug === `chuong-${chapNum}` ||
-            c.id === `c-${chapNum}`
-          ) || fullNovel.chapters?.[0] || null;
+          const matchedChap =
+            fullNovel.chapters?.find(
+              (c) =>
+                (chapNum > 0 && c.number === chapNum) ||
+                c.slug === rawChapParam ||
+                c.id === rawChapParam ||
+                c.slug === `chuong-${chapNum}` ||
+                c.id === `c-${chapNum}`
+            ) || visibleFallbackChapter;
 
           setSelectedChapter(matchedChap);
 
-          // 3. ĐÓN LUỒNG AUTO-PLAY: Kiểm tra tham số ?autoPlay=true từ URL
+          // 3. ĐÓN LUỒNG AUTO-PLAY: Chỉ kích hoạt nếu chương đã đến giờ phát hành với độc giả
           const searchParams = new URLSearchParams(location.search);
-          if (searchParams.get('autoPlay') === 'true') {
+          if (
+            searchParams.get('autoPlay') === 'true' &&
+            matchedChap &&
+            isChapterVisibleToReader(matchedChap, ownerOrAdmin)
+          ) {
             safeSetItem('daotam_audio_active', 'true');
           }
 
@@ -2963,23 +3033,22 @@ function DaoTamApp() {
     const hasUpdatedFemale = Boolean(getChapterAudioUrl(cleanUpdatedChapter, 'female'));
 
     const deriveVoiceFlags = (chaps: Chapter[], prevNovel: Novel) => {
-      const maleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'male')));
-      const femaleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'female')));
-      const hasMaleAudio =
-        chaps.length > 0
-          ? Boolean(maleInChaps || hasUpdatedMale)
-          : Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
-      const hasFemaleAudio =
-        chaps.length > 0
-          ? Boolean(femaleInChaps || hasUpdatedFemale)
-          : Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
+      if (chaps.length > 0) {
+        const counts = computeChapterAudioCounts(chaps);
+        return {
+          hasMaleAudio: Boolean(counts.hasMaleAudio || hasUpdatedMale),
+          hasFemaleAudio: Boolean(counts.hasFemaleAudio || hasUpdatedFemale),
+          hasAudio: Boolean(counts.hasAudio || hasUpdatedMale || hasUpdatedFemale),
+          mp3NamMinhCount: counts.mp3NamMinhCount,
+          mp3HangNgaCount: counts.mp3HangNgaCount,
+        };
+      }
+      const hasMaleAudio = Boolean(prevNovel.hasMaleAudio || hasUpdatedMale);
+      const hasFemaleAudio = Boolean(prevNovel.hasFemaleAudio || hasUpdatedFemale);
       return {
         hasMaleAudio,
         hasFemaleAudio,
-        hasAudio:
-          chaps.length > 0
-            ? Boolean(hasMaleAudio || hasFemaleAudio)
-            : Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
       };
     };
 
@@ -3081,23 +3150,22 @@ function DaoTamApp() {
     };
 
     const deriveBatchFlags = (chaps: Chapter[], prevNovel: Novel) => {
-      const maleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'male')));
-      const femaleInChaps = chaps.some((c) => Boolean(getChapterAudioUrl(c, 'female')));
-      const hasMaleAudio =
-        chaps.length > 0
-          ? Boolean(maleInChaps || batchHasMale)
-          : Boolean(prevNovel.hasMaleAudio || batchHasMale);
-      const hasFemaleAudio =
-        chaps.length > 0
-          ? Boolean(femaleInChaps || batchHasFemale)
-          : Boolean(prevNovel.hasFemaleAudio || batchHasFemale);
+      if (chaps.length > 0) {
+        const counts = computeChapterAudioCounts(chaps);
+        return {
+          hasMaleAudio: Boolean(counts.hasMaleAudio || batchHasMale),
+          hasFemaleAudio: Boolean(counts.hasFemaleAudio || batchHasFemale),
+          hasAudio: Boolean(counts.hasAudio || batchHasMale || batchHasFemale),
+          mp3NamMinhCount: counts.mp3NamMinhCount,
+          mp3HangNgaCount: counts.mp3HangNgaCount,
+        };
+      }
+      const hasMaleAudio = Boolean(prevNovel.hasMaleAudio || batchHasMale);
+      const hasFemaleAudio = Boolean(prevNovel.hasFemaleAudio || batchHasFemale);
       return {
         hasMaleAudio,
         hasFemaleAudio,
-        hasAudio:
-          chaps.length > 0
-            ? Boolean(hasMaleAudio || hasFemaleAudio)
-            : Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
+        hasAudio: Boolean(hasMaleAudio || hasFemaleAudio || prevNovel.hasAudio),
       };
     };
 
@@ -3148,6 +3216,59 @@ function DaoTamApp() {
         })
       );
     } catch {}
+  };
+
+  // Cập nhật ngay 2 trường đếm mp3NamMinhCount & mp3HangNgaCount trên state danh sách (0 Reads phát sinh)
+  const handleNovelMp3CountsSynced = (
+    novelId: string,
+    counts: {
+      mp3NamMinhCount: number;
+      mp3HangNgaCount: number;
+      hasMaleAudio: boolean;
+      hasFemaleAudio: boolean;
+      hasAudio: boolean;
+    }
+  ) => {
+    setNovels((prev) => {
+      const next = (prev || []).map((n) =>
+        n.id === novelId
+          ? {
+              ...n,
+              mp3NamMinhCount: counts.mp3NamMinhCount,
+              mp3HangNgaCount: counts.mp3HangNgaCount,
+              hasMaleAudio: counts.hasMaleAudio,
+              hasFemaleAudio: counts.hasFemaleAudio,
+              hasAudio: counts.hasAudio,
+            }
+          : n
+      );
+      saveNovelsToStorage(next);
+      return next;
+    });
+    setSelectedNovel((prev) =>
+      prev && prev.id === novelId
+        ? {
+            ...prev,
+            mp3NamMinhCount: counts.mp3NamMinhCount,
+            mp3HangNgaCount: counts.mp3HangNgaCount,
+            hasMaleAudio: counts.hasMaleAudio,
+            hasFemaleAudio: counts.hasFemaleAudio,
+            hasAudio: counts.hasAudio,
+          }
+        : prev
+    );
+    setEditingNovel((prev) =>
+      prev && prev.id === novelId
+        ? {
+            ...prev,
+            mp3NamMinhCount: counts.mp3NamMinhCount,
+            mp3HangNgaCount: counts.mp3HangNgaCount,
+            hasMaleAudio: counts.hasMaleAudio,
+            hasFemaleAudio: counts.hasFemaleAudio,
+            hasAudio: counts.hasAudio,
+          }
+        : prev
+    );
   };
 
   // Mở modal Báo Cáo Vi Phạm Truyện
@@ -4512,6 +4633,7 @@ function DaoTamApp() {
         onReloadNovels={() => reloadNovels(true)}
         onChapterAudioUpdated={handleChapterAudioUpdated}
         onBatchChaptersAudioUpdated={handleBatchChaptersAudioUpdated}
+        onNovelMp3CountsSynced={handleNovelMp3CountsSynced}
       />
 
       {/* Edit Novel & Chapters (Page View is primary in-web flow) */}
@@ -4827,7 +4949,7 @@ function DaoTamApp() {
           </div>
           <div className="flex items-center justify-between text-[11px] text-amber-900 font-semibold mt-1.5">
             <span>Đã ghi: {batchProgress.saved}/{batchProgress.total} chương</span>
-            <span className="text-[10px] text-amber-700">writeBatch an toàn &lt; 500 ops</span>
+            <span className="text-[10px] text-amber-700">Đang lưu từng lô an toàn</span>
           </div>
         </div>
       )}

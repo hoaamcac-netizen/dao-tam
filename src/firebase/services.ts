@@ -49,7 +49,16 @@ import {
   DonationRecord,
   SubmissionChapterDraft
 } from '../types';
-import { filterOutDummyChapters, formatXu, getChapterAudioUrl, normalizeStoryId } from '../utils/rulesAndVoices';
+import {
+  filterOutDummyChapters,
+  formatXu,
+  getChapterAudioUrl,
+  getChapterPublishAt,
+  computeChapterAudioCounts,
+  getNovelLatestPublishAt,
+  isChapterScheduledPending,
+  normalizeStoryId,
+} from '../utils/rulesAndVoices';
 import {
   safeSetItem,
   safeGetItem,
@@ -97,18 +106,63 @@ function extractChapterAudioFields(c: any): {
 function computeNovelAudioFlags(
   chapters: Array<Record<string, any>>,
   existingData?: Partial<Novel> | null
-): { hasMaleAudio: boolean; hasFemaleAudio: boolean; hasAudio: boolean } {
+): {
+  hasMaleAudio: boolean;
+  hasFemaleAudio: boolean;
+  hasAudio: boolean;
+  mp3NamMinhCount: number;
+  mp3HangNgaCount: number;
+} {
   let hasMaleAudio = Boolean(existingData?.hasMaleAudio);
   let hasFemaleAudio = Boolean(existingData?.hasFemaleAudio);
+  let mp3NamMinhCount =
+    typeof existingData?.mp3NamMinhCount === 'number' && Number.isFinite(existingData.mp3NamMinhCount)
+      ? Math.max(0, existingData.mp3NamMinhCount)
+      : 0;
+  let mp3HangNgaCount =
+    typeof existingData?.mp3HangNgaCount === 'number' && Number.isFinite(existingData.mp3HangNgaCount)
+      ? Math.max(0, existingData.mp3HangNgaCount)
+      : 0;
+
   if (Array.isArray(chapters) && chapters.length > 0) {
-    hasMaleAudio = chapters.some((c) => Boolean(getChapterAudioUrl(c as Chapter, 'male')));
-    hasFemaleAudio = chapters.some((c) => Boolean(getChapterAudioUrl(c as Chapter, 'female')));
+    const counts = computeChapterAudioCounts(chapters as Array<Partial<Chapter>>);
+    mp3NamMinhCount = counts.mp3NamMinhCount;
+    mp3HangNgaCount = counts.mp3HangNgaCount;
+    hasMaleAudio = counts.hasMaleAudio;
+    hasFemaleAudio = counts.hasFemaleAudio;
   }
+
   return {
     hasMaleAudio,
     hasFemaleAudio,
     hasAudio: Boolean(existingData?.hasAudio || hasMaleAudio || hasFemaleAudio),
+    mp3NamMinhCount,
+    mp3HangNgaCount,
   };
+}
+
+function resolvePublicLatestChapterInfo(
+  chapters: Chapter[],
+  fallbackTitle?: string,
+  fallbackNumber?: number,
+  effectiveTotal: number = 0
+): { latestChapterTitle: string; latestChapterNumber: number } {
+  const sorted = [...(chapters || [])].sort((a, b) => Number(a.number) - Number(b.number));
+  const published = sorted.filter((c) => !c.isHidden && !isChapterScheduledPending(c));
+  const targetPool = published.length > 0 ? published : sorted;
+  const top = targetPool.length > 0 ? targetPool[targetPool.length - 1] : null;
+  if (top) {
+    const num = Number(top.number) || effectiveTotal || 0;
+    const title = top.title
+      ? top.title
+      : num > 0
+      ? `Chương ${num}`
+      : 'Chưa có chương';
+    return { latestChapterTitle: title, latestChapterNumber: num };
+  }
+  const num = Number(fallbackNumber) || effectiveTotal || 0;
+  const title = fallbackTitle || (num > 0 ? `Chương ${num}` : 'Chưa có chương');
+  return { latestChapterTitle: title, latestChapterNumber: num };
 }
 
 // [QUOTA GUARD] Chỉ cập nhật lastLogin/lastSeen tối đa 1 lần mỗi 5 phút cho mỗi user
@@ -2549,12 +2603,17 @@ export async function fetchChaptersForNovel(novelId: string): Promise<Chapter[]>
         if (Array.isArray(data.chapters) && (data.chapters?.length || 0) > 0) {
           const cleaned = filterOutDummyChapters(data.chapters);
           return (cleaned || [])
-            .map((c: any) => ({
-              ...c,
-              ...extractChapterAudioFields(c),
-              number: Number(c.number) || 0,
-              content: '', // Không giữ chuỗi văn bản khổng lồ trong mục lục
-            }))
+            .map((c: any) => {
+              const pubAt = getChapterPublishAt(c);
+              return {
+                ...c,
+                ...extractChapterAudioFields(c),
+                publishAt: pubAt,
+                scheduledPublishAt: pubAt,
+                number: Number(c.number) || 0,
+                content: '', // Không giữ chuỗi văn bản khổng lồ trong mục lục
+              };
+            })
             .sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
         }
       }
@@ -2572,9 +2631,12 @@ export async function fetchChaptersForNovel(novelId: string): Promise<Chapter[]>
           const data = d.data() as Chapter;
           const num = Number(data.number) || 0;
           if (num > 0) {
+            const pubAt = getChapterPublishAt(data);
             list.push({
               ...data,
               ...extractChapterAudioFields(data),
+              publishAt: pubAt,
+              scheduledPublishAt: pubAt,
               id: d.id,
               number: num,
               content: '',
@@ -2593,18 +2655,23 @@ export async function fetchChaptersForNovel(novelId: string): Promise<Chapter[]>
       if (subDoc.exists()) {
         const subData = subDoc.data();
         if (Array.isArray(subData.chapters) && (subData.chapters?.length || 0) > 0) {
-          return (subData.chapters || []).map((c: any, idx: number) => ({
-            ...extractChapterAudioFields(c),
-            id: c.id || `chap-${targetNovelId}-${c.number || idx + 1}`,
-            number: c.number || idx + 1,
-            title: c.title || `Chương ${c.number || idx + 1}`,
-            slug: c.slug || `chuong-${c.number || idx + 1}`,
-            content: c.content || '',
-            wordCount: c.wordCount || (c.content ? (c.content.split(/\s+/)?.length || 0) : 0),
-            publishedDate: c.publishedDate || new Date().toISOString().split('T')[0],
-            isVip: !!c.isVip,
-            priceXu: c.priceXu || 0,
-          }));
+          return (subData.chapters || []).map((c: any, idx: number) => {
+            const pubAt = getChapterPublishAt(c);
+            return {
+              ...extractChapterAudioFields(c),
+              id: c.id || `chap-${targetNovelId}-${c.number || idx + 1}`,
+              number: c.number || idx + 1,
+              title: c.title || `Chương ${c.number || idx + 1}`,
+              slug: c.slug || `chuong-${c.number || idx + 1}`,
+              content: c.content || '',
+              wordCount: c.wordCount || (c.content ? (c.content.split(/\s+/)?.length || 0) : 0),
+              publishedDate: c.publishedDate || new Date().toISOString().split('T')[0],
+              isVip: !!c.isVip,
+              priceXu: c.priceXu || 0,
+              publishAt: pubAt,
+              scheduledPublishAt: pubAt,
+            };
+          });
         }
       }
     } catch (e) {}
@@ -2919,19 +2986,24 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
       const novelData = (docSnap.data() || {}) as Novel;
 
       const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
-        id: c.id || `c-${docSnap.id}-${c.number}`,
-        number: Number(c.number) || 0,
-        title: c.title || `Chương ${c.number}`,
-        slug: c.slug || `chuong-${c.number}`,
-        publishedDate: c.publishedDate || '',
-        isVip: Boolean(c.isVip),
-        priceXu: Number(c.priceXu || 0),
-        wordCount: Number(c.wordCount || 0),
-        isHidden: Boolean(c.isHidden),
-        ...extractChapterAudioFields(c),
-        content: '', // KHÔNG BAO GIỜ tải text nội dung trong danh sách truyện
-      }));
+      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => {
+        const pubAt = getChapterPublishAt(c);
+        return {
+          id: c.id || `c-${docSnap.id}-${c.number}`,
+          number: Number(c.number) || 0,
+          title: c.title || `Chương ${c.number}`,
+          slug: c.slug || `chuong-${c.number}`,
+          publishedDate: c.publishedDate || '',
+          isVip: Boolean(c.isVip),
+          priceXu: Number(c.priceXu || 0),
+          wordCount: Number(c.wordCount || 0),
+          isHidden: Boolean(c.isHidden),
+          publishAt: pubAt,
+          scheduledPublishAt: pubAt,
+          ...extractChapterAudioFields(c),
+          content: '', // KHÔNG BAO GIỜ tải text nội dung trong danh sách truyện
+        };
+      });
 
       const maxNum = lightweightChapters.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
       const resolvedTotal = (novelData.totalChapters !== undefined && Number(novelData.totalChapters) > 0)
@@ -2951,6 +3023,7 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         : [];
 
       const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+      const latestPublishAt = getNovelLatestPublishAt(novelData, lightweightChapters) || undefined;
 
       novels.push({
         ...novelData,
@@ -2971,6 +3044,9 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         hasAudio: audioFlags.hasAudio,
         hasMaleAudio: audioFlags.hasMaleAudio,
         hasFemaleAudio: audioFlags.hasFemaleAudio,
+        mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+        mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+        latestPublishAt,
       } as Novel);
     }
 
@@ -3022,19 +3098,24 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
   const mapDocToNovel = (docSnap: any): Novel => {
     const novelData = (docSnap.data() || {}) as Novel;
     const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-    const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
-      id: c.id || `c-${docSnap.id}-${c.number}`,
-      number: Number(c.number) || 0,
-      title: c.title || `Chương ${c.number}`,
-      slug: c.slug || `chuong-${c.number}`,
-      publishedDate: c.publishedDate || '',
-      isVip: Boolean(c.isVip),
-      priceXu: Number(c.priceXu || 0),
-      wordCount: Number(c.wordCount || 0),
-      isHidden: Boolean(c.isHidden),
-      ...extractChapterAudioFields(c),
-      content: '',
-    }));
+    const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => {
+      const pubAt = getChapterPublishAt(c);
+      return {
+        id: c.id || `c-${docSnap.id}-${c.number}`,
+        number: Number(c.number) || 0,
+        title: c.title || `Chương ${c.number}`,
+        slug: c.slug || `chuong-${c.number}`,
+        publishedDate: c.publishedDate || '',
+        isVip: Boolean(c.isVip),
+        priceXu: Number(c.priceXu || 0),
+        wordCount: Number(c.wordCount || 0),
+        isHidden: Boolean(c.isHidden),
+        publishAt: pubAt,
+        scheduledPublishAt: pubAt,
+        ...extractChapterAudioFields(c),
+        content: '',
+      };
+    });
 
     const maxNum = lightweightChapters.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
     const resolvedTotal = (novelData.totalChapters !== undefined && Number(novelData.totalChapters) > 0)
@@ -3054,6 +3135,7 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       : [];
 
     const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+    const latestPublishAt = getNovelLatestPublishAt(novelData, lightweightChapters) || undefined;
 
     return {
       ...novelData,
@@ -3075,6 +3157,9 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       hasAudio: audioFlags.hasAudio,
       hasMaleAudio: audioFlags.hasMaleAudio,
       hasFemaleAudio: audioFlags.hasFemaleAudio,
+      mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+      mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+      latestPublishAt,
     } as Novel;
   };
 
@@ -3136,19 +3221,24 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
     for (const docSnap of snapshot?.docs || []) {
       const novelData = (docSnap.data() || {}) as Novel;
       const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
-        id: c.id || `c-${docSnap.id}-${c.number}`,
-        number: Number(c.number) || 0,
-        title: c.title || `Chương ${c.number}`,
-        slug: c.slug || `chuong-${c.number}`,
-        publishedDate: c.publishedDate || '',
-        isVip: Boolean(c.isVip),
-        priceXu: Number(c.priceXu || 0),
-        wordCount: Number(c.wordCount || 0),
-        isHidden: Boolean(c.isHidden),
-        ...extractChapterAudioFields(c),
-        content: '',
-      }));
+      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => {
+        const pubAt = getChapterPublishAt(c);
+        return {
+          id: c.id || `c-${docSnap.id}-${c.number}`,
+          number: Number(c.number) || 0,
+          title: c.title || `Chương ${c.number}`,
+          slug: c.slug || `chuong-${c.number}`,
+          publishedDate: c.publishedDate || '',
+          isVip: Boolean(c.isVip),
+          priceXu: Number(c.priceXu || 0),
+          wordCount: Number(c.wordCount || 0),
+          isHidden: Boolean(c.isHidden),
+          publishAt: pubAt,
+          scheduledPublishAt: pubAt,
+          ...extractChapterAudioFields(c),
+          content: '',
+        };
+      });
 
       const maxNum = lightweightChapters.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
       const resolvedTotal = (novelData.totalChapters !== undefined && Number(novelData.totalChapters) > 0)
@@ -3168,6 +3258,7 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         : [];
 
       const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+      const latestPublishAt = getNovelLatestPublishAt(novelData, lightweightChapters) || undefined;
 
       novels.push({
         ...novelData,
@@ -3188,6 +3279,9 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         hasAudio: audioFlags.hasAudio,
         hasMaleAudio: audioFlags.hasMaleAudio,
         hasFemaleAudio: audioFlags.hasFemaleAudio,
+        mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+        mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+        latestPublishAt,
       } as Novel);
     }
 
@@ -3312,21 +3406,24 @@ export async function queryNovelsWithFilters(
     for (const docSnap of snapshot?.docs || []) {
       const novelData = (docSnap.data() || {}) as Novel;
       const rawChapters: Chapter[] = Array.isArray(novelData.chapters) ? novelData.chapters : [];
-      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => ({
-        id: c.id || `c-${docSnap.id}-${c.number}`,
-        number: Number(c.number) || 0,
-        title: c.title || `Chương ${c.number}`,
-        slug: c.slug || `chuong-${c.number}`,
-        publishedDate: c.publishedDate || '',
-        isVip: Boolean(c.isVip),
-        priceXu: Number(c.priceXu || 0),
-        wordCount: Number(c.wordCount || 0),
-        isHidden: Boolean(c.isHidden),
-        audioUrl: c.audioUrl || undefined,
-        audioUrlMale: c.audioUrlMale || undefined,
-        audioUrlFemale: c.audioUrlFemale || undefined,
-        content: '',
-      }));
+      const lightweightChapters: Chapter[] = (filterOutDummyChapters(rawChapters) || []).map((c: any) => {
+        const pubAt = getChapterPublishAt(c);
+        return {
+          id: c.id || `c-${docSnap.id}-${c.number}`,
+          number: Number(c.number) || 0,
+          title: c.title || `Chương ${c.number}`,
+          slug: c.slug || `chuong-${c.number}`,
+          publishedDate: c.publishedDate || '',
+          isVip: Boolean(c.isVip),
+          priceXu: Number(c.priceXu || 0),
+          wordCount: Number(c.wordCount || 0),
+          isHidden: Boolean(c.isHidden),
+          publishAt: pubAt,
+          scheduledPublishAt: pubAt,
+          ...extractChapterAudioFields(c),
+          content: '',
+        };
+      });
 
       const maxNum = lightweightChapters.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
       const resolvedTotal = (novelData.totalChapters !== undefined && Number(novelData.totalChapters) > 0)
@@ -3344,6 +3441,8 @@ export async function queryNovelsWithFilters(
         : Array.isArray((novelData as any).genres)
         ? (novelData as any).genres
         : [];
+      const audioFlags = computeNovelAudioFlags(lightweightChapters, novelData);
+      const latestPublishAt = getNovelLatestPublishAt(novelData, lightweightChapters) || undefined;
 
       novels.push({
         ...novelData,
@@ -3361,6 +3460,12 @@ export async function queryNovelsWithFilters(
         totalChapters: resolvedTotal,
         latestChapterTitle,
         latestChapterNumber,
+        hasAudio: audioFlags.hasAudio,
+        hasMaleAudio: audioFlags.hasMaleAudio,
+        hasFemaleAudio: audioFlags.hasFemaleAudio,
+        mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+        mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+        latestPublishAt,
       } as Novel);
     }
 
@@ -3469,7 +3574,8 @@ export async function updateNovelMetadataInFirestore(
  * tải siêu tốc trong 0-50ms và không bao giờ gây đầy bộ nhớ/đơ trình duyệt.
  */
 export function stripChapterContent(chapter: Chapter): Chapter {
-  return {
+  const pubAt = getChapterPublishAt(chapter);
+  return cleanUndefinedFields({
     id: chapter.id || `c-${chapter.number}`,
     number: Number(chapter.number),
     title: chapter.title ? (chapter.title.startsWith('Chương') ? chapter.title : `Chương ${chapter.number}: ${chapter.title}`) : `Chương ${chapter.number}`,
@@ -3479,9 +3585,12 @@ export function stripChapterContent(chapter: Chapter): Chapter {
     priceXu: chapter.priceXu ? Number(chapter.priceXu) : 0,
     wordCount: chapter.wordCount || 0,
     isHidden: Boolean(chapter.isHidden),
+    publishAt: pubAt,
+    scheduledPublishAt: pubAt,
+    authorNote: typeof chapter.authorNote === 'string' && chapter.authorNote.trim() ? chapter.authorNote.trim() : undefined,
     content: '',
     ...extractChapterAudioFields(chapter),
-  };
+  }) as Chapter;
 }
 
 /**
@@ -3627,27 +3736,25 @@ export async function saveNovelToFirestore(
         ? novel.totalChapters
         : Math.max(chapters?.length || 0, maxNumberInChaps, (novel as any).latestChapterNumber || 0, 1));
 
-  const topChapter = chapters.find((c) => Number(c.number) === effectiveTotalChapters) ||
-    ((chapters?.length || 0) > 0 ? chapters[(chapters?.length || 0) - 1] : null);
-
-  let latestChapterTitle = novel.latestChapterTitle;
-  if (topChapter?.title) {
-    latestChapterTitle = topChapter.title;
-  } else if (!latestChapterTitle) {
-    latestChapterTitle = effectiveTotalChapters > 0 ? `Chương ${effectiveTotalChapters}` : 'Chưa có chương';
-  }
+  const latestInfo = resolvePublicLatestChapterInfo(
+    chapters,
+    novel.latestChapterTitle,
+    (novel as any).latestChapterNumber,
+    effectiveTotalChapters
+  );
 
   const nowTs = Date.now();
   // Tạo danh mục chương tóm tắt siêu nhẹ trên root doc (không chứa nội dung chữ text)
   const strippedChapters = (chapters || []).map(stripChapterContent);
   const audioFlags = computeNovelAudioFlags(chapters, novel);
+  const latestPublishAt = getNovelLatestPublishAt(novel, chapters) || undefined;
 
   const payloadData: any = {
     ...novel,
     status: novel.status || 'Đang ra',
     totalChapters: effectiveTotalChapters,
-    latestChapterTitle,
-    latestChapterNumber: topChapter?.number || (shouldSyncChapters ? effectiveTotalChapters : ((novel as any).latestChapterNumber || effectiveTotalChapters)),
+    latestChapterTitle: latestInfo.latestChapterTitle,
+    latestChapterNumber: latestInfo.latestChapterNumber || (shouldSyncChapters ? effectiveTotalChapters : ((novel as any).latestChapterNumber || effectiveTotalChapters)),
     lastUpdated: novel.lastUpdated || 'Vừa xong',
     updatedAt: nowTs,
     lastChapterUpdatedAt: shouldSyncChapters ? nowTs : (novel.lastChapterUpdatedAt ?? novel.updatedAt ?? nowTs),
@@ -3655,6 +3762,9 @@ export async function saveNovelToFirestore(
     hasAudio: audioFlags.hasAudio,
     hasMaleAudio: audioFlags.hasMaleAudio,
     hasFemaleAudio: audioFlags.hasFemaleAudio,
+    mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+    mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+    latestPublishAt,
   };
 
   const payload = cleanUndefinedFields(payloadData);
@@ -3668,6 +3778,7 @@ export async function saveNovelToFirestore(
 
     chapters.forEach((ch) => {
       const chNumId = String(ch.number);
+      const pubAt = getChapterPublishAt(ch);
       const cleanChap = cleanUndefinedFields({
         ...ch,
         id: ch.id || `${novel.id}-c${ch.number}`,
@@ -3678,6 +3789,8 @@ export async function saveNovelToFirestore(
         publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
         isVip: !!ch.isVip,
         priceXu: ch.priceXu || 0,
+        publishAt: pubAt,
+        scheduledPublishAt: pubAt,
         content: typeof ch.content === 'string' ? ch.content : '',
         updatedAt: nowTs,
       });
@@ -3713,19 +3826,31 @@ export async function saveNovelWithInitialChaptersBatch(
   const strippedChapters = (cleanChapters || []).map(stripChapterContent);
   const maxNumberInChaps = cleanChapters.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
   const effectiveTotal = Math.max(novel.totalChapters || 0, cleanChapters?.length || 0, maxNumberInChaps);
-  const topChapter = cleanChapters.find((c) => Number(c.number) === effectiveTotal) ||
-    ((cleanChapters?.length || 0) > 0 ? cleanChapters[(cleanChapters?.length || 0) - 1] : null);
+  const latestInfo = resolvePublicLatestChapterInfo(
+    cleanChapters,
+    novel.latestChapterTitle,
+    (novel as any).latestChapterNumber,
+    effectiveTotal
+  );
+  const audioFlags = computeNovelAudioFlags(cleanChapters, novel);
+  const latestPublishAt = getNovelLatestPublishAt(novel, cleanChapters) || undefined;
 
   const novelPayload = cleanUndefinedFields({
     ...novel,
     status: novel.status || 'Đang ra',
     totalChapters: effectiveTotal,
-    latestChapterTitle: topChapter?.title || novel.latestChapterTitle || (effectiveTotal > 0 ? `Chương ${effectiveTotal}` : 'Chưa có chương'),
-    latestChapterNumber: topChapter?.number || effectiveTotal,
+    latestChapterTitle: latestInfo.latestChapterTitle,
+    latestChapterNumber: latestInfo.latestChapterNumber || effectiveTotal,
     lastUpdated: 'Vừa xong',
     updatedAt: nowTs,
     lastChapterUpdatedAt: novel.lastChapterUpdatedAt || nowTs,
     chapters: strippedChapters,
+    hasAudio: audioFlags.hasAudio,
+    hasMaleAudio: audioFlags.hasMaleAudio,
+    hasFemaleAudio: audioFlags.hasFemaleAudio,
+    mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+    mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+    latestPublishAt,
   });
 
   const batch = writeBatch(db);
@@ -3737,6 +3862,7 @@ export async function saveNovelWithInitialChaptersBatch(
   // Toàn bộ text nội dung nằm trong 1 field duy nhất dạng string 'content'
   cleanChapters.forEach((ch) => {
     const chNumId = String(ch.number);
+    const pubAt = getChapterPublishAt(ch);
     const chapterDocData = cleanUndefinedFields({
       id: ch.id || `${novel.id}-c${ch.number}`,
       number: Number(ch.number),
@@ -3746,6 +3872,8 @@ export async function saveNovelWithInitialChaptersBatch(
       publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
       isVip: !!ch.isVip,
       priceXu: ch.priceXu || 0,
+      publishAt: pubAt,
+      scheduledPublishAt: pubAt,
       ...extractChapterAudioFields(ch),
       content: typeof ch.content === 'string' ? ch.content : '',
       updatedAt: nowTs,
@@ -3815,19 +3943,31 @@ export async function saveBatchChaptersToFirestore(
   const maxNumberInChaps = mergedTOC.reduce((max, c) => Math.max(max, Number(c.number) || 0), 0);
   const effectiveTotalChapters = Math.max(updatedNovel.totalChapters || 0, mergedTOC?.length || 0, maxNumberInChaps);
 
-  const topChapter = mergedTOC.find((c) => Number(c.number) === effectiveTotalChapters) ||
-    ((mergedTOC?.length || 0) > 0 ? mergedTOC[(mergedTOC?.length || 0) - 1] : null);
+  const latestInfo = resolvePublicLatestChapterInfo(
+    mergedTOC,
+    updatedNovel.latestChapterTitle,
+    (updatedNovel as any).latestChapterNumber,
+    effectiveTotalChapters
+  );
+  const audioFlags = computeNovelAudioFlags(mergedTOC, updatedNovel);
+  const latestPublishAt = getNovelLatestPublishAt(updatedNovel, mergedTOC) || undefined;
 
   const nowTs = Date.now();
   const rootUpdateData = cleanUndefinedFields({
     status: updatedNovel.status || 'Đang ra',
     totalChapters: effectiveTotalChapters,
-    latestChapterTitle: topChapter?.title || updatedNovel.latestChapterTitle || `Chương ${effectiveTotalChapters}`,
-    latestChapterNumber: topChapter?.number || effectiveTotalChapters,
+    latestChapterTitle: latestInfo.latestChapterTitle,
+    latestChapterNumber: latestInfo.latestChapterNumber || effectiveTotalChapters,
     lastUpdated: 'Vừa xong',
     updatedAt: nowTs,
     lastChapterUpdatedAt: nowTs,
     chapters: mergedTOC,
+    hasAudio: audioFlags.hasAudio,
+    hasMaleAudio: audioFlags.hasMaleAudio,
+    hasFemaleAudio: audioFlags.hasFemaleAudio,
+    mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+    mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+    latestPublishAt,
   });
 
   // 1. OPTIMISTIC UI: Lưu cache các chương vào localStorage v2 tức thì
@@ -3853,12 +3993,15 @@ export async function saveBatchChaptersToFirestore(
     newChapters.forEach((ch) => {
       const chNumId = String(ch.number);
       const text = ch.content || '';
+      const pubAt = getChapterPublishAt(ch);
       const docData = cleanUndefinedFields({
         ...ch,
         content: text,
         wordCount: (text.split(/\s+/).filter(Boolean)?.length || 0) || ch.wordCount || 0,
         id: `c-${updatedNovel.id}-${ch.number}`,
         number: Number(ch.number),
+        publishAt: pubAt,
+        scheduledPublishAt: pubAt,
         updatedAt: nowTs,
       });
       batch.set(doc(db, 'novels', updatedNovel.id, 'chapters', chNumId), docData, { merge: true });
@@ -3972,17 +4115,28 @@ export async function deleteBatchChaptersFromFirestore(
         remainingCount = remainingChapters?.length || 0;
       }
 
-      const latestChap = (remainingChapters?.length || 0) > 0 ? remainingChapters[(remainingChapters?.length || 0) - 1] : null;
-      const latestNum = latestChap?.number || remainingCount;
-      const latestTitle = latestChap?.title || (remainingCount > 0 ? `Chương ${remainingCount}` : 'Chưa có chương');
+      const latestInfo = resolvePublicLatestChapterInfo(
+        remainingChapters,
+        undefined,
+        remainingCount,
+        remainingCount
+      );
+      const audioFlags = computeNovelAudioFlags(remainingChapters, data as Novel);
+      const latestPublishAt = getNovelLatestPublishAt(undefined, remainingChapters);
 
       const updateData: any = {
         totalChapters: remainingCount,
-        latestChapterNumber: latestNum,
-        latestChapterTitle: latestTitle,
+        latestChapterNumber: latestInfo.latestChapterNumber,
+        latestChapterTitle: latestInfo.latestChapterTitle,
         updatedAt: Date.now(),
         lastUpdated: 'Vừa xong',
         chapters: remainingChapters,
+        hasAudio: audioFlags.hasAudio,
+        hasMaleAudio: audioFlags.hasMaleAudio,
+        hasFemaleAudio: audioFlags.hasFemaleAudio,
+        mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+        mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+        latestPublishAt: latestPublishAt > 0 ? latestPublishAt : deleteField(),
       };
 
       await setDoc(doc(db, 'novels', novelId), updateData, { merge: true });
@@ -4019,7 +4173,8 @@ export async function updateChapterAudioUrlInFirestore(
   novelId: string,
   chapter: Chapter,
   audioUrl: string | null,
-  voice: 'male' | 'female' = 'male'
+  voice: 'male' | 'female' = 'male',
+  overrideCounts?: { mp3NamMinhCount: number; mp3HangNgaCount: number }
 ): Promise<void> {
   if (!novelId || !chapter) return;
 
@@ -4063,7 +4218,7 @@ export async function updateChapterAudioUrlInFirestore(
     }
   }
 
-  // 2. Đồng bộ trong mảng mục lục chapters và cờ hasMaleAudio / hasFemaleAudio của root doc novels/{novelId}
+  // 2. Đồng bộ trong mảng mục lục chapters và cờ hasMaleAudio / hasFemaleAudio / bộ đếm MP3 trên root doc novels/{novelId}
   try {
     const novelRef = doc(db, 'novels', novelId);
     const novelSnap = await getDoc(novelRef);
@@ -4093,6 +4248,8 @@ export async function updateChapterAudioUrlInFirestore(
           return cleanUndefinedFields(nextEntry);
         });
         const flags = computeNovelAudioFlags(updatedChapters);
+        const resolvedMaleCount = overrideCounts ? overrideCounts.mp3NamMinhCount : flags.mp3NamMinhCount;
+        const resolvedFemaleCount = overrideCounts ? overrideCounts.mp3HangNgaCount : flags.mp3HangNgaCount;
         if (cleanUrl) {
           if (voice === 'female') flags.hasFemaleAudio = true;
           else flags.hasMaleAudio = true;
@@ -4102,21 +4259,31 @@ export async function updateChapterAudioUrlInFirestore(
           novelRef,
           {
             chapters: updatedChapters,
-            hasMaleAudio: flags.hasMaleAudio,
-            hasFemaleAudio: flags.hasFemaleAudio,
-            hasAudio: flags.hasAudio,
+            hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
+            hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
+            hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
+            mp3NamMinhCount: resolvedMaleCount,
+            mp3HangNgaCount: resolvedFemaleCount,
             updatedAt: nowTs,
           },
           { merge: true }
         );
       } else {
         const nextFlags: Record<string, any> = { updatedAt: nowTs };
-        if (voice === 'female') {
-          if (cleanUrl) nextFlags.hasFemaleAudio = true;
+        if (overrideCounts) {
+          nextFlags.mp3NamMinhCount = Math.max(0, overrideCounts.mp3NamMinhCount);
+          nextFlags.mp3HangNgaCount = Math.max(0, overrideCounts.mp3HangNgaCount);
+          nextFlags.hasMaleAudio = nextFlags.mp3NamMinhCount > 0;
+          nextFlags.hasFemaleAudio = nextFlags.mp3HangNgaCount > 0;
+          nextFlags.hasAudio = nextFlags.hasMaleAudio || nextFlags.hasFemaleAudio;
         } else {
-          if (cleanUrl) nextFlags.hasMaleAudio = true;
+          if (voice === 'female') {
+            if (cleanUrl) nextFlags.hasFemaleAudio = true;
+          } else {
+            if (cleanUrl) nextFlags.hasMaleAudio = true;
+          }
+          if (cleanUrl) nextFlags.hasAudio = true;
         }
-        if (cleanUrl) nextFlags.hasAudio = true;
         await setDoc(novelRef, nextFlags, { merge: true });
       }
     }
@@ -4165,7 +4332,8 @@ export interface ChapterAudioLinkBatchItem {
  */
 export async function batchUpdateChapterAudioLinksInFirestore(
   novelId: string,
-  items: ChapterAudioLinkBatchItem[]
+  items: ChapterAudioLinkBatchItem[],
+  overrideCounts?: { mp3NamMinhCount: number; mp3HangNgaCount: number }
 ): Promise<void> {
   if (!novelId || !Array.isArray(items) || items.length === 0) return;
 
@@ -4233,7 +4401,7 @@ export async function batchUpdateChapterAudioLinksInFirestore(
     }
   }
 
-  // 2. Đồng bộ 1 lần duy nhất lên mảng chapters và cờ hasMaleAudio / hasFemaleAudio trên root doc novels/{novelId}
+  // 2. Đồng bộ 1 lần duy nhất lên mảng chapters và cờ + bộ đếm MP3 trên root doc novels/{novelId}
   const novelRef = doc(db, 'novels', novelId);
   const novelSnap = await getDoc(novelRef);
   if (novelSnap.exists()) {
@@ -4275,6 +4443,8 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         (i) => typeof i.audioUrlFemale === 'string' && i.audioUrlFemale.trim().length > 0
       );
       const flags = computeNovelAudioFlags(updatedChapters);
+      const resolvedMaleCount = overrideCounts ? overrideCounts.mp3NamMinhCount : flags.mp3NamMinhCount;
+      const resolvedFemaleCount = overrideCounts ? overrideCounts.mp3HangNgaCount : flags.mp3HangNgaCount;
       if (anyMaleAdded) {
         flags.hasMaleAudio = true;
         flags.hasAudio = true;
@@ -4289,9 +4459,11 @@ export async function batchUpdateChapterAudioLinksInFirestore(
           novelRef,
           {
             chapters: updatedChapters,
-            hasMaleAudio: flags.hasMaleAudio,
-            hasFemaleAudio: flags.hasFemaleAudio,
-            hasAudio: flags.hasAudio,
+            hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
+            hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
+            hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
+            mp3NamMinhCount: resolvedMaleCount,
+            mp3HangNgaCount: resolvedFemaleCount,
             updatedAt: nowTs,
           },
           { merge: true }
@@ -4307,9 +4479,17 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         (i) => typeof i.audioUrlFemale === 'string' && i.audioUrlFemale.trim().length > 0
       );
       const patchFlags: Record<string, any> = { updatedAt: nowTs };
-      if (anyMaleAdded) patchFlags.hasMaleAudio = true;
-      if (anyFemaleAdded) patchFlags.hasFemaleAudio = true;
-      if (anyMaleAdded || anyFemaleAdded) patchFlags.hasAudio = true;
+      if (overrideCounts) {
+        patchFlags.mp3NamMinhCount = Math.max(0, overrideCounts.mp3NamMinhCount);
+        patchFlags.mp3HangNgaCount = Math.max(0, overrideCounts.mp3HangNgaCount);
+        patchFlags.hasMaleAudio = patchFlags.mp3NamMinhCount > 0 || anyMaleAdded;
+        patchFlags.hasFemaleAudio = patchFlags.mp3HangNgaCount > 0 || anyFemaleAdded;
+        patchFlags.hasAudio = patchFlags.hasMaleAudio || patchFlags.hasFemaleAudio;
+      } else {
+        if (anyMaleAdded) patchFlags.hasMaleAudio = true;
+        if (anyFemaleAdded) patchFlags.hasFemaleAudio = true;
+        if (anyMaleAdded || anyFemaleAdded) patchFlags.hasAudio = true;
+      }
       await withTimeout(
         setDoc(novelRef, patchFlags, { merge: true }),
         15000,
@@ -4322,6 +4502,87 @@ export async function batchUpdateChapterAudioLinksInFirestore(
   clearChapterAudioCache(
     novelId,
     validItems.map((item) => ({ id: item.chapter.id, number: item.chapter.number }))
+  );
+}
+
+/**
+ * Đồng bộ bộ đếm MP3 (Nam Minh / Hằng Nga) lên root document novels/{novelId} bằng duy nhất 1 lệnh ghi.
+ */
+export async function syncNovelMp3CountsInFirestore(
+  novelId: string,
+  counts: {
+    mp3NamMinhCount: number;
+    mp3HangNgaCount: number;
+    hasMaleAudio: boolean;
+    hasFemaleAudio: boolean;
+    hasAudio: boolean;
+  }
+): Promise<void> {
+  if (!novelId) return;
+  try {
+    await setDoc(
+      doc(db, 'novels', novelId),
+      {
+        mp3NamMinhCount: Math.max(0, counts.mp3NamMinhCount),
+        mp3HangNgaCount: Math.max(0, counts.mp3HangNgaCount),
+        hasMaleAudio: Boolean(counts.hasMaleAudio),
+        hasFemaleAudio: Boolean(counts.hasFemaleAudio),
+        hasAudio: Boolean(counts.hasAudio),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Lỗi đồng bộ thống kê MP3 lên truyện:', err);
+  }
+}
+
+/**
+ * Lưu riêng các chương vừa được chỉnh sửa/thêm mới từ EditNovelModal vào subcollection chapters.
+ */
+export async function saveEditedChaptersToSubcollection(
+  novelId: string,
+  chapters: Chapter[]
+): Promise<void> {
+  if (!novelId || !Array.isArray(chapters) || chapters.length === 0) return;
+  const nowTs = Date.now();
+  for (let i = 0; i < chapters.length; i += FIRESTORE_BATCH_LIMIT) {
+    const chunk = chapters.slice(i, i + FIRESTORE_BATCH_LIMIT);
+    const batch = writeBatch(db);
+    chunk.forEach((ch) => {
+      const chNumId = String(ch.number);
+      const pubAt = getChapterPublishAt(ch);
+      const docRef = doc(db, 'novels', novelId, 'chapters', chNumId);
+      const payload: Record<string, any> = cleanUndefinedFields({
+        id: ch.id || `${novelId}-c${ch.number}`,
+        number: Number(ch.number),
+        title: ch.title || `Chương ${ch.number}`,
+        slug: ch.slug || `chuong-${ch.number}`,
+        wordCount: ch.wordCount || (ch.content ? ch.content.split(/\s+/).filter(Boolean).length : 0),
+        publishedDate: ch.publishedDate || new Date().toISOString().split('T')[0],
+        isVip: Boolean(ch.isVip),
+        priceXu: ch.isVip ? Number(ch.priceXu || 0) : 0,
+        isHidden: Boolean(ch.isHidden),
+        authorNote: typeof ch.authorNote === 'string' && ch.authorNote.trim() ? ch.authorNote.trim() : undefined,
+        ...extractChapterAudioFields(ch),
+        updatedAt: nowTs,
+      });
+      if (typeof ch.content === 'string' && ch.content.trim().length > 0) {
+        payload.content = ch.content;
+      }
+      if (typeof pubAt === 'number' && pubAt > 0) {
+        payload.publishAt = pubAt;
+        payload.scheduledPublishAt = pubAt;
+      } else {
+        payload.publishAt = deleteField();
+        payload.scheduledPublishAt = deleteField();
+      }
+      batch.set(docRef, payload, { merge: true });
+    });
+    await withTimeout(batch.commit(), 20000, 'Lưu chỉnh sửa chương');
+  }
+  clearChapterAudioCache(
+    novelId,
+    chapters.map((c) => ({ id: c.id, number: c.number }))
   );
 }
 
@@ -4369,11 +4630,14 @@ export async function addSingleChapterToFirestore(
   chapter: Chapter,
   novelMeta?: Partial<Novel>
 ): Promise<void> {
+  const pubAt = getChapterPublishAt(chapter);
   const cleanChap = cleanUndefinedFields({
     ...chapter,
     id: chapter.id || `${novelId}-c${chapter.number}`,
     number: Number(chapter.number),
     publishedDate: chapter.publishedDate || new Date().toISOString().split('T')[0],
+    publishAt: pubAt,
+    scheduledPublishAt: pubAt,
   });
   const chNumId = String(chapter.number);
 
@@ -4388,15 +4652,35 @@ export async function addSingleChapterToFirestore(
       : undefined;
 
     const nowTs = Date.now();
+    const metaChapsPool = strippedMetaChapters || [stripChapterContent(chapter)];
+    const latestInfo = resolvePublicLatestChapterInfo(
+      metaChapsPool,
+      chapter.title,
+      chapter.number,
+      novelMeta?.totalChapters || Number(chapter.number) || 1
+    );
+    const latestPublishAt = getNovelLatestPublishAt(novelMeta, metaChapsPool) || undefined;
+    const audioFlags = strippedMetaChapters ? computeNovelAudioFlags(strippedMetaChapters, novelMeta) : null;
+
     const rootPatch = cleanUndefinedFields({
-      latestChapterTitle: chapter.title,
-      latestChapterNumber: chapter.number,
+      latestChapterTitle: latestInfo.latestChapterTitle,
+      latestChapterNumber: latestInfo.latestChapterNumber,
       lastUpdated: 'Vừa xong',
       updatedAt: nowTs,
       lastChapterUpdatedAt: nowTs,
       status: novelMeta?.status,
       totalChapters: novelMeta?.totalChapters,
       chapters: strippedMetaChapters,
+      latestPublishAt,
+      ...(audioFlags
+        ? {
+            hasAudio: audioFlags.hasAudio,
+            hasMaleAudio: audioFlags.hasMaleAudio,
+            hasFemaleAudio: audioFlags.hasFemaleAudio,
+            mp3NamMinhCount: audioFlags.mp3NamMinhCount,
+            mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+          }
+        : {}),
     });
 
     batch.set(doc(db, 'novels', novelId), rootPatch, { merge: true });

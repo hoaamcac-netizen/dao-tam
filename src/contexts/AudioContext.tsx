@@ -19,6 +19,10 @@ import {
   getNovelVoiceAvailability,
   resolveEffectiveVoiceForNovel,
   getChapterAudioUrl,
+  isUserOwnerOrAdmin,
+  isChapterVisibleToReader,
+  formatScheduleFull,
+  getChapterPublishAt,
 } from '../utils/rulesAndVoices';
 import { safeGetItem, safeSetItem, safeJsonParse } from '../utils/safeStorage';
 import { fetchFullChapterContent } from '../firebase/services';
@@ -1080,21 +1084,39 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
   }, []);
 
-  const findNextChapterFor = useCallback((chapter: Chapter): Chapter | null => {
-    const list = Array.isArray(chaptersListRef.current) ? chaptersListRef.current : [];
-    if ((list?.length || 0) === 0) return null;
-    const curIdx = list.findIndex(
-      (c) => c.id === chapter.id || Number(c.number) === Number(chapter.number)
-    );
-    if (curIdx >= 0 && curIdx < (list?.length || 0) - 1) {
-      return list[curIdx + 1];
-    }
-    return null;
+  const isChapterPlayableNow = useCallback((novel: Novel | null, chapter: Chapter | null): boolean => {
+    if (!chapter) return false;
+    const isOwnerOrAdmin = isUserOwnerOrAdmin(userRef.current, novel);
+    return isChapterVisibleToReader(chapter, isOwnerOrAdmin, Date.now());
   }, []);
+
+  const filterPlayableChapters = useCallback((novel: Novel | null, list?: Chapter[] | null): Chapter[] => {
+    if (!Array.isArray(list) || list.length === 0) return [];
+    const isOwnerOrAdmin = isUserOwnerOrAdmin(userRef.current, novel);
+    const nowMs = Date.now();
+    return list.filter((c) => isChapterVisibleToReader(c, isOwnerOrAdmin, nowMs));
+  }, []);
+
+  const findNextChapterFor = useCallback(
+    (chapter: Chapter): Chapter | null => {
+      const curNovel = activeNovelRef.current;
+      const list = filterPlayableChapters(curNovel, chaptersListRef.current);
+      if ((list?.length || 0) === 0) return null;
+      const curIdx = list.findIndex(
+        (c) => c.id === chapter.id || Number(c.number) === Number(chapter.number)
+      );
+      if (curIdx >= 0 && curIdx < (list?.length || 0) - 1) {
+        return list[curIdx + 1];
+      }
+      return null;
+    },
+    [filterPlayableChapters]
+  );
 
   const preloadChapterForAudio = useCallback(
     (novel: Novel, chapter: Chapter): Promise<QueuedAudioChunk[]> => {
       if (!isAudioModeRef.current) return Promise.resolve([]);
+      if (!isChapterPlayableNow(novel, chapter)) return Promise.resolve([]);
       const mp3ForCurrentVoice = resolveChapterVoiceAudioUrl(chapter, voiceIdRef.current);
       if (mp3ForCurrentVoice) {
         preloadNextMp3LinkHint(mp3ForCurrentVoice);
@@ -1629,6 +1651,19 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     ) => {
       const audio = audioRef.current;
       if (!audio) return;
+
+      if (!isChapterPlayableNow(novel, chapter)) {
+        const pubAt = getChapterPublishAt(chapter);
+        setAudioError(
+          pubAt
+            ? `Chương ${chapter.number} chưa đến giờ phát hành (${formatScheduleFull(pubAt)}).`
+            : `Chương ${chapter.number} hiện chưa mở phát hành.`
+        );
+        stopSingleAudioElement(true);
+        setIsPlaying(false);
+        setIsLoading(false);
+        return;
+      }
 
       const cleanMp3Url = (mp3Url || '').trim();
       clearNetworkRecoveryTimer();
@@ -2472,6 +2507,22 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       options?: { isAutoAdvance?: boolean; startChunkIndex?: number }
     ) => {
       const chapterRequestKey = makeChapterCacheKey(novel.id, chapter.id);
+
+      // Chặn tuyệt đối phát MP3 / đọc trước đối với chương chưa đến giờ phát hành (hoặc đang ẩn) với độc giả
+      if (!isChapterPlayableNow(novel, chapter)) {
+        inFlightChapterLoadKeyRef.current = '';
+        stopAllAudioOutputs(false);
+        const pubAt = getChapterPublishAt(chapter);
+        setAudioError(
+          pubAt
+            ? `Chương ${chapter.number} chưa đến giờ phát hành (${formatScheduleFull(pubAt)}).`
+            : `Chương ${chapter.number} hiện chưa mở phát hành.`
+        );
+        setIsPlaying(false);
+        setIsLoading(false);
+        return;
+      }
+
       if (
         !userExplicitAction &&
         !options?.isAutoAdvance &&
@@ -2535,11 +2586,15 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       if (Array.isArray(chapterList) && (chapterList?.length || 0) > 0) {
-        const sorted = [...chapterList].sort((a, b) => Number(a.number) - Number(b.number));
+        const sorted = filterPlayableChapters(novel, chapterList).sort(
+          (a, b) => Number(a.number) - Number(b.number)
+        );
         setChaptersList(sorted);
         chaptersListRef.current = sorted;
       } else if (Array.isArray(novel.chapters) && (novel.chapters?.length || 0) > 0) {
-        const sorted = [...novel.chapters].sort((a, b) => Number(a.number) - Number(b.number));
+        const sorted = filterPlayableChapters(novel, novel.chapters).sort(
+          (a, b) => Number(a.number) - Number(b.number)
+        );
         setChaptersList(sorted);
         chaptersListRef.current = sorted;
       }
@@ -2897,7 +2952,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const curChapter = activeChapterRef.current;
     const curNovel = activeNovelRef.current;
-    const list = chaptersListRef.current || [];
+    const list = filterPlayableChapters(curNovel, chaptersListRef.current);
     if (!curChapter || !curNovel || (list?.length || 0) === 0) {
       isAdvancingChapterRef.current = false;
       stop();
@@ -2909,18 +2964,23 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
     if (curIdx >= 0 && curIdx < (list?.length || 0) - 1) {
       const nextChap = list[curIdx + 1];
+      if (!isChapterPlayableNow(curNovel, nextChap)) {
+        isAdvancingChapterRef.current = false;
+        stop();
+        return;
+      }
       broadcastAudioChapterChange(curNovel, nextChap);
       await playChapter(curNovel, nextChap, true, list, false, { isAutoAdvance: true });
     } else {
       isAdvancingChapterRef.current = false;
       stop();
     }
-  }, [broadcastAudioChapterChange, pause, playChapter, stop]);
+  }, [broadcastAudioChapterChange, filterPlayableChapters, isChapterPlayableNow, pause, playChapter, stop]);
 
   const handlePlayPrevChapter = useCallback(async () => {
     const curChapter = activeChapterRef.current;
     const curNovel = activeNovelRef.current;
-    const list = chaptersListRef.current || [];
+    const list = filterPlayableChapters(curNovel, chaptersListRef.current);
     if (!curChapter || !curNovel || (list?.length || 0) === 0) return;
 
     const curIdx = list.findIndex(
@@ -2928,10 +2988,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     );
     if (curIdx > 0) {
       const prevChap = list[curIdx - 1];
+      if (!isChapterPlayableNow(curNovel, prevChap)) return;
       broadcastAudioChapterChange(curNovel, prevChap);
       await playChapter(curNovel, prevChap, true, list, true);
     }
-  }, [broadcastAudioChapterChange, playChapter]);
+  }, [broadcastAudioChapterChange, filterPlayableChapters, isChapterPlayableNow, playChapter]);
 
   useEffect(() => {
     playNextChapterRef.current = handlePlayNextChapter;

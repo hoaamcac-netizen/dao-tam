@@ -62,6 +62,9 @@ export interface LightweightNovelStorage {
   hasAudio?: boolean;
   hasMaleAudio?: boolean;
   hasFemaleAudio?: boolean;
+  mp3NamMinhCount?: number;
+  mp3HangNgaCount?: number;
+  latestPublishAt?: number;
   editor?: string;
 }
 
@@ -273,6 +276,47 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
       ? novel.hasFemaleAudio || hasFemaleFromChapters
       : hasFemaleFromChapters;
 
+  const maleCountFromChapters = chaps.filter(
+    (c: any) =>
+      (typeof c?.audioUrlMale === 'string' && c.audioUrlMale.trim().length > 0) ||
+      (typeof c?.audioUrl === 'string' && c.audioUrl.trim().length > 0) ||
+      (typeof c?.mp3Url === 'string' && c.mp3Url.trim().length > 0) ||
+      (typeof c?.maleAudioUrl === 'string' && c.maleAudioUrl.trim().length > 0) ||
+      (typeof c?.audio === 'string' && c.audio.trim().length > 0)
+  ).length;
+  const femaleCountFromChapters = chaps.filter(
+    (c: any) =>
+      (typeof c?.audioUrlFemale === 'string' && c.audioUrlFemale.trim().length > 0) ||
+      (typeof c?.femaleAudioUrl === 'string' && c.femaleAudioUrl.trim().length > 0) ||
+      (typeof c?.mp3Female === 'string' && c.mp3Female.trim().length > 0)
+  ).length;
+
+  const mp3NamMinhCount =
+    typeof novel?.mp3NamMinhCount === 'number' && Number.isFinite(novel.mp3NamMinhCount)
+      ? novel.mp3NamMinhCount
+      : chaps.length > 0
+      ? maleCountFromChapters
+      : undefined;
+  const mp3HangNgaCount =
+    typeof novel?.mp3HangNgaCount === 'number' && Number.isFinite(novel.mp3HangNgaCount)
+      ? novel.mp3HangNgaCount
+      : chaps.length > 0
+      ? femaleCountFromChapters
+      : undefined;
+
+  let latestPublishAt =
+    typeof novel?.latestPublishAt === 'number' && Number.isFinite(novel.latestPublishAt)
+      ? novel.latestPublishAt
+      : undefined;
+  if (chaps.length > 0) {
+    let maxPub = latestPublishAt || 0;
+    for (const c of chaps) {
+      const pub = Number(c?.publishAt ?? c?.scheduledPublishAt ?? 0);
+      if (Number.isFinite(pub) && pub > maxPub) maxPub = pub;
+    }
+    if (maxPub > 0) latestPublishAt = maxPub;
+  }
+
   return {
     id: String(novel?.id || ''),
     title: String(novel?.title || ''),
@@ -313,6 +357,9 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     hasAudio: Boolean(novel?.hasAudio || hasMaleAudio || hasFemaleAudio),
     hasMaleAudio,
     hasFemaleAudio,
+    ...(typeof mp3NamMinhCount === 'number' ? { mp3NamMinhCount } : {}),
+    ...(typeof mp3HangNgaCount === 'number' ? { mp3HangNgaCount } : {}),
+    ...(typeof latestPublishAt === 'number' ? { latestPublishAt } : {}),
   };
 }
 

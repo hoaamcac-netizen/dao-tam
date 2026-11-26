@@ -5,7 +5,13 @@ import {
   checkIsChapterUnlocked,
   formatXu,
   getNovelVoiceAvailability,
-  resolveEffectiveVoiceForNovel
+  resolveEffectiveVoiceForNovel,
+  isUserOwnerOrAdmin,
+  isChapterVisibleToReader,
+  isChapterScheduledPending,
+  getChapterPublishAt,
+  formatScheduleFull,
+  formatScheduleShort,
 } from '../utils/rulesAndVoices';
 import { useAudio } from '../contexts/AudioContext';
 import { fetchFullChapterContent } from '../firebase/services';
@@ -49,7 +55,8 @@ import {
   AlertCircle,
   AlertTriangle,
   Share2,
-  Check
+  Check,
+  Clock
 } from 'lucide-react';
 
 /**
@@ -115,8 +122,12 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const [isWindowBlurred, setIsWindowBlurred] = useState(false);
   const [showSecurityModal, setShowSecurityModal] = useState(false);
 
-  // LỚP 1: KIỂM TRA QUYỀN ADMIN ('hoaamcac@gmail.com', 'meoyeutien22@gmail.com')
+  // LỚP 1: KIỂM TRA QUYỀN ADMIN ('hoaamcac@gmail.com', 'meoyeutien22@gmail.com') & CHỦ TRUYỆN
   const isAdmin = checkIsAdmin(user?.email);
+  const isOwnerOrAdmin = isUserOwnerOrAdmin(user, novel);
+  const chapterPublishAt = getChapterPublishAt(chapter);
+  const isScheduledPending = isChapterScheduledPending(chapter);
+  const isAccessBlocked = !isOwnerOrAdmin && (isScheduledPending || Boolean(chapter.isHidden));
 
   // LỚP 3: STATE THÔNG BÁO BANNER VÀNG (CHỈ KHI ADMIN KHÓA) VÀ TOAST TẠM THỜI (1 PHÚT)
   const rateLimitBanNotice = user?.isBanned || user?.isLocked ? BAN_MESSAGE : null;
@@ -181,6 +192,12 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   const lastSyncedAudioKeyRef = useRef<string>('');
 
   useEffect(() => {
+    if (isAccessBlocked) {
+      setFullContent('');
+      setIsLoadingFullContent(false);
+      return;
+    }
+
     const fetchKey = `${novel?.id || ''}::${chapter?.id || ''}::${chapter?.number ?? ''}`;
     if (lastFetchedChapterKeyRef.current === fetchKey) {
       return;
@@ -248,7 +265,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [novel?.id, chapter?.id, chapter?.number]);
+  }, [novel?.id, chapter?.id, chapter?.number, isAccessBlocked]);
 
   useEffect(() => {
     const handleAudioCacheRefresh = (e: Event) => {
@@ -353,10 +370,13 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     }
   };
 
-  // Điều hướng chương trước / sau (Sắp xếp theo số chương để chuyển chương chính xác)
+  // Điều hướng chương trước / sau (Sắp xếp theo số chương & ẩn chương chưa tới giờ đăng đối với độc giả)
   const safeChapters = useMemo(() => {
-    return [...(novel?.chapters || [])].sort((a, b) => Number(a.number) - Number(b.number));
-  }, [novel?.chapters]);
+    const nowMs = Date.now();
+    return [...(novel?.chapters || [])]
+      .filter((c) => isChapterVisibleToReader(c, isOwnerOrAdmin, nowMs))
+      .sort((a, b) => Number(a.number) - Number(b.number));
+  }, [novel?.chapters, isOwnerOrAdmin]);
   const currentIndex = (safeChapters || []).findIndex((c) => c.id === chapter?.id || (Number(c.number) > 0 && Number(c.number) === Number(chapter?.number)));
   const prevChapter = currentIndex > 0 ? safeChapters[currentIndex - 1] : null;
   const nextChapter = currentIndex >= 0 && currentIndex < (safeChapters?.length || 0) - 1 ? safeChapters[currentIndex + 1] : null;
@@ -458,6 +478,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   // Điều phối các hành động Audio qua AudioContext
   const playTts = useCallback(async (startIndex?: number) => {
+    if (isAccessBlocked) return;
     safeSetItem('daotam_audio_bar_visible', 'true');
     safeSetItem('daotam_audio_active', 'true');
     audioContext.setIsBarVisible(true);
@@ -468,13 +489,14 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         startChunkIndex: startIndex,
       });
     }
-  }, [isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
+  }, [isAccessBlocked, isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
 
   const pauseTts = useCallback(() => {
     audioContext.pause();
   }, [audioContext]);
 
   const toggleTtsPlay = useCallback(() => {
+    if (isAccessBlocked) return;
     safeSetItem('daotam_audio_bar_visible', 'true');
     audioContext.setIsBarVisible(true);
     if (isCurrentChapterAudio && ((audioContext?.chunks?.length || 0) > 0 || audioContext.isDirectMp3)) {
@@ -482,13 +504,14 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     } else {
       audioContext.playChapter(novel, chapter, true, safeChapters, true);
     }
-  }, [isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
+  }, [isAccessBlocked, isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
 
   const stopTts = useCallback(() => {
     audioContext.stop();
   }, [audioContext]);
 
   const seekToChunk = useCallback(async (index: number) => {
+    if (isAccessBlocked) return;
     if (isCurrentChapterAudio && (audioContext?.chunks?.length || 0) > 0) {
       await audioContext.seekToChunk(index);
     } else {
@@ -496,7 +519,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         startChunkIndex: index,
       });
     }
-  }, [isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
+  }, [isAccessBlocked, isCurrentChapterAudio, audioContext, novel, chapter, safeChapters]);
 
   const skipNextTts = useCallback(async () => {
     await audioContext.skipNext();
@@ -563,8 +586,20 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   }, [isTtsPlaying]);
 
   // Đồng bộ Audio 1 chiều khi người dùng đổi chương trên trang đọc (dùng useRef chặn gọi lặp):
-  // Chỉ kích hoạt khi chương trang đọc thực sự khác chương đang nạp trong AudioContext
+  // Chỉ kích hoạt khi chương trang đọc thực sự khác chương đang nạp trong AudioContext và được phép xem
   useEffect(() => {
+    if (isAccessBlocked) {
+      const ctx = audioContextRef.current;
+      if (
+        ctx.activeChapter &&
+        ctx.activeNovel?.id === novel?.id &&
+        (ctx.activeChapter.id === chapter?.id ||
+          Number(ctx.activeChapter.number) === Number(chapter?.number))
+      ) {
+        ctx.stop();
+      }
+      return;
+    }
     if (!novel?.id || !chapter?.id || !isChapterUnlocked) return;
     const syncKey = `${novel.id}::${chapter.id}::${chapter.number}::${isAudioActive}`;
     if (lastSyncedAudioKeyRef.current === syncKey) return;
@@ -591,7 +626,7 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
         });
       }
     }
-  }, [novel?.id, chapter?.id, chapter?.number, isChapterUnlocked, isAudioActive]);
+  }, [novel?.id, chapter?.id, chapter?.number, isChapterUnlocked, isAudioActive, isAccessBlocked]);
 
   // =========================================================================
   // TÍNH LƯỢT VIEW THẬT THEO TIÊU CHÍ GOOGLE (GA4 ENGAGED SESSION STANDARD)
@@ -834,6 +869,65 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
     }
     return 'bg-slate-50 text-slate-900';
   };
+
+  if (isAccessBlocked) {
+    const latestPublishedChapter =
+      safeChapters.length > 0 ? safeChapters[safeChapters.length - 1] : null;
+    return (
+      <div className={`min-h-screen overflow-x-hidden pt-20 pb-24 px-4 flex items-center justify-center ${getThemeClasses()}`}>
+        <div className="w-full max-w-lg rounded-3xl bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-800/70 shadow-xl p-6 sm:p-8 text-center space-y-4">
+          <div className="w-16 h-16 mx-auto rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-700/60 flex items-center justify-center text-amber-600 dark:text-amber-400">
+            <Clock className="w-8 h-8" />
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-xs font-bold uppercase tracking-wider text-pink-600 dark:text-pink-400">
+              {novel.title}
+            </p>
+            <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
+              {isScheduledPending
+                ? `Chương ${chapter.number} chưa đến giờ phát hành`
+                : `Chương ${chapter.number} hiện đang tạm ẩn`}
+            </h1>
+          </div>
+
+          {isScheduledPending && chapterPublishAt && (
+            <div className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-700/60 text-amber-900 dark:text-amber-200 text-xs sm:text-sm font-bold">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Thời gian phát hành dự kiến: {formatScheduleFull(chapterPublishAt)}</span>
+            </div>
+          )}
+
+          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+            {isScheduledPending
+              ? 'Nội dung chương và bản đọc Audio MP3 sẽ tự động mở khóa đúng giờ hẹn. Mời bạn quay lại sau hoặc tiếp tục thưởng thức các chương đã phát hành nhé!'
+              : 'Chương này hiện chưa mở cho độc giả. Mời bạn quay lại mục lục truyện để chọn chương khác.'}
+          </p>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={onBackToNovel}
+              className="min-h-[44px] px-5 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer transition"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Quay lại mục lục truyện</span>
+            </button>
+
+            {latestPublishedChapter && (
+              <button
+                type="button"
+                onClick={() => onSelectChapter({ ...novel, chapters: safeChapters }, latestPublishedChapter)}
+                className="min-h-[44px] px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 text-white text-xs sm:text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer shadow-md transition"
+              >
+                <BookOpen className="w-4 h-4" />
+                <span>Đọc Chương {latestPublishedChapter.number} mới nhất</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1249,6 +1343,14 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
       {/* Main Chapter Content Body (Sans-serif flat layout) */}
       <article className="max-w-3xl mx-auto px-4 sm:px-8 py-4 sm:py-8 relative select-none">
+        {isOwnerOrAdmin && isScheduledPending && chapterPublishAt && (
+          <div className="mb-4 px-4 py-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs font-bold flex items-center justify-center gap-2 text-center">
+            <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>
+              Chế độ Quản trị/Tác giả: Chương đang hẹn giờ đăng lúc {formatScheduleFull(chapterPublishAt)} (độc giả chưa thể xem chữ hoặc nghe MP3).
+            </span>
+          </div>
+        )}
         <div className="text-center mb-2">
           <span className="text-xs uppercase tracking-wider text-blue-600 dark:text-blue-400 font-semibold">
             {novel.title}
@@ -1567,28 +1669,36 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto py-4 space-y-1.5 pr-2 chapter-list-scrollbar">
-              {(novel?.chapters || []).map((c) => {
+              {safeChapters.map((c) => {
                 const unlocked =
                   !c.isVip ||
                   isFullBookUnlocked ||
                   (user?.unlockedChapters?.[novel?.id] || []).includes(c.id);
+                const cScheduledPending = isOwnerOrAdmin && isChapterScheduledPending(c);
                 return (
                   <button
                     key={c.id}
                     onClick={() => {
-                      onSelectChapter(novel, c);
+                      onSelectChapter({ ...novel, chapters: safeChapters }, c);
                       setShowChapterDrawer(false);
                     }}
-                    className={`w-full text-left p-2.5 rounded-xl text-xs transition-colors flex items-center justify-between cursor-pointer ${
+                    className={`w-full text-left p-2.5 rounded-xl text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer ${
                       c.id === chapter.id
                         ? 'bg-blue-600 text-white font-semibold'
                         : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                     }`}
                   >
-                    <span className="truncate pr-2">{c.title}</span>
-                    {c.isVip && !unlocked && (
-                      <Lock className="w-3 h-3 text-rose-500 flex-shrink-0" />
-                    )}
+                    <span className="truncate pr-1">{c.title}</span>
+                    <span className="flex items-center gap-1.5 flex-shrink-0">
+                      {cScheduledPending && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                          {formatScheduleShort(getChapterPublishAt(c))}
+                        </span>
+                      )}
+                      {c.isVip && !unlocked && (
+                        <Lock className="w-3 h-3 text-rose-500 flex-shrink-0" />
+                      )}
+                    </span>
                   </button>
                 );
               })}

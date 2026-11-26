@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { TopUpRequest, UserProfile, Novel, Chapter, NovelSubmission, WithdrawalRequest, NovelReport, Comment } from '../types';
-import { parseBatchChapters, calculateChapterVip } from '../utils/rulesAndVoices';
+import { parseBatchChapters, calculateChapterVip, getNovelMp3Counts } from '../utils/rulesAndVoices';
 import { 
   fetchAllCommentsForAdmin, 
   deleteNovelCommentFromFirestore,
@@ -113,6 +113,16 @@ interface AdminDashboardModalProps {
   onReloadNovels?: () => Promise<void> | void;
   onChapterAudioUpdated?: (novelId: string, updatedChapter: Chapter) => void;
   onBatchChaptersAudioUpdated?: (novelId: string, updatedChapters: Chapter[]) => void;
+  onNovelMp3CountsSynced?: (
+    novelId: string,
+    counts: {
+      mp3NamMinhCount: number;
+      mp3HangNgaCount: number;
+      hasMaleAudio: boolean;
+      hasFemaleAudio: boolean;
+      hasAudio: boolean;
+    }
+  ) => void;
 }
 
 export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
@@ -144,6 +154,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   onReloadNovels,
   onChapterAudioUpdated,
   onBatchChaptersAudioUpdated,
+  onNovelMp3CountsSynced,
 }) => {
   const [activeTab, setActiveTab] = useState<'requests' | 'submissions' | 'payouts' | 'reports' | 'novels' | 'batch' | 'comments' | 'tools' | 'users' | 'support_chat' | 'global_banner'>('requests');
   const [mp3ManagingNovel, setMp3ManagingNovel] = useState<Novel | null>(null);
@@ -554,7 +565,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   // Novel Management state
   const [novelSearchQuery, setNovelSearchQuery] = useState('');
-  const [novelStatusFilter, setNovelStatusFilter] = useState<'all' | 'visible' | 'hidden'>('all');
+  const [novelStatusFilter, setNovelStatusFilter] = useState<'all' | 'visible' | 'hidden' | 'missing_male' | 'missing_female'>('all');
   const [confirmDeleteNovel, setConfirmDeleteNovel] = useState<Novel | null>(null);
   const [isReloadingNovels, setIsReloadingNovels] = useState(false);
 
@@ -664,6 +675,16 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   const targetNovel = safeNovels.find((n) => n.id === selectedNovelId) || safeNovels[0];
 
+  const missingMaleNovelsCount = safeNovels.filter((n) => {
+    const { totalChapters, namMinhCount } = getNovelMp3Counts(n);
+    return totalChapters > 0 ? namMinhCount < totalChapters : namMinhCount === 0;
+  }).length;
+
+  const missingFemaleNovelsCount = safeNovels.filter((n) => {
+    const { totalChapters, hangNgaCount } = getNovelMp3Counts(n);
+    return totalChapters > 0 ? hangNgaCount < totalChapters : hangNgaCount === 0;
+  }).length;
+
   const filteredNovels = safeNovels.filter((n) => {
     const q = novelSearchQuery.toLowerCase().trim();
     const matchesSearch = 
@@ -675,6 +696,14 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     if (!matchesSearch) return false;
     if (novelStatusFilter === 'visible') return !n.isHidden;
     if (novelStatusFilter === 'hidden') return !!n.isHidden;
+    if (novelStatusFilter === 'missing_male') {
+      const { totalChapters, namMinhCount } = getNovelMp3Counts(n);
+      return totalChapters > 0 ? namMinhCount < totalChapters : namMinhCount === 0;
+    }
+    if (novelStatusFilter === 'missing_female') {
+      const { totalChapters, hangNgaCount } = getNovelMp3Counts(n);
+      return totalChapters > 0 ? hangNgaCount < totalChapters : hangNgaCount === 0;
+    }
     return true;
   });
 
@@ -2256,35 +2285,40 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
               TAB 5: QUẢN LÝ DANH SÁCH TRUYỆN (ẨN & XÓA)
              ========================================================================= */}
           {activeTab === 'novels' && (
-            <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
-                <div className="flex-1 max-w-md relative">
+            <div className="space-y-4 overflow-x-hidden">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-xs overflow-x-hidden">
+                <div className="flex-1 min-w-0 sm:max-w-md relative">
                   <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={novelSearchQuery}
                     onChange={(e) => setNovelSearchQuery(e.target.value)}
                     placeholder="Tìm theo tên truyện, tác giả, editor..."
-                    className="w-full bg-slate-50 border border-slate-300 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-pink-500 focus:bg-white transition"
+                    className="w-full min-h-[42px] bg-slate-50 border border-slate-300 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-pink-500 focus:bg-white transition"
                   />
                 </div>
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  {(['all', 'visible', 'hidden'] as const).map((st) => (
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                  {(['all', 'visible', 'hidden', 'missing_male', 'missing_female'] as const).map((st) => (
                     <button
                       key={st}
+                      type="button"
                       onClick={() => setNovelStatusFilter(st)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                      className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
                         novelStatusFilter === st
                           ? 'bg-pink-600 text-white shadow-xs font-bold'
                           : 'bg-slate-100 text-slate-600 hover:text-pink-600 border border-slate-200'
                       }`}
                     >
-                      {st === 'all' 
-                        ? `Tất cả (${safeNovels?.length || 0})` 
-                        : st === 'visible' 
-                        ? `Đang hiện (${safeNovels.filter((n) => !n.isHidden)?.length || 0})` 
-                        : `Đã ẩn (${safeNovels.filter((n) => n.isHidden)?.length || 0})`}
+                      {st === 'all'
+                        ? `Tất cả (${safeNovels?.length || 0})`
+                        : st === 'visible'
+                        ? `Đang hiện (${safeNovels.filter((n) => !n.isHidden)?.length || 0})`
+                        : st === 'hidden'
+                        ? `Đã ẩn (${safeNovels.filter((n) => n.isHidden)?.length || 0})`
+                        : st === 'missing_male'
+                        ? `Thiếu MP3 Nam Minh (${missingMaleNovelsCount})`
+                        : `Thiếu MP3 Hằng Nga (${missingFemaleNovelsCount})`}
                     </button>
                   ))}
                   {onReloadNovels && (
@@ -2299,7 +2333,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           setIsReloadingNovels(false);
                         }
                       }}
-                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50"
+                      className="min-h-[40px] px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-50"
                       title="Tải lại danh sách truyện từ hệ thống"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${isReloadingNovels ? 'animate-spin' : ''}`} />
@@ -2309,11 +2343,30 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-2.5">
-                {(filteredNovels || []).map((novel) => (
+              <div className="space-y-2.5 overflow-x-hidden">
+                {(filteredNovels || []).map((novel) => {
+                  const { totalChapters, namMinhCount, hangNgaCount } = getNovelMp3Counts(novel);
+                  const maleBadgeClass =
+                    totalChapters > 0 && namMinhCount >= totalChapters
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : namMinhCount > 0
+                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                      : totalChapters > 0
+                      ? 'bg-rose-50/70 text-rose-700 border-rose-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200';
+                  const femaleBadgeClass =
+                    totalChapters > 0 && hangNgaCount >= totalChapters
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : hangNgaCount > 0
+                      ? 'bg-amber-50 text-amber-700 border-amber-200'
+                      : totalChapters > 0
+                      ? 'bg-rose-50/70 text-rose-700 border-rose-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200';
+
+                  return (
                   <div
                     key={novel.id}
-                    className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 hover:border-pink-300 shadow-xs flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition-all"
+                    className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 hover:border-pink-300 shadow-xs flex flex-col md:flex-row md:items-center md:justify-between gap-3 transition-all overflow-x-hidden"
                   >
                     <div className="flex items-start sm:items-center gap-3 min-w-0 w-full md:flex-1">
                       <img
@@ -2326,7 +2379,15 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           {novel.title}
                         </h4>
                         <div className="text-xs text-slate-500 mt-1 break-words">
-                          Tác giả: <span className="text-pink-600 font-semibold">{novel.author}</span> • {novel.chapters?.length || 0} chương • {(novel.views || 0).toLocaleString()} lượt xem
+                          Tác giả: <span className="text-pink-600 font-semibold">{novel.author}</span> • {totalChapters} chương • {(novel.views || 0).toLocaleString()} lượt xem
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5 max-w-full">
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border tabular-nums max-w-full ${maleBadgeClass}`}>
+                            Nam Minh: {namMinhCount}/{totalChapters}
+                          </span>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border tabular-nums max-w-full ${femaleBadgeClass}`}>
+                            Hằng Nga: {hangNgaCount}/{totalChapters}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -2377,7 +2438,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -4227,6 +4289,20 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
               return { ...prev, chapters: nextChaps };
             });
             onBatchChaptersAudioUpdated?.(novelId, updatedChapters);
+          }}
+          onNovelMp3CountsSynced={(novelId, counts) => {
+            setMp3ManagingNovel((prev) => {
+              if (!prev || prev.id !== novelId) return prev;
+              return {
+                ...prev,
+                mp3NamMinhCount: counts.mp3NamMinhCount,
+                mp3HangNgaCount: counts.mp3HangNgaCount,
+                hasMaleAudio: counts.hasMaleAudio,
+                hasFemaleAudio: counts.hasFemaleAudio,
+                hasAudio: counts.hasAudio,
+              };
+            });
+            onNovelMp3CountsSynced?.(novelId, counts);
           }}
         />
       )}

@@ -65,7 +65,10 @@
         "fullBookDiscountPriceXu": { "type": "number", "description": "Giá Xu ưu đãi combo" },
         "isShortStory": { "type": "boolean", "description": "Đánh dấu truyện ngắn / đoản văn" },
         "updatedAt": { "type": "number", "description": "Thời gian cập nhật thông tin truyện" },
-        "lastChapterUpdatedAt": { "type": "number", "description": "Thời gian ra hoặc sửa chương gần nhất (dùng để sắp xếp Mới cập nhật & Truyện full)" }
+        "lastChapterUpdatedAt": { "type": "number", "description": "Thời gian ra hoặc sửa chương gần nhất (dùng để sắp xếp Mới cập nhật & Truyện full)" },
+        "mp3NamMinhCount": { "type": "number", "description": "Số chương đã gắn MP3 giọng Nam Minh (đồng bộ 0 Reads)" },
+        "mp3HangNgaCount": { "type": "number", "description": "Số chương đã gắn MP3 giọng Hằng Nga (đồng bộ 0 Reads)" },
+        "latestPublishAt": { "type": "number", "description": "Mốc thời gian hẹn giờ xuất bản cao nhất trong bộ truyện (epoch ms)" }
       },
       "required": ["title", "author", "coverImage", "mainCategory", "status", "totalChapters"]
     },
@@ -81,6 +84,9 @@
         "wordCount": { "type": "number", "description": "Số lượng từ" },
         "isVip": { "type": "boolean", "description": "Cờ đánh dấu chương VIP" },
         "priceXu": { "type": "number", "description": "Số Xu cần để mở khóa" },
+        "publishAt": { "type": "number", "description": "Thời gian hẹn giờ xuất bản chương (epoch ms)" },
+        "scheduledPublishAt": { "type": "number", "description": "Thời gian hẹn giờ xuất bản chương (tương thích ngược)" },
+        "authorNote": { "type": "string", "description": "Lời tác giả cuối chương" },
         "audioUrl": { "type": "string", "description": "Link file MP3 trực tiếp legacy (hiển thị và phát mặc định ở giọng Nam Minh)" },
         "audioUrlMale": { "type": "string", "description": "Link file MP3 trực tiếp cho giọng Nam Minh" },
         "audioUrlFemale": { "type": "string", "description": "Link file MP3 trực tiếp cho giọng Hằng Nga" },

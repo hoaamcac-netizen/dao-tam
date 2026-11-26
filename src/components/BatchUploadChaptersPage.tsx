@@ -2,7 +2,14 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Novel, Chapter } from '../types';
 import { getLatestChapterNumberFromFirestore } from '../firebase/services';
 import { safeSetItem, makeChapterCacheKey, makeChapterCacheTsKey } from '../utils/safeStorage';
-import { filterOutDummyChapters } from '../utils/rulesAndVoices';
+import {
+  filterOutDummyChapters,
+  formatScheduleFull,
+  formatScheduleShort,
+  fromDatetimeLocalInput,
+  getNovelLatestPublishAt,
+  toDatetimeLocalInput,
+} from '../utils/rulesAndVoices';
 import { 
   ArrowLeft, 
   BookOpen, 
@@ -21,7 +28,10 @@ import {
   Eye, 
   AlertCircle,
   HelpCircle,
-  Check
+  Check,
+  Clock,
+  Calendar,
+  Wand2
 } from 'lucide-react';
 
 export interface BatchUploadChaptersPageProps {
@@ -44,6 +54,7 @@ export interface ParsedChapterItem {
   wordCount: number;
   isVip: boolean;
   priceXu: number;
+  publishAt?: number;
 }
 
 export const BatchUploadChaptersPage: React.FC<BatchUploadChaptersPageProps> = ({
@@ -113,6 +124,102 @@ export const BatchUploadChaptersPage: React.FC<BatchUploadChaptersPageProps> = (
   const [uploadProgress, setUploadProgress] = useState<{ saved: number; total: number } | null>(null);
   const [copiedTemplate, setCopiedTemplate] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+
+  // Cấu hình Lịch đăng chương (Đăng ngay lập tức vs Lên lịch đăng tự động)
+  const existingMaxPublishAt = useMemo(
+    () => getNovelLatestPublishAt(novel, cleanExistingChapters),
+    [novel, cleanExistingChapters]
+  );
+  const [scheduleMode, setScheduleMode] = useState<'immediate' | 'scheduled'>('immediate');
+  const [scheduleStartStr, setScheduleStartStr] = useState<string>(() => {
+    const base = Math.max(Date.now() + 30 * 60_000, getNovelLatestPublishAt(novel, cleanExistingChapters) + 60_000);
+    return toDatetimeLocalInput(base);
+  });
+  const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState<number>(60);
+  const [customChapterPublishAt, setCustomChapterPublishAt] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    const minStart = Math.max(Date.now() + 30 * 60_000, existingMaxPublishAt + 60_000);
+    setScheduleStartStr((prev) => {
+      const parsed = fromDatetimeLocalInput(prev);
+      if (!parsed || (existingMaxPublishAt > 0 && parsed < existingMaxPublishAt + 60_000)) {
+        return toDatetimeLocalInput(minStart);
+      }
+      return prev;
+    });
+  }, [existingMaxPublishAt]);
+
+  const scheduleValidation = useMemo(() => {
+    const effectivePublishAtById: Record<string, number | undefined> = {};
+    const errorsById: Record<string, string> = {};
+    let firstError = '';
+
+    if (scheduleMode !== 'scheduled') {
+      return { hasError: false, effectivePublishAtById, errorsById, firstError };
+    }
+
+    const baseStartMs = fromDatetimeLocalInput(scheduleStartStr);
+    const intervalMs = Math.max(1, Number(scheduleIntervalMinutes) || 1) * 60_000;
+    let prevTs: number | undefined = undefined;
+    let prevChapNum: number | undefined = undefined;
+
+    for (let i = 0; i < (parsedChapters || []).length; i++) {
+      const ch = parsedChapters[i];
+      const overrideTs = customChapterPublishAt[ch.id];
+      const ts =
+        typeof overrideTs === 'number' && Number.isFinite(overrideTs) && overrideTs > 0
+          ? overrideTs
+          : baseStartMs
+          ? baseStartMs + i * intervalMs
+          : undefined;
+      effectivePublishAtById[ch.id] = ts;
+
+      let errMsg = '';
+      if (!ts) {
+        errMsg = 'Vui lòng chọn ngày giờ hợp lệ.';
+      } else if (existingMaxPublishAt > 0 && ts < existingMaxPublishAt + 60_000) {
+        errMsg = `Phải trễ hơn mốc đã hẹn cao nhất hiện có ít nhất 1 phút (${formatScheduleFull(existingMaxPublishAt + 60_000)}).`;
+      } else if (prevTs !== undefined && ts < prevTs + 60_000) {
+        errMsg = `Phải trễ hơn giờ đăng Chương ${prevChapNum} ít nhất 1 phút (${formatScheduleFull(prevTs + 60_000)}).`;
+      }
+
+      if (errMsg) {
+        errorsById[ch.id] = errMsg;
+        if (!firstError) {
+          firstError = `Chương ${ch.number}: ${errMsg}`;
+        }
+      }
+      if (ts) {
+        prevTs = ts;
+        prevChapNum = ch.number;
+      }
+    }
+
+    return {
+      hasError: Object.keys(errorsById).length > 0,
+      effectivePublishAtById,
+      errorsById,
+      firstError,
+    };
+  }, [scheduleMode, scheduleStartStr, scheduleIntervalMinutes, parsedChapters, customChapterPublishAt, existingMaxPublishAt]);
+
+  const handleAutoSortSchedule = () => {
+    const safeInterval = Math.max(1, Number(scheduleIntervalMinutes) || 60);
+    const parsedStart = fromDatetimeLocalInput(scheduleStartStr);
+    const minValidStart = Math.max(Date.now() + 60_000, existingMaxPublishAt + 60_000);
+    const safeStart =
+      parsedStart && (existingMaxPublishAt === 0 || parsedStart >= existingMaxPublishAt + 60_000)
+        ? parsedStart
+        : minValidStart;
+    setScheduleStartStr(toDatetimeLocalInput(safeStart));
+    setScheduleIntervalMinutes(safeInterval);
+    setCustomChapterPublishAt({});
+    setFeedbackMsg({
+      text: `Đã tự động sắp xếp lại giờ đăng tăng dần bắt đầu từ ${formatScheduleFull(safeStart)} (cách nhau ${safeInterval} phút/chương).`,
+      type: 'success',
+    });
+    setTimeout(() => setFeedbackMsg(null), 3500);
+  };
 
   // Function to parse the raw text into chapters
   const parseChaptersFromText = (
@@ -386,6 +493,14 @@ Nội dung chương 3 viết ở đây...`;
       return;
     }
 
+    if (scheduleMode === 'scheduled' && scheduleValidation.hasError) {
+      setFeedbackMsg({
+        text: `Lịch đăng chưa hợp lệ (${scheduleValidation.firstError}). Vui lòng chỉnh lại hoặc bấm "Tự động sắp xếp lại giờ tăng dần".`,
+        type: 'error',
+      });
+      return;
+    }
+
     if ((emptyChapters?.length || 0) > 0) {
       const confirmSave = confirm(
         `⚠️ Cảnh báo: Có ${emptyChapters?.length || 0} chương chưa có nội dung chữ (ví dụ chương ${(emptyChapters || []).slice(0, 3).map((c) => c.number).join(', ')}${(emptyChapters?.length || 0) > 3 ? '...' : ''}).\n\nBạn có chắc chắn muốn đăng không? (Nên kiểm tra lại dấu phân cách để không bị thiếu văn bản gốc).`
@@ -398,17 +513,22 @@ Nội dung chương 3 viết ở đây...`;
     setFeedbackMsg(null);
 
     try {
-      const formattedChapters: Chapter[] = (parsedChapters || []).map((pc) => ({
-        id: `c-${novel.id}-${pc.number}-${Date.now()}`,
-        number: pc.number,
-        title: (pc.title || '').trim(),
-        slug: `chuong-${pc.number}`,
-        content: pc.content,
-        wordCount: pc.wordCount,
-        publishedDate: new Date().toISOString().split('T')[0],
-        isVip: pc.isVip,
-        priceXu: pc.isVip ? Number((pc.priceXu || 0).toFixed(2)) : 0,
-      }));
+      const formattedChapters: Chapter[] = (parsedChapters || []).map((pc) => {
+        const scheduledMs =
+          scheduleMode === 'scheduled' ? scheduleValidation.effectivePublishAtById[pc.id] : undefined;
+        return {
+          id: `c-${novel.id}-${pc.number}-${Date.now()}`,
+          number: pc.number,
+          title: (pc.title || '').trim(),
+          slug: `chuong-${pc.number}`,
+          content: pc.content,
+          wordCount: pc.wordCount,
+          publishedDate: new Date().toISOString().split('T')[0],
+          isVip: pc.isVip,
+          priceXu: pc.isVip ? Number((pc.priceXu || 0).toFixed(2)) : 0,
+          ...(scheduledMs ? { publishAt: scheduledMs, scheduledPublishAt: scheduledMs } : {}),
+        };
+      });
 
       await onSaveBatchChapters(
         novel.id, 
@@ -551,9 +671,9 @@ Nội dung chương 3 viết ở đây...`;
 
             <button
               type="button"
-              disabled={isSaving || (parsedChapters?.length || 0) === 0}
+              disabled={isSaving || (parsedChapters?.length || 0) === 0 || scheduleValidation.hasError}
               onClick={handleSaveAndPublish}
-              className={`px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-102 ${
+              className={`min-h-[44px] px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:scale-102 ${
                 isSaving 
                   ? 'bg-amber-400 hover:bg-amber-500 text-amber-950 border border-amber-500 shadow-md shadow-amber-400/20' 
                   : 'bg-pink-600 hover:bg-pink-700 active:bg-pink-800 text-white shadow-md shadow-pink-600/20'
@@ -565,13 +685,17 @@ Nội dung chương 3 viết ở đây...`;
                   <span>
                     {uploadProgress && uploadProgress.total > 0
                       ? `Đang gộp lưu ${uploadProgress.saved}/${uploadProgress.total} (${Math.min(100, Math.max(5, Math.round((uploadProgress.saved / uploadProgress.total) * 100)))}%)...`
-                      : 'Đang chuẩn bị lưu (writeBatch)...'}
+                      : 'Đang chuẩn bị lưu...'}
                   </span>
                 </>
               ) : (
                 <>
                   <Save className="w-4 h-4" />
-                  <span>Đăng {parsedChapters?.length || 0} Chương Ngay</span>
+                  <span>
+                    {scheduleMode === 'scheduled'
+                      ? `Lên Lịch ${parsedChapters?.length || 0} Chương`
+                      : `Đăng ${parsedChapters?.length || 0} Chương Ngay`}
+                  </span>
                 </>
               )}
             </button>
@@ -586,7 +710,7 @@ Nội dung chương 3 viết ở đây...`;
             <div className="flex items-center justify-between text-xs sm:text-sm font-bold text-amber-950">
               <span className="flex items-center gap-2">
                 <div className="w-4 h-4 border-2 border-amber-600 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                <span>⚡ Đang gộp thao tác ghi (WriteBatch chunking an toàn)... Đang xử lý {parsedChapters?.length || 0} chương</span>
+                <span>⚡ Đang tự động chia lô lưu an toàn... Đang xử lý {parsedChapters?.length || 0} chương</span>
               </span>
               <span className="px-3 py-1 bg-amber-400 text-amber-950 font-black rounded-full text-xs shadow-xs">
                 {uploadProgress && uploadProgress.total > 0
@@ -606,7 +730,7 @@ Nội dung chương 3 viết ở đây...`;
             </div>
             <div className="flex items-center justify-between text-xs text-amber-900 font-semibold">
               <span>Đã lưu thành công: {uploadProgress?.saved || 1}/{uploadProgress?.total || parsedChapters?.length || 0} chương</span>
-              <span className="text-[11px] text-amber-700">Tự động chia nhỏ &lt; 500 ops • Không làm nghẽn mạng hay treo trình duyệt</span>
+              <span className="text-[11px] text-amber-700">Tự động chia nhỏ từng lô • Không làm nghẽn mạng hay treo trình duyệt</span>
             </div>
           </div>
         </div>
@@ -905,6 +1029,151 @@ Nội dung chương 3 viết ở đây...`;
         </div>
 
         {/* =========================================================================
+            SECTION 2.5: CẤU HÌNH LỊCH ĐĂNG CHƯƠNG (ĐĂNG NGAY HOẶC HẸN GIỜ TỰ ĐỘNG)
+           ========================================================================= */}
+        <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+            <div>
+              <h2 className="text-base sm:text-lg font-black text-slate-900 flex items-center gap-2">
+                <Clock className="w-5 h-5 text-pink-600" />
+                <span>Cấu hình Lịch đăng chương</span>
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Chọn đăng công khai ngay lập tức hoặc hẹn giờ đăng tuần tự cho từng chương.
+              </p>
+            </div>
+            {existingMaxPublishAt > 0 && (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold">
+                <Calendar className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                <span>Mốc cao nhất đã hẹn: {formatScheduleFull(existingMaxPublishAt)}</span>
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setScheduleMode('immediate')}
+              className={`min-h-[44px] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold border-2 transition cursor-pointer flex items-center gap-2 ${
+                scheduleMode === 'immediate'
+                  ? 'bg-emerald-50 border-emerald-500 text-emerald-800 shadow-2xs'
+                  : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-slate-300'
+              }`}
+            >
+              <CheckCircle2 className={`w-4 h-4 ${scheduleMode === 'immediate' ? 'text-emerald-600' : 'text-slate-400'}`} />
+              <span>Đăng ngay lập tức</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setScheduleMode('scheduled')}
+              className={`min-h-[44px] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold border-2 transition cursor-pointer flex items-center gap-2 ${
+                scheduleMode === 'scheduled'
+                  ? 'bg-amber-50 border-amber-500 text-amber-900 shadow-2xs'
+                  : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-slate-300'
+              }`}
+            >
+              <Clock className={`w-4 h-4 ${scheduleMode === 'scheduled' ? 'text-amber-600' : 'text-slate-400'}`} />
+              <span>Lên lịch đăng tự động</span>
+            </button>
+          </div>
+
+          {scheduleMode === 'scheduled' && (
+            <div className="space-y-4 pt-2 border-t border-slate-100">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Thời gian bắt đầu (Chương đầu tiên trong lô):
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={scheduleStartStr}
+                    onChange={(e) => {
+                      setScheduleStartStr(e.target.value);
+                      setCustomChapterPublishAt({});
+                    }}
+                    className="w-full min-h-[44px] px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-sm font-bold text-slate-900 focus:border-pink-500 focus:outline-none"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Các chương chưa tới giờ đăng sẽ hoàn toàn ẩn văn bản &amp; audio với độc giả thường.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    Khoảng cách giữa các chương (phút):
+                  </label>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[
+                      { label: '15p', val: 15 },
+                      { label: '30p', val: 30 },
+                      { label: '1 giờ', val: 60 },
+                      { label: '2 giờ', val: 120 },
+                      { label: '6 giờ', val: 360 },
+                      { label: '12 giờ', val: 720 },
+                      { label: '24 giờ', val: 1440 },
+                    ].map((preset) => (
+                      <button
+                        key={preset.val}
+                        type="button"
+                        onClick={() => {
+                          setScheduleIntervalMinutes(preset.val);
+                          setCustomChapterPublishAt({});
+                        }}
+                        className={`min-h-[44px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                          scheduleIntervalMinutes === preset.val
+                            ? 'bg-pink-600 border-pink-600 text-white shadow-2xs'
+                            : 'bg-slate-50 border-slate-200 text-slate-700 hover:border-pink-300'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="1"
+                        value={scheduleIntervalMinutes}
+                        onChange={(e) => {
+                          setScheduleIntervalMinutes(Math.max(1, parseInt(e.target.value, 10) || 1));
+                          setCustomChapterPublishAt({});
+                        }}
+                        className="w-20 min-h-[44px] px-2.5 py-1.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-center text-slate-900 focus:border-pink-500 focus:outline-none"
+                      />
+                      <span className="text-xs font-bold text-slate-600">phút</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {scheduleValidation.hasError && (
+                <div className="p-4 rounded-2xl bg-rose-50 border-2 border-rose-500 text-rose-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-2.5 text-xs">
+                    <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-black text-rose-800 text-sm">
+                        Cảnh báo sai thứ tự thời gian hẹn giờ!
+                      </div>
+                      <p className="mt-0.5 font-semibold text-rose-700">
+                        {scheduleValidation.firstError} Thời gian đăng chương sau phải lớn hơn chương trước và lớn hơn mốc cao nhất đã hẹn của truyện.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAutoSortSchedule}
+                    className="min-h-[44px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap flex-shrink-0"
+                  >
+                    <Wand2 className="w-4 h-4" />
+                    <span>Tự động sắp xếp lại giờ tăng dần</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* =========================================================================
             SECTION 3: DANH SÁCH CHI TIẾT TỪNG CHƯƠNG & SET LẺ TỪNG CHƯƠNG
            ========================================================================= */}
         <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-xs space-y-4">
@@ -983,11 +1252,18 @@ Nội dung chương 3 viết ở đây...`;
                   </div>
                 </div>
               )}
-              {(parsedChapters || []).slice((parsedPage - 1) * 50, parsedPage * 50).map((ch) => (
+              {(parsedChapters || []).slice((parsedPage - 1) * 50, parsedPage * 50).map((ch) => {
+                const schedTs =
+                  scheduleMode === 'scheduled' ? scheduleValidation.effectivePublishAtById[ch.id] : undefined;
+                const schedErr =
+                  scheduleMode === 'scheduled' ? scheduleValidation.errorsById[ch.id] : undefined;
+                return (
                 <div
                   key={ch.id}
                   className={`p-3.5 sm:p-4 rounded-2xl border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3.5 ${
-                    ch.isVip
+                    schedErr
+                      ? 'bg-rose-50/80 border-rose-500 ring-1 ring-rose-300'
+                      : ch.isVip
                       ? 'bg-amber-50/30 border-amber-200'
                       : 'bg-white border-slate-200 hover:border-slate-300'
                   }`}
@@ -1009,6 +1285,18 @@ Nội dung chương 3 viết ở đây...`;
                       <div className="text-[11px] text-slate-500 flex items-center gap-3 flex-wrap">
                         <span>Chương số {ch.number}</span>
                         <span>• {ch.wordCount.toLocaleString('vi-VN')} từ</span>
+                        {scheduleMode === 'scheduled' && schedTs && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-bold border ${
+                              schedErr
+                                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                : 'bg-amber-100 text-amber-800 border-amber-300'
+                            }`}
+                          >
+                            <Clock className="w-3 h-3" />
+                            <span>Hẹn giờ: {formatScheduleShort(schedTs)}</span>
+                          </span>
+                        )}
                         {(!ch.content || !ch.content.trim()) && (
                           <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-700 text-[10px] font-extrabold border border-rose-300">
                             ⚠️ Thiếu nội dung chữ
@@ -1018,11 +1306,38 @@ Nội dung chương 3 viết ở đây...`;
                           • {ch.content ? ch.content.slice(0, 45) + '...' : '(Nội dung trống)'}
                         </span>
                       </div>
+                      {scheduleMode === 'scheduled' && (
+                        <div className="pt-1 flex flex-wrap items-center gap-2 max-w-full">
+                          <input
+                            type="datetime-local"
+                            value={toDatetimeLocalInput(schedTs)}
+                            onChange={(e) => {
+                              const parsed = fromDatetimeLocalInput(e.target.value);
+                              if (parsed) {
+                                setCustomChapterPublishAt((prev) => ({
+                                  ...prev,
+                                  [ch.id]: parsed,
+                                }));
+                              }
+                            }}
+                            className={`w-full sm:w-auto max-w-full min-h-[44px] px-2.5 py-1.5 rounded-xl border text-xs font-bold focus:outline-none ${
+                              schedErr
+                                ? 'border-rose-500 bg-white text-rose-800'
+                                : 'border-slate-300 bg-white text-slate-800 focus:border-pink-500'
+                            }`}
+                          />
+                          {schedErr && (
+                            <span className="text-[11px] font-bold text-rose-600 break-words">
+                              {schedErr}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   {/* Right: SET LẺ TỪNG CHƯƠNG (VIP Toggle, Price Input, Preview & Delete) */}
-                  <div className="flex items-center gap-3 flex-shrink-0 self-end md:self-center">
+                  <div className="flex items-center gap-3 flex-shrink-0 self-end md:self-center flex-wrap">
                     
                     {/* VIP Toggle button */}
                     <button
@@ -1086,7 +1401,8 @@ Nội dung chương 3 viết ở đây...`;
                     </button>
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -1115,9 +1431,9 @@ Nội dung chương 3 viết ở đây...`;
 
               <button
                 type="button"
-                disabled={isSaving}
+                disabled={isSaving || scheduleValidation.hasError}
                 onClick={handleSaveAndPublish}
-                className={`px-6 py-2.5 rounded-xl font-extrabold text-sm cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
+                className={`min-h-[44px] px-6 py-2.5 rounded-xl font-extrabold text-sm cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
                   isSaving
                     ? 'bg-amber-400 hover:bg-amber-500 text-amber-950 border border-amber-500 shadow-md shadow-amber-400/20'
                     : 'bg-pink-600 hover:bg-pink-700 active:bg-pink-800 text-white shadow-md shadow-pink-600/20'
@@ -1129,13 +1445,17 @@ Nội dung chương 3 viết ở đây...`;
                     <span>
                       {uploadProgress && uploadProgress.total > 0
                         ? `Đang lưu ${uploadProgress.saved}/${uploadProgress.total} (${Math.min(100, Math.max(5, Math.round((uploadProgress.saved / uploadProgress.total) * 100)))}%)...`
-                        : 'Đang gộp lưu writeBatch...'}
+                        : 'Đang gộp lưu...'}
                     </span>
                   </>
                 ) : (
                   <>
                     <Save className="w-4 h-4" />
-                    <span>Đăng Ngay {parsedChapters?.length || 0} Chương</span>
+                    <span>
+                      {scheduleMode === 'scheduled'
+                        ? `Lên Lịch ${parsedChapters?.length || 0} Chương`
+                        : `Đăng Ngay ${parsedChapters?.length || 0} Chương`}
+                    </span>
                   </>
                 )}
               </button>

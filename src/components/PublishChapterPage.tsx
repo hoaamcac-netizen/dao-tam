@@ -1,7 +1,13 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useMemo } from 'react';
 import { Novel, Chapter } from '../types';
 import { fetchChaptersForNovel } from '../firebase/services';
-import { filterOutDummyChapters } from '../utils/rulesAndVoices';
+import {
+  filterOutDummyChapters,
+  formatScheduleFull,
+  fromDatetimeLocalInput,
+  getNovelLatestPublishAt,
+  toDatetimeLocalInput,
+} from '../utils/rulesAndVoices';
 import { 
   ArrowLeft, 
   BookOpen, 
@@ -17,7 +23,10 @@ import {
   Info,
   Calendar,
   Layers,
-  Check
+  Check,
+  Clock,
+  AlertCircle,
+  Wand2
 } from 'lucide-react';
 
 interface PublishChapterPageProps {
@@ -30,6 +39,8 @@ interface PublishChapterPageProps {
     isVip: boolean;
     priceXu: number;
     authorNote?: string;
+    publishAt?: number;
+    scheduledPublishAt?: number;
   }, isCompleted?: boolean) => Promise<void> | void;
   onViewChapterList?: (novel: Novel) => void;
   onHomeClick?: () => void;
@@ -82,9 +93,46 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
     chapterNumber: number;
     title: string;
     wordCount: number;
+    publishAt?: number;
   } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const fileInputId = useId();
+
+  // Cấu hình Lịch đăng chương
+  const existingMaxPublishAt = useMemo(
+    () => getNovelLatestPublishAt(novel, currentChapters),
+    [novel, currentChapters]
+  );
+  const [scheduleMode, setScheduleMode] = useState<'immediate' | 'scheduled'>('immediate');
+  const [scheduleInputStr, setScheduleInputStr] = useState<string>(() =>
+    toDatetimeLocalInput(Math.max(Date.now() + 30 * 60_000, getNovelLatestPublishAt(novel, currentChapters) + 60_000))
+  );
+
+  useEffect(() => {
+    const minValid = Math.max(Date.now() + 30 * 60_000, existingMaxPublishAt + 60_000);
+    setScheduleInputStr((prev) => {
+      const parsed = fromDatetimeLocalInput(prev);
+      if (!parsed || (existingMaxPublishAt > 0 && parsed < existingMaxPublishAt + 60_000)) {
+        return toDatetimeLocalInput(minValid);
+      }
+      return prev;
+    });
+  }, [existingMaxPublishAt]);
+
+  const scheduledTimestamp = scheduleMode === 'scheduled' ? fromDatetimeLocalInput(scheduleInputStr) : undefined;
+  const scheduleError = useMemo(() => {
+    if (scheduleMode !== 'scheduled') return '';
+    if (!scheduledTimestamp) return 'Vui lòng chọn ngày và giờ xuất bản hợp lệ.';
+    if (existingMaxPublishAt > 0 && scheduledTimestamp < existingMaxPublishAt + 60_000) {
+      return `Thời gian hẹn giờ phải trễ hơn mốc đã hẹn cao nhất của truyện ít nhất 1 phút (${formatScheduleFull(existingMaxPublishAt + 60_000)}).`;
+    }
+    return '';
+  }, [scheduleMode, scheduledTimestamp, existingMaxPublishAt]);
+
+  const handleAutoFixSchedule = () => {
+    const nextValid = Math.max(Date.now() + 60_000, existingMaxPublishAt + 60_000);
+    setScheduleInputStr(toDatetimeLocalInput(nextValid));
+  };
 
   // Word count & Character count
   const wordCount = (content || '').trim() ? (content.trim().split(/\s+/).filter(Boolean)?.length || 0) : 0;
@@ -158,6 +206,11 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
       return;
     }
 
+    if (scheduleMode === 'scheduled' && scheduleError) {
+      setErrorMsg(scheduleError);
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMsg('');
 
@@ -168,6 +221,7 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
     }, 15000);
 
     try {
+      const effectivePublishAt = scheduleMode === 'scheduled' ? scheduledTimestamp : undefined;
       await onSaveChapter(novel.id, {
         title: chapterTitle.trim(),
         number: chapterNumber,
@@ -175,6 +229,9 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
         isVip,
         priceXu: isVip ? priceXu : 0,
         authorNote: authorNote.trim() || undefined,
+        ...(effectivePublishAt
+          ? { publishAt: effectivePublishAt, scheduledPublishAt: effectivePublishAt }
+          : {}),
       }, isCompletedNovel);
 
       const newChapItem: Chapter = {
@@ -187,6 +244,9 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
         publishedDate: new Date().toISOString().split('T')[0],
         isVip,
         priceXu: isVip ? priceXu : 0,
+        ...(effectivePublishAt
+          ? { publishAt: effectivePublishAt, scheduledPublishAt: effectivePublishAt }
+          : {}),
       };
 
       setCurrentChapters((prev) => {
@@ -200,6 +260,7 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
         chapterNumber,
         title: chapterTitle.trim(),
         wordCount,
+        publishAt: effectivePublishAt,
       });
     } catch (err: any) {
       console.error('Lỗi khi đăng chương mới:', err);
@@ -217,6 +278,10 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
     setChapterTitle(`Chương ${nextNum}: `);
     setContent('');
     setAuthorNote('');
+    if (scheduleMode === 'scheduled') {
+      const baseMs = Math.max(scheduledTimestamp || Date.now(), existingMaxPublishAt);
+      setScheduleInputStr(toDatetimeLocalInput(baseMs + 60 * 60_000));
+    }
     setSuccessInfo(null);
     setErrorMsg('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -287,7 +352,9 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
                   &ldquo;{successInfo.title}&rdquo; • {successInfo.wordCount.toLocaleString()} từ
                 </p>
                 <p className="text-xs text-emerald-700 dark:text-emerald-400 mt-1">
-                  Chương đã được cập nhật trực tiếp vào bộ truyện và độc giả có thể đọc ngay bây giờ.
+                  {successInfo.publishAt
+                    ? `Chương đã được lên lịch tự động xuất bản vào lúc ${formatScheduleFull(successInfo.publishAt)}. Độc giả sẽ thấy chương này khi đến giờ hẹn.`
+                    : 'Chương đã được cập nhật trực tiếp vào bộ truyện và độc giả có thể đọc ngay bây giờ.'}
                 </p>
 
                 <div className="flex flex-wrap items-center gap-3 mt-4">
@@ -641,12 +708,93 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
               </label>
             </div>
 
+            {/* Cấu hình Lịch đăng chương */}
+            <div className={`p-4 rounded-xl border-2 space-y-3 ${
+              scheduleError
+                ? 'bg-rose-50 dark:bg-rose-950/30 border-rose-500'
+                : 'bg-slate-50 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700/80'
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-100">
+                  <Clock className="w-4 h-4 text-pink-500 flex-shrink-0" />
+                  <span>Cấu hình Lịch đăng chương</span>
+                </div>
+                {existingMaxPublishAt > 0 && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 text-[11px] font-bold">
+                    <Calendar className="w-3 h-3" />
+                    <span>Mốc cao nhất đã hẹn: {formatScheduleFull(existingMaxPublishAt)}</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('immediate')}
+                  className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center gap-1.5 ${
+                    scheduleMode === 'immediate'
+                      ? 'bg-emerald-600 border-emerald-600 text-white shadow-2xs'
+                      : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200'
+                  }`}
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Đăng ngay lập tức</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('scheduled')}
+                  className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center gap-1.5 ${
+                    scheduleMode === 'scheduled'
+                      ? 'bg-amber-500 border-amber-500 text-slate-950 shadow-2xs'
+                      : 'bg-white dark:bg-slate-900 border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200'
+                  }`}
+                >
+                  <Clock className="w-4 h-4" />
+                  <span>Lên lịch đăng tự động</span>
+                </button>
+              </div>
+
+              {scheduleMode === 'scheduled' && (
+                <div className="space-y-3 pt-1">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                      Ngày giờ xuất bản chương này:
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={scheduleInputStr}
+                      onChange={(e) => setScheduleInputStr(e.target.value)}
+                      className={`w-full sm:w-auto min-h-[44px] px-3.5 py-2 rounded-xl border bg-white dark:bg-slate-900 text-sm font-bold text-slate-900 dark:text-white focus:outline-none ${
+                        scheduleError ? 'border-rose-500' : 'border-slate-300 dark:border-slate-600 focus:border-pink-500'
+                      }`}
+                    />
+                  </div>
+                  {scheduleError && (
+                    <div className="p-3 rounded-xl bg-rose-100 dark:bg-rose-950/60 border border-rose-400 text-rose-900 dark:text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 flex-shrink-0 mt-0.5" />
+                        <span className="font-bold">{scheduleError}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleAutoFixSchedule}
+                        className="min-h-[44px] px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap flex-shrink-0"
+                      >
+                        <Wand2 className="w-3.5 h-3.5" />
+                        <span>Tự động sắp xếp lại giờ tăng dần</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Nút hành động chính */}
             <div className="pt-4 border-t border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={onClose}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 transition cursor-pointer"
+                className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-bold text-slate-700 dark:text-slate-300 transition cursor-pointer"
               >
                 Hủy / Quay lại
               </button>
@@ -654,8 +802,8 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
               <div className="w-full sm:w-auto flex items-center gap-3">
                 <button
                   type="submit"
-                  disabled={isSubmitting || !chapterTitle.trim() || !content.trim()}
-                  className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 active:from-rose-700 active:to-pink-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-white font-black text-sm shadow-md shadow-rose-600/25 transition-all cursor-pointer flex items-center justify-center gap-2"
+                  disabled={isSubmitting || !chapterTitle.trim() || !content.trim() || Boolean(scheduleError)}
+                  className="w-full sm:w-auto min-h-[44px] px-6 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 active:from-rose-700 active:to-pink-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-white font-black text-sm shadow-md shadow-rose-600/25 transition-all cursor-pointer flex items-center justify-center gap-2"
                 >
                   {isSubmitting ? (
                     <>
@@ -665,7 +813,11 @@ export const PublishChapterPage: React.FC<PublishChapterPageProps> = ({
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4" />
-                      <span>Xuất bản Chương {chapterNumber} ngay</span>
+                      <span>
+                        {scheduleMode === 'scheduled'
+                          ? `Lên lịch Chương ${chapterNumber}`
+                          : `Xuất bản Chương ${chapterNumber} ngay`}
+                      </span>
                     </>
                   )}
                 </button>

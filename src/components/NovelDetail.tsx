@@ -2,7 +2,16 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Novel, Chapter, ReadingProgress, UserProfile, DonationRecord } from '../types';
 import { CommentsSection } from './CommentsSection';
 import { fetchChaptersForNovel, fetchDonationsForNovel } from '../firebase/services';
-import { filterOutDummyChapters, checkIsChapterUnlocked, formatXu } from '../utils/rulesAndVoices';
+import {
+  filterOutDummyChapters,
+  checkIsChapterUnlocked,
+  formatXu,
+  isUserOwnerOrAdmin,
+  isChapterVisibleToReader,
+  isChapterScheduledPending,
+  getChapterPublishAt,
+  formatScheduleShort,
+} from '../utils/rulesAndVoices';
 import { checkIsAdmin } from '../firebase/config';
 import { safeSetItem } from '../utils/safeStorage';
 import { useAudio } from '../contexts/AudioContext';
@@ -155,15 +164,22 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
   }, [novel?.id]);
 
   const CHUNK_SIZE = 50;
-  const safeChapters = Array.isArray(activeChapters) ? activeChapters : [];
+  const isOwnerOrAdmin = isUserOwnerOrAdmin(user, novel);
+  const isAdmin = checkIsAdmin(user?.email);
+
+  // Lọc trực tiếp lúc tải/render (0 Reads phát sinh): độc giả CHỈ thấy chương đã mở & đến giờ phát hành
+  const visibleChapters = useMemo(() => {
+    const raw = Array.isArray(activeChapters) ? activeChapters : [];
+    const nowMs = Date.now();
+    return raw.filter((c) => isChapterVisibleToReader(c, isOwnerOrAdmin, nowMs));
+  }, [activeChapters, isOwnerOrAdmin]);
+
+  const safeChapters = visibleChapters;
   const totalChunks = Math.ceil((safeChapters?.length || 0) / CHUNK_SIZE) || 1;
   const isFullBookUnlocked = Boolean((user?.unlockedFullBooks || []).includes(novel?.id));
   const unlockedChapterIds = Array.isArray(user?.unlockedChapters?.[novel?.id])
     ? user.unlockedChapters[novel.id]
     : [];
-
-  const isOwnerOrAdmin = user?.role === 'admin' || checkIsAdmin(user?.email) || (user?.id && (novel as any).authorId === user.id) || (user?.displayName && novel.author === user.displayName);
-  const isAdmin = checkIsAdmin(user?.email);
 
   // LỚP 1: KHÓA PHÍM TẮT & THAO TÁC COPY DÀNH CHO NGƯỜI DÙNG THƯỜNG TRÊN TRANG CHI TIẾT
   useEffect(() => {
@@ -191,9 +207,9 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
     };
   }, [isAdmin]);
 
-  // Filtered and sorted chapters (Độc giả chỉ thấy chương đang mở, Tác giả & Admin thấy cả chương đã ẩn)
+  // Filtered and sorted chapters (Độc giả chỉ thấy chương đã đến giờ đăng và không bị ẩn; Tác giả & Admin thấy toàn bộ)
   const filteredChapters = useMemo(() => {
-    let list = isOwnerOrAdmin ? [...activeChapters] : activeChapters.filter((c) => !c.isHidden);
+    let list = [...safeChapters];
 
     if (searchChapter.trim()) {
       const q = searchChapter.toLowerCase().trim();
@@ -213,7 +229,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
     }
 
     return list;
-  }, [activeChapters, searchChapter, selectedRange, isAscending, isOwnerOrAdmin]);
+  }, [safeChapters, searchChapter, selectedRange, isAscending]);
 
   // Format helpers
   const formatNumber = (num?: number) => {
@@ -229,7 +245,9 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
   const latestChapter = (safeChapters?.length || 0) > 0 
     ? safeChapters[(safeChapters?.length || 0) - 1] 
     : null;
-  const latestChapterTitle = latestChapter ? (latestChapter.title || '').replace(/^Chương\s*\d+[:.]*\s*/i, '') : `Chương ${novel?.totalChapters || safeChapters?.length || 1}`;
+  const latestChapterTitle = latestChapter
+    ? (latestChapter.title || '').replace(/^Chương\s*\d+[:.]*\s*/i, '')
+    : 'Chưa có chương';
 
   // Status mapping: Full (xanh lá), Đang ra (vàng), hoặc Drop (đỏ)
   const getStatusDisplay = () => {
@@ -641,7 +659,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                     className="font-extrabold text-slate-900 dark:text-white truncate cursor-pointer hover:text-pink-600 dark:hover:text-pink-400"
                     title={latestChapterTitle}
                   >
-                    {latestChapter ? `Chương ${latestChapter.number}` : `Chương ${novel.totalChapters}`}
+                    {latestChapter ? `Chương ${latestChapter.number}` : 'Chưa có chương'}
                   </div>
                 </div>
 
@@ -669,7 +687,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                       safeSetItem('daotam_audio_active', 'true');
                       audio.setIsBarVisible(true);
                       audio.setIsMinimized(false);
-                      audio.playChapter({ ...novel, chapters: activeChapters }, targetAudioChapter, true, activeChapters, true);
+                      audio.playChapter({ ...novel, chapters: safeChapters }, targetAudioChapter, true, safeChapters, true);
                     }}
                     className={`min-h-[44px] px-4 sm:px-5 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md transition-all hover:scale-102 cursor-pointer border border-white/40 ${
                       audio.isPlaying && (audio.activeChapter?.id === targetAudioChapter.id || Number(audio.activeChapter?.number) === Number(targetAudioChapter.number))
@@ -690,7 +708,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Đọc chương đầu */}
                 {firstChapter ? (
                   <button
-                    onClick={() => onSelectChapter({ ...novel, chapters: activeChapters }, firstChapter)}
+                    onClick={() => onSelectChapter({ ...novel, chapters: safeChapters }, firstChapter)}
                     className="min-h-[44px] px-4 sm:px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-extrabold text-xs sm:text-sm flex items-center gap-2 shadow-md shadow-pink-500/20 transition-all hover:scale-102 cursor-pointer"
                   >
                     <BookOpen className="w-4 h-4" />
@@ -709,7 +727,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 {/* Đọc chương tiếp theo */}
                 {nextChapter && (
                   <button
-                    onClick={() => onSelectChapter({ ...novel, chapters: activeChapters }, nextChapter)}
+                    onClick={() => onSelectChapter({ ...novel, chapters: safeChapters }, nextChapter)}
                     className="min-h-[44px] px-4 py-2.5 rounded-xl border-2 border-pink-500 hover:border-pink-600 text-pink-700 dark:text-pink-300 hover:bg-pink-50 dark:hover:bg-slate-800 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer"
                   >
                     <span>⏩ Đọc {savedProgress ? `tiếp C${savedProgress.chapterNumber}` : 'tiếp theo'}</span>
@@ -956,7 +974,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                 return (
                   <div
                     key={chapter.id}
-                    onClick={() => onSelectChapter({ ...novel, chapters: activeChapters }, chapter)}
+                    onClick={() => onSelectChapter({ ...novel, chapters: safeChapters }, chapter)}
                     className={`group py-3.5 px-3 rounded-xl transition-all flex items-center justify-between gap-3 cursor-pointer ${
                       isCurrentRead
                         ? 'bg-pink-50 dark:bg-pink-950/40 text-pink-600 dark:text-pink-300 font-bold'
@@ -976,7 +994,7 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                         {/* 2. ICON AUDIO Ở DANH SÁCH CHƯƠNG: size w-3 h-3 màu vàng/hồng đậm báo hiệu có hỗ trợ âm thanh */}
                         <span 
                           className="inline-flex items-center text-amber-500 dark:text-pink-400 group-hover:scale-110 transition-transform shrink-0" 
-                          title="Chương này có hỗ trợ đọc Audio (Web Speech API)"
+                          title="Chương này có hỗ trợ đọc Audio"
                         >
                           <Headphones className="w-3 h-3" />
                         </span>
@@ -989,7 +1007,13 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-3 flex-shrink-0 text-xs">
+                    <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0 flex-wrap justify-end text-xs">
+                      {isOwnerOrAdmin && isChapterScheduledPending(chapter) && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700 whitespace-nowrap">
+                          <Clock className="w-3 h-3 text-amber-600" /> Hẹn giờ: {formatScheduleShort(getChapterPublishAt(chapter))}
+                        </span>
+                      )}
+
                       {chapter.isHidden && (
                         <span className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700">
                           <EyeOff className="w-3 h-3 text-amber-600" /> Đã ẩn

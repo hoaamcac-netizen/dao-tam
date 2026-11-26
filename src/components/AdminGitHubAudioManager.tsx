@@ -5,9 +5,17 @@ import {
   updateChapterAudioUrlInFirestore,
   batchUpdateChapterAudioLinksInFirestore,
   ensureNovelAudioVoiceFlagInFirestore,
+  syncNovelMp3CountsInFirestore,
   type ChapterAudioLinkBatchItem,
 } from '../firebase/services';
-import { removeVietnameseTones, getChapterAudioUrl } from '../utils/rulesAndVoices';
+import {
+  removeVietnameseTones,
+  getChapterAudioUrl,
+  computeChapterAudioCounts,
+  getChapterPublishAt,
+  isChapterScheduledPending,
+  formatScheduleShort,
+} from '../utils/rulesAndVoices';
 import { sanitizeUserFacingErrorText } from '../utils/audioChunker';
 import {
   CheckCircle2,
@@ -31,6 +39,7 @@ import {
   ChevronDown,
   ChevronUp,
   Edit3,
+  Clock,
 } from 'lucide-react';
 
 const CHAPTERS_PER_PAGE = 100;
@@ -793,6 +802,16 @@ interface AdminNovelMp3DrawerModalProps {
   onClose: () => void;
   onChapterAudioUpdated: (novelId: string, updatedChapter: Chapter) => void;
   onBatchChaptersAudioUpdated?: (novelId: string, updatedChapters: Chapter[]) => void;
+  onNovelMp3CountsSynced?: (
+    novelId: string,
+    counts: {
+      mp3NamMinhCount: number;
+      mp3HangNgaCount: number;
+      hasMaleAudio: boolean;
+      hasFemaleAudio: boolean;
+      hasAudio: boolean;
+    }
+  ) => void;
 }
 
 export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> = ({
@@ -800,10 +819,12 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   onClose,
   onChapterAudioUpdated,
   onBatchChaptersAudioUpdated,
+  onNovelMp3CountsSynced,
 }) => {
   const [chapters, setChapters] = useState<Chapter[]>(() =>
     Array.isArray(novel.chapters) ? [...novel.chapters] : []
   );
+  const chaptersRef = useRef<Chapter[]>(chapters);
   const [isLoadingChapters, setIsLoadingChapters] = useState(false);
 
   // Search, Quick Filters & 100-chapter Pagination
@@ -884,16 +905,40 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     };
   }, []);
 
+  const syncedCountsKeyRef = useRef<string>('');
+
   useEffect(() => {
+    const syncCountsIfNeeded = (loadedList: Chapter[]) => {
+      if (!Array.isArray(loadedList) || loadedList.length === 0) return;
+      const counts = computeChapterAudioCounts(loadedList);
+      const syncSignature = `${novel.id}:${counts.mp3NamMinhCount}:${counts.mp3HangNgaCount}`;
+      if (syncedCountsKeyRef.current === syncSignature) return;
+      const needsSync =
+        typeof novel.mp3NamMinhCount !== 'number' ||
+        typeof novel.mp3HangNgaCount !== 'number' ||
+        novel.mp3NamMinhCount !== counts.mp3NamMinhCount ||
+        novel.mp3HangNgaCount !== counts.mp3HangNgaCount ||
+        Boolean(novel.hasMaleAudio) !== counts.hasMaleAudio ||
+        Boolean(novel.hasFemaleAudio) !== counts.hasFemaleAudio;
+
+      if (needsSync) {
+        syncedCountsKeyRef.current = syncSignature;
+        syncNovelMp3CountsInFirestore(novel.id, counts).catch(() => {});
+        onNovelMp3CountsSynced?.(novel.id, counts);
+      }
+    };
+
     const preloaded = Array.isArray(novel.chapters) ? novel.chapters : [];
     const expectedTotal = Number(novel.totalChapters || 0);
     if (preloaded.length > 0 && (expectedTotal === 0 || preloaded.length >= expectedTotal)) {
       const sorted = [...preloaded].sort((a, b) => Number(a.number) - Number(b.number));
+      chaptersRef.current = sorted;
       setChapters(sorted);
       const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
       setDeleteFromChapter(sorted[0]?.number || 1);
       setDeleteToChapter(maxNum);
       setIsLoadingChapters(false);
+      syncCountsIfNeeded(sorted);
       return;
     }
 
@@ -903,10 +948,12 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       .then((list) => {
         if (!cancelled && Array.isArray(list) && list.length > 0) {
           const sorted = [...list].sort((a, b) => Number(a.number) - Number(b.number));
+          chaptersRef.current = sorted;
           setChapters(sorted);
           const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
           setDeleteFromChapter(sorted[0]?.number || 1);
           setDeleteToChapter(maxNum);
+          syncCountsIfNeeded(sorted);
         }
       })
       .catch(() => {})
@@ -1073,23 +1120,27 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       if (u.id) byId.set(u.id, u);
       if (Number(u.number) > 0) byNumber.set(Number(u.number), u);
     }
-    setChapters((prev) =>
-      prev.map((item) => {
-        const matched = byId.get(item.id) || byNumber.get(Number(item.number));
-        if (!matched) return item;
-        return {
-          ...item,
-          audioUrl: matched.audioUrl,
-          audioUrlMale: matched.audioUrlMale,
-          audioUrlFemale: matched.audioUrlFemale,
-          mp3Url: matched.mp3Url,
-          maleAudioUrl: matched.maleAudioUrl,
-          audio: matched.audio,
-          femaleAudioUrl: matched.femaleAudioUrl,
-          mp3Female: matched.mp3Female,
-        };
-      })
-    );
+    const nextChapters = chaptersRef.current.map((item) => {
+      const matched = byId.get(item.id) || byNumber.get(Number(item.number));
+      if (!matched) return item;
+      return {
+        ...item,
+        audioUrl: matched.audioUrl,
+        audioUrlMale: matched.audioUrlMale,
+        audioUrlFemale: matched.audioUrlFemale,
+        mp3Url: matched.mp3Url,
+        maleAudioUrl: matched.maleAudioUrl,
+        audio: matched.audio,
+        femaleAudioUrl: matched.femaleAudioUrl,
+        mp3Female: matched.mp3Female,
+      };
+    });
+    chaptersRef.current = nextChapters;
+    setChapters(nextChapters);
+
+    const counts = computeChapterAudioCounts(nextChapters);
+    onNovelMp3CountsSynced?.(novel.id, counts);
+
     if (onBatchChaptersAudioUpdated) {
       onBatchChaptersAudioUpdated(novel.id, updatedChaptersList);
     } else {
@@ -1190,8 +1241,6 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         audioUrlFemale: bulkVoice === 'female' ? url : undefined,
       }));
 
-      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems);
-
       const updatedChapters: Chapter[] = entries.map(({ chapter, url }) => ({
         ...chapter,
         audioUrlMale: bulkVoice === 'male' ? url : chapter.audioUrlMale,
@@ -1204,6 +1253,9 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         );
         return matched ? { ...item, ...matched } : item;
       });
+      const nextCounts = computeChapterAudioCounts(nextChaptersSnapshot);
+
+      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems, nextCounts);
 
       applyBatchUpdatesToState(updatedChapters);
 
@@ -1288,8 +1340,6 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         audioUrlFemale: deleteScope === 'female' || deleteScope === 'both' ? '' : undefined,
       }));
 
-      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems);
-
       const updatedChapters: Chapter[] = targets.map((ch) => ({
         ...ch,
         audioUrl:
@@ -1309,6 +1359,16 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         mp3Female:
           deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.mp3Female,
       }));
+
+      const nextChaptersSnapshot = sortedChapters.map((item) => {
+        const matched = updatedChapters.find(
+          (u) => u.id === item.id || Number(u.number) === Number(item.number)
+        );
+        return matched ? { ...item, ...matched } : item;
+      });
+      const nextCounts = computeChapterAudioCounts(nextChaptersSnapshot);
+
+      await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems, nextCounts);
 
       setBrokenLinksMap((prev) => {
         const next = { ...prev };
@@ -2288,8 +2348,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                 >
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="min-w-0 flex-1">
-                      <div className="font-bold text-xs sm:text-sm text-slate-900 break-words">
-                        {ch.title || `Chương ${ch.number}`}
+                      <div className="font-bold text-xs sm:text-sm text-slate-900 break-words flex flex-wrap items-center gap-1.5">
+                        <span>{ch.title || `Chương ${ch.number}`}</span>
+                        {isChapterScheduledPending(ch) && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-bold">
+                            <Clock className="w-3 h-3" />
+                            <span>Hẹn giờ: {formatScheduleShort(getChapterPublishAt(ch))}</span>
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-500 font-medium mt-0.5 tabular-nums">
                         Chương {ch.number}
@@ -2337,25 +2403,37 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                       });
                     }}
                     onAudioLinksUpdated={(targetChap, links) => {
+                      const prevCounts = computeChapterAudioCounts(chaptersRef.current);
                       const updated: Chapter = {
                         ...targetChap,
                         audioUrl: links.audioUrl,
                         audioUrlMale: links.audioUrlMale,
                         audioUrlFemale: links.audioUrlFemale,
                       };
-                      setChapters((prev) =>
-                        prev.map((item) =>
-                          item.id === targetChap.id ||
-                          Number(item.number) === Number(targetChap.number)
-                            ? {
-                                ...item,
-                                audioUrl: links.audioUrl,
-                                audioUrlMale: links.audioUrlMale,
-                                audioUrlFemale: links.audioUrlFemale,
-                              }
-                            : item
-                        )
+                      const nextChapters = chaptersRef.current.map((item) =>
+                        item.id === targetChap.id ||
+                        Number(item.number) === Number(targetChap.number)
+                          ? {
+                              ...item,
+                              audioUrl: links.audioUrl,
+                              audioUrlMale: links.audioUrlMale,
+                              audioUrlFemale: links.audioUrlFemale,
+                            }
+                          : item
                       );
+                      chaptersRef.current = nextChapters;
+                      setChapters(nextChapters);
+                      const counts = computeChapterAudioCounts(nextChapters);
+                      onNovelMp3CountsSynced?.(novel.id, counts);
+                      const countsChanged =
+                        prevCounts.mp3NamMinhCount !== counts.mp3NamMinhCount ||
+                        prevCounts.mp3HangNgaCount !== counts.mp3HangNgaCount ||
+                        prevCounts.hasMaleAudio !== counts.hasMaleAudio ||
+                        prevCounts.hasFemaleAudio !== counts.hasFemaleAudio;
+                      if (countsChanged) {
+                        syncedCountsKeyRef.current = `${novel.id}:${counts.mp3NamMinhCount}:${counts.mp3HangNgaCount}`;
+                        syncNovelMp3CountsInFirestore(novel.id, counts).catch(() => {});
+                      }
                       onChapterAudioUpdated(novel.id, updated);
                     }}
                   />
