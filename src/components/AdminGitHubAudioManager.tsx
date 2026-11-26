@@ -43,17 +43,24 @@ import {
 } from 'lucide-react';
 
 const CHAPTERS_PER_PAGE = 100;
-const LINK_PROBE_BATCH_SIZE = 2;
-const LINK_PROBE_BATCH_DELAY_MS = 250;
-const LINK_PROBE_TIMEOUT_MS = 15000;
+const LINK_PROBE_BATCH_SIZE = 4; // Kiểm tra từng đợt 3–5 link một lúc
+const LINK_PROBE_BATCH_DELAY_MS = 200;
+const LINK_PROBE_TIMEOUT_MS = 8000; // 8 giây timeout -> Link lỗi
 
 type VoiceKey = 'male' | 'female';
 type DeleteVoiceScope = 'male' | 'female' | 'both';
-type VoiceFilterMode = 'all' | 'missing_male' | 'missing_female' | 'both_ready' | 'broken';
+type VoiceFilterMode =
+  | 'all'
+  | 'missing_male'
+  | 'missing_female'
+  | 'both_ready'
+  | 'broken'
+  | 'duplicate';
 
 export type BrokenReason = string;
 
 export interface BrokenVoiceState {
+  // Link lỗi (không phát được / sai định dạng)
   male?: boolean;
   female?: boolean;
   maleLive?: boolean;
@@ -62,16 +69,101 @@ export interface BrokenVoiceState {
   femaleChecking?: boolean;
   maleReason?: BrokenReason;
   femaleReason?: BrokenReason;
+  // Link trùng (bị lặp ở chương khác) — tách biệt hoàn toàn với Link lỗi
+  maleDuplicate?: boolean;
+  femaleDuplicate?: boolean;
+  maleDuplicateReason?: string;
+  femaleDuplicateReason?: string;
 }
 
-interface BrokenLinkEntry {
+interface IssueLinkEntry {
   chapterId: string;
   chapterNumber: number;
   chapterTitle: string;
   voice: VoiceKey;
   voiceLabel: string;
   url: string;
-  reason?: BrokenReason;
+  reason?: string;
+}
+
+export interface UpdatedAudioLinksPayload {
+  audioUrl?: string;
+  audioUrlMale?: string;
+  audioUrlFemale?: string;
+  mp3Url?: string;
+  maleAudioUrl?: string;
+  audio?: string;
+  femaleAudioUrl?: string;
+  mp3Female?: string;
+}
+
+function extractChapterNumberFromTitle(title?: string | null): number | null {
+  if (!title || typeof title !== 'string') return null;
+  const normalized = title.normalize('NFC').trim();
+  const match = normalized.match(/(?:chương|chuong|hồi|hoi|chapter)\s*0*(\d+)/i);
+  if (match) {
+    const parsed = parseInt(match[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function resolveChapterNumber(chapter?: Partial<Chapter> | null): number {
+  if (!chapter) return 0;
+  const rawNum = Number(chapter.number);
+  if (Number.isFinite(rawNum) && rawNum > 0) {
+    return Math.floor(rawNum);
+  }
+  const fromTitle = extractChapterNumberFromTitle(chapter.title);
+  if (fromTitle !== null) return fromTitle;
+  const idStr = String(chapter.id || '').trim();
+  const idMatch = idStr.match(/(?:^|[-_])(?:c|chuong|ch)?0*(\d+)$/i);
+  if (idMatch) {
+    const parsed = parseInt(idMatch[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
+
+function sortChaptersNaturally(list: Chapter[]): Chapter[] {
+  return [...(list || [])].sort((a, b) => {
+    const numA = resolveChapterNumber(a);
+    const numB = resolveChapterNumber(b);
+    if (numA !== numB) return numA - numB;
+    return String(a.title || a.id || '').localeCompare(String(b.title || b.id || ''), 'vi', {
+      numeric: true,
+    });
+  });
+}
+
+function buildVoiceOverwriteLinks(
+  chapter: Chapter,
+  voice: VoiceKey,
+  newUrl?: string
+): UpdatedAudioLinksPayload {
+  const cleanUrl = typeof newUrl === 'string' && newUrl.trim() ? newUrl.trim() : undefined;
+  if (voice === 'male') {
+    return {
+      audioUrl: cleanUrl,
+      audioUrlMale: cleanUrl,
+      mp3Url: undefined,
+      maleAudioUrl: undefined,
+      audio: undefined,
+      audioUrlFemale: chapter.audioUrlFemale,
+      femaleAudioUrl: chapter.femaleAudioUrl,
+      mp3Female: chapter.mp3Female,
+    };
+  }
+  return {
+    audioUrl: chapter.audioUrl,
+    audioUrlMale: chapter.audioUrlMale,
+    mp3Url: chapter.mp3Url,
+    maleAudioUrl: chapter.maleAudioUrl,
+    audio: chapter.audio,
+    audioUrlFemale: cleanUrl,
+    femaleAudioUrl: undefined,
+    mp3Female: undefined,
+  };
 }
 
 function getMaleAudioUrl(chapter: Chapter): string {
@@ -123,6 +215,11 @@ function cleanupAudioElement(audio: HTMLAudioElement | null | undefined) {
   } catch {}
 }
 
+/**
+ * Kiểm tra link MP3 bằng thẻ <audio> ẩn (preload="metadata") — tuyệt đối không dùng fetch() để tránh lỗi ảo CORS.
+ * - Sự kiện `loadedmetadata` -> Link sống
+ * - Sự kiện `error` hoặc quá 8 giây timeout -> Link lỗi (không phát được)
+ */
 function probeAudioMetadataOnce(
   url: string,
   timeoutMs = LINK_PROBE_TIMEOUT_MS,
@@ -137,48 +234,55 @@ function probeAudioMetadataOnce(
 
     const trimmed = url.trim();
     if (!isValidHttpUrl(trimmed)) {
-      resolve({ ok: false, reason: 'Sai định dạng' });
+      resolve({ ok: false, reason: 'Sai định dạng link' });
       return;
     }
 
     let settled = false;
-    const probe = new Audio();
+    const probe = document.createElement('audio');
+    probe.style.display = 'none';
     probe.removeAttribute('crossorigin');
     probe.preload = 'metadata';
     activeAudiosSet?.add(probe);
+
+    const onLoadedMetadata = () => finish(true);
+    const onError = () => {
+      if (shouldAbort?.()) {
+        finish(false, undefined, true);
+      } else {
+        finish(false, 'Link lỗi (không phát được)');
+      }
+    };
 
     const finish = (ok: boolean, reason?: BrokenReason, cancelled?: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      probe.removeEventListener('loadedmetadata', onLoadedMetadata);
+      probe.removeEventListener('error', onError);
       activeAudiosSet?.delete(probe);
       cleanupAudioElement(probe);
-      resolve(cancelled ? { ok: false, cancelled: true } : ok ? { ok: true } : { ok: false, reason });
+      resolve(
+        cancelled ? { ok: false, cancelled: true } : ok ? { ok: true } : { ok: false, reason }
+      );
     };
 
     const timer = setTimeout(() => {
       if (shouldAbort?.()) {
         finish(false, undefined, true);
       } else {
-        finish(false, 'Link lỗi');
+        finish(false, 'Link lỗi (quá thời gian 8s)');
       }
     }, timeoutMs);
 
-    probe.onloadedmetadata = () => finish(true);
-    probe.oncanplay = () => finish(true);
-    probe.onerror = () => {
-      if (shouldAbort?.()) {
-        finish(false, undefined, true);
-      } else {
-        finish(false, 'Link lỗi');
-      }
-    };
+    probe.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+    probe.addEventListener('error', onError, { once: true });
 
     try {
       probe.src = trimmed;
       probe.load();
     } catch {
-      finish(false, 'Link lỗi');
+      finish(false, 'Link lỗi (không phát được)');
     }
   });
 }
@@ -202,10 +306,7 @@ interface AdminChapterMp3ActionsProps {
   disabledExternally?: boolean;
   brokenVoices?: BrokenVoiceState;
   externalEditRequest?: { chapterId: string; voice: VoiceKey; nonce: number } | null;
-  onAudioLinksUpdated: (
-    chapter: Chapter,
-    links: { audioUrl?: string; audioUrlMale?: string; audioUrlFemale?: string }
-  ) => void;
+  onAudioLinksUpdated: (chapter: Chapter, links: UpdatedAudioLinksPayload) => void;
   onSingleLinkSaved?: (updatedChapter: Chapter, voice: VoiceKey, newUrl: string) => void;
   onMarkVoiceLive?: (chapterId: string, voice: VoiceKey) => void;
   onClearBrokenFlag?: (chapterId: string, voice: VoiceKey) => void;
@@ -307,11 +408,16 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
         ensureNovelAudioVoiceFlagInFirestore(novel.id, voice).catch(() => {});
       }
       onAudioLinksUpdated(chapter, {
-        audioUrl: chapter.audioUrl,
+        audioUrl: voice === 'male' ? chapter.audioUrl || cleanUrl : chapter.audioUrl,
         audioUrlMale:
           voice === 'male' ? chapter.audioUrlMale || cleanUrl : chapter.audioUrlMale,
         audioUrlFemale:
           voice === 'female' ? chapter.audioUrlFemale || cleanUrl : chapter.audioUrlFemale,
+        mp3Url: chapter.mp3Url,
+        maleAudioUrl: chapter.maleAudioUrl,
+        audio: chapter.audio,
+        femaleAudioUrl: chapter.femaleAudioUrl,
+        mp3Female: chapter.mp3Female,
       });
     }
   };
@@ -398,22 +504,14 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     }
 
     const targetVoice = editingVoice;
+    const hadPreviousLink = Boolean(
+      targetVoice === 'male' ? rawMaleUrl : rawFemaleUrl
+    );
     setErrorMsg(null);
     setIsBusy(true);
     try {
       await updateChapterAudioUrlInFirestore(novel.id, chapter, trimmed, targetVoice);
-      const updatedLinks =
-        targetVoice === 'male'
-          ? {
-              audioUrl: chapter.audioUrl,
-              audioUrlMale: trimmed,
-              audioUrlFemale: chapter.audioUrlFemale,
-            }
-          : {
-              audioUrl: chapter.audioUrl,
-              audioUrlMale: chapter.audioUrlMale,
-              audioUrlFemale: trimmed,
-            };
+      const updatedLinks = buildVoiceOverwriteLinks(chapter, targetVoice, trimmed);
 
       const updatedChapter: Chapter = {
         ...chapter,
@@ -424,10 +522,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
       setEditingVoice(null);
       setLinkInput('');
 
+      const voiceLabel = targetVoice === 'male' ? 'Nam Minh' : 'Hằng Nga';
       if (onSingleLinkSaved) {
         onSingleLinkSaved(updatedChapter, targetVoice, trimmed);
         setSuccessMsg(
-          `Đã lưu link MP3 giọng ${targetVoice === 'male' ? 'Nam Minh' : 'Hằng Nga'} và đang kiểm tra...`
+          hadPreviousLink
+            ? `Đã ghi đè link MP3 mới giọng ${voiceLabel} và đang kiểm tra...`
+            : `Đã lưu link MP3 giọng ${voiceLabel} và đang kiểm tra...`
         );
       } else {
         onClearBrokenFlag?.(chapter.id, targetVoice);
@@ -437,9 +538,13 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           [targetVoice === 'male' ? 'maleChecking' : 'femaleChecking']: true,
           [targetVoice === 'male' ? 'maleLive' : 'femaleLive']: false,
           [targetVoice === 'male' ? 'maleReason' : 'femaleReason']: undefined,
+          [targetVoice === 'male' ? 'maleDuplicate' : 'femaleDuplicate']: false,
+          [targetVoice === 'male' ? 'maleDuplicateReason' : 'femaleDuplicateReason']: undefined,
         }));
         setSuccessMsg(
-          `Đã lưu link MP3 giọng ${targetVoice === 'male' ? 'Nam Minh' : 'Hằng Nga'}.`
+          hadPreviousLink
+            ? `Đã ghi đè link MP3 mới giọng ${voiceLabel}.`
+            : `Đã lưu link MP3 giọng ${voiceLabel}.`
         );
         probeAudioMetadataOnce(
           trimmed,
@@ -455,7 +560,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
             [targetVoice === 'male' ? 'maleLive' : 'femaleLive']: res.ok,
             [targetVoice === 'male' ? 'maleReason' : 'femaleReason']: res.ok
               ? undefined
-              : res.reason || 'Link lỗi',
+              : res.reason || 'Link lỗi (không phát được)',
           }));
         });
       }
@@ -494,20 +599,10 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
         [voice === 'male' ? 'maleLive' : 'femaleLive']: false,
         [voice === 'male' ? 'maleChecking' : 'femaleChecking']: false,
         [voice === 'male' ? 'maleReason' : 'femaleReason']: undefined,
+        [voice === 'male' ? 'maleDuplicate' : 'femaleDuplicate']: false,
+        [voice === 'male' ? 'maleDuplicateReason' : 'femaleDuplicateReason']: undefined,
       }));
-      if (voice === 'male') {
-        onAudioLinksUpdated(chapter, {
-          audioUrl: undefined,
-          audioUrlMale: undefined,
-          audioUrlFemale: chapter.audioUrlFemale,
-        });
-      } else {
-        onAudioLinksUpdated(chapter, {
-          audioUrl: chapter.audioUrl,
-          audioUrlMale: chapter.audioUrlMale,
-          audioUrlFemale: undefined,
-        });
-      }
+      onAudioLinksUpdated(chapter, buildVoiceOverwriteLinks(chapter, voice, undefined));
       setSuccessMsg(
         `Đã xóa link MP3 giọng ${voice === 'male' ? 'Nam Minh' : 'Hằng Nga'}.`
       );
@@ -536,6 +631,12 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
     const brokenReason = isMale
       ? effectiveVoiceState?.maleReason
       : effectiveVoiceState?.femaleReason;
+    const isDuplicate = isMale
+      ? Boolean(effectiveVoiceState?.maleDuplicate)
+      : Boolean(effectiveVoiceState?.femaleDuplicate);
+    const duplicateReason = isMale
+      ? effectiveVoiceState?.maleDuplicateReason
+      : effectiveVoiceState?.femaleDuplicateReason;
     const isThisPreviewPlaying = previewVoice === voice;
     const isThisConfirming = confirmClearVoice === voice;
     const displayUrl = validUrl || rawUrl;
@@ -545,6 +646,8 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
         className={`rounded-xl px-3 py-2.5 border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition min-w-0 ${
           isBroken
             ? 'bg-rose-50/90 border-rose-400'
+            : isDuplicate
+            ? 'bg-amber-50/80 border-amber-400'
             : isLive
             ? 'bg-emerald-50/50 border-emerald-300'
             : displayUrl
@@ -552,7 +655,7 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
             : 'bg-slate-50/40 border-dashed border-slate-200'
         }`}
       >
-        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+        <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
           <span
             className={`inline-flex items-center gap-1 text-xs font-bold ${
               isMale ? 'text-sky-700' : 'text-pink-700'
@@ -565,30 +668,42 @@ export const AdminChapterMp3Actions: React.FC<AdminChapterMp3ActionsProps> = ({
           </span>
 
           {displayUrl ? (
-            isBroken ? (
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[11px] font-bold"
-                title={brokenReason || 'Link lỗi'}
-              >
-                <AlertTriangle className="w-3 h-3 shrink-0" />
-                <span>{brokenReason || 'Link lỗi'}</span>
-              </span>
-            ) : isChecking ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold">
-                <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
-                <span>Đang kiểm tra...</span>
-              </span>
-            ) : isLive ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-300 text-[11px] font-bold">
-                <CheckCircle2 className="w-3 h-3 shrink-0" />
-                <span>Đã có • Sống</span>
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
-                <CheckCircle2 className="w-3 h-3 shrink-0" />
-                <span>Đã có</span>
-              </span>
-            )
+            <>
+              {isBroken ? (
+                <span
+                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-300 text-[11px] font-bold"
+                  title={brokenReason || 'Link lỗi (không phát được)'}
+                >
+                  <AlertCircle className="w-3 h-3 shrink-0" />
+                  <span>{brokenReason || 'Link lỗi (không phát được)'}</span>
+                </span>
+              ) : isChecking ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-sky-100 text-sky-800 border border-sky-300 text-[11px] font-bold">
+                  <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
+                  <span>Đang kiểm tra...</span>
+                </span>
+              ) : isLive ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-300 text-[11px] font-bold">
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  <span>Link sống</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-bold">
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  <span>Đã có</span>
+                </span>
+              )}
+
+              {isDuplicate && (
+                <span
+                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-bold"
+                  title={duplicateReason || 'Link trùng (bị lặp ở chương khác)'}
+                >
+                  <AlertTriangle className="w-3 h-3 shrink-0 text-amber-700" />
+                  <span>{duplicateReason || 'Link trùng'}</span>
+                </span>
+              )}
+            </>
           ) : (
             <span className="text-[11px] font-medium text-slate-400">Chưa gắn link</span>
           )}
@@ -822,7 +937,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   onNovelMp3CountsSynced,
 }) => {
   const [chapters, setChapters] = useState<Chapter[]>(() =>
-    Array.isArray(novel.chapters) ? [...novel.chapters] : []
+    sortChaptersNaturally(Array.isArray(novel.chapters) ? novel.chapters : [])
   );
   const chaptersRef = useRef<Chapter[]>(chapters);
   const [isLoadingChapters, setIsLoadingChapters] = useState(false);
@@ -863,6 +978,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     total: 0,
   });
   const [isErrorSummaryCollapsed, setIsErrorSummaryCollapsed] = useState(false);
+  const [isDuplicateSummaryCollapsed, setIsDuplicateSummaryCollapsed] = useState(false);
   const isCancelledRef = useRef<boolean>(false);
   const stopQueueRef = useRef<boolean>(false);
   const activeProbeAudiosRef = useRef<Set<HTMLAudioElement>>(new Set());
@@ -931,11 +1047,11 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     const preloaded = Array.isArray(novel.chapters) ? novel.chapters : [];
     const expectedTotal = Number(novel.totalChapters || 0);
     if (preloaded.length > 0 && (expectedTotal === 0 || preloaded.length >= expectedTotal)) {
-      const sorted = [...preloaded].sort((a, b) => Number(a.number) - Number(b.number));
+      const sorted = sortChaptersNaturally(preloaded);
       chaptersRef.current = sorted;
       setChapters(sorted);
-      const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
-      setDeleteFromChapter(sorted[0]?.number || 1);
+      const maxNum = sorted.reduce((acc, c) => Math.max(acc, resolveChapterNumber(c)), 1);
+      setDeleteFromChapter(resolveChapterNumber(sorted[0]) || 1);
       setDeleteToChapter(maxNum);
       setIsLoadingChapters(false);
       syncCountsIfNeeded(sorted);
@@ -947,11 +1063,11 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     fetchChaptersForNovel(novel.id)
       .then((list) => {
         if (!cancelled && Array.isArray(list) && list.length > 0) {
-          const sorted = [...list].sort((a, b) => Number(a.number) - Number(b.number));
+          const sorted = sortChaptersNaturally(list);
           chaptersRef.current = sorted;
           setChapters(sorted);
-          const maxNum = sorted.reduce((acc, c) => Math.max(acc, Number(c.number) || 0), 1);
-          setDeleteFromChapter(sorted[0]?.number || 1);
+          const maxNum = sorted.reduce((acc, c) => Math.max(acc, resolveChapterNumber(c)), 1);
+          setDeleteFromChapter(resolveChapterNumber(sorted[0]) || 1);
           setDeleteToChapter(maxNum);
           syncCountsIfNeeded(sorted);
         }
@@ -965,44 +1081,88 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     };
   }, [novel.id]);
 
+  // Luôn sắp xếp danh sách chương theo thứ tự số tự nhiên (1, 2, 3... 10, 11...)
   const sortedChapters = useMemo(() => {
-    return [...(chapters || [])].sort((a, b) => Number(a.number) - Number(b.number));
+    return sortChaptersNaturally(chapters || []);
   }, [chapters]);
 
-  const { brokenEntries, brokenChapterIdsSet } = useMemo(() => {
-    const entries: BrokenLinkEntry[] = [];
-    const chapIds = new Set<string>();
+  // Tách riêng hoàn toàn "Link lỗi (không phát được)" và "Link trùng (bị lặp ở chương khác)"
+  const {
+    brokenEntries,
+    brokenChapterIdsSet,
+    duplicateEntries,
+    duplicateChapterIdsSet,
+  } = useMemo(() => {
+    const brokenList: IssueLinkEntry[] = [];
+    const brokenChapIds = new Set<string>();
+    const dupList: IssueLinkEntry[] = [];
+    const dupChapIds = new Set<string>();
+
     for (const ch of sortedChapters) {
       const state = brokenLinksMap[ch.id];
       if (!state) continue;
+      const chapNum = resolveChapterNumber(ch);
+      const chapTitle = ch.title || `Chương ${chapNum}`;
+
       const maleUrl = getRawVoiceUrl(ch, 'male');
       if (state.male && maleUrl) {
-        entries.push({
+        brokenList.push({
           chapterId: ch.id,
-          chapterNumber: Number(ch.number),
-          chapterTitle: ch.title || `Chương ${ch.number}`,
+          chapterNumber: chapNum,
+          chapterTitle: chapTitle,
           voice: 'male',
           voiceLabel: 'Nam Minh',
           url: maleUrl,
-          reason: state.maleReason,
+          reason: state.maleReason || 'Link lỗi (không phát được)',
         });
-        chapIds.add(ch.id);
+        brokenChapIds.add(ch.id);
       }
+      if (state.maleDuplicate && maleUrl) {
+        dupList.push({
+          chapterId: ch.id,
+          chapterNumber: chapNum,
+          chapterTitle: chapTitle,
+          voice: 'male',
+          voiceLabel: 'Nam Minh',
+          url: maleUrl,
+          reason: state.maleDuplicateReason || 'Bị lặp ở chương khác',
+        });
+        dupChapIds.add(ch.id);
+      }
+
       const femaleUrl = getRawVoiceUrl(ch, 'female');
       if (state.female && femaleUrl) {
-        entries.push({
+        brokenList.push({
           chapterId: ch.id,
-          chapterNumber: Number(ch.number),
-          chapterTitle: ch.title || `Chương ${ch.number}`,
+          chapterNumber: chapNum,
+          chapterTitle: chapTitle,
           voice: 'female',
           voiceLabel: 'Hằng Nga',
           url: femaleUrl,
-          reason: state.femaleReason,
+          reason: state.femaleReason || 'Link lỗi (không phát được)',
         });
-        chapIds.add(ch.id);
+        brokenChapIds.add(ch.id);
+      }
+      if (state.femaleDuplicate && femaleUrl) {
+        dupList.push({
+          chapterId: ch.id,
+          chapterNumber: chapNum,
+          chapterTitle: chapTitle,
+          voice: 'female',
+          voiceLabel: 'Hằng Nga',
+          url: femaleUrl,
+          reason: state.femaleDuplicateReason || 'Bị lặp ở chương khác',
+        });
+        dupChapIds.add(ch.id);
       }
     }
-    return { brokenEntries: entries, brokenChapterIdsSet: chapIds };
+
+    return {
+      brokenEntries: brokenList,
+      brokenChapterIdsSet: brokenChapIds,
+      duplicateEntries: dupList,
+      duplicateChapterIdsSet: dupChapIds,
+    };
   }, [sortedChapters, brokenLinksMap]);
 
   useEffect(() => {
@@ -1010,7 +1170,11 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       setVoiceFilter('all');
       setCurrentPage(1);
     }
-  }, [voiceFilter, brokenChapterIdsSet.size]);
+    if (voiceFilter === 'duplicate' && duplicateChapterIdsSet.size === 0) {
+      setVoiceFilter('all');
+      setCurrentPage(1);
+    }
+  }, [voiceFilter, brokenChapterIdsSet.size, duplicateChapterIdsSet.size]);
 
   const audioStats = useMemo(() => {
     let maleCount = 0;
@@ -1053,9 +1217,16 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         const hasBrokenFemale = Boolean(b?.female && getRawVoiceUrl(ch, 'female'));
         if (!hasBrokenMale && !hasBrokenFemale) return false;
       }
+      if (voiceFilter === 'duplicate') {
+        const b = brokenLinksMap[ch.id];
+        const hasDupMale = Boolean(b?.maleDuplicate && getRawVoiceUrl(ch, 'male'));
+        const hasDupFemale = Boolean(b?.femaleDuplicate && getRawVoiceUrl(ch, 'female'));
+        if (!hasDupMale && !hasDupFemale) return false;
+      }
 
       if (!q && !rawTrimmed) return true;
-      const numMatch = String(ch.number) === rawTrimmed || String(ch.number).includes(rawTrimmed);
+      const chapNumStr = String(resolveChapterNumber(ch));
+      const numMatch = chapNumStr === rawTrimmed || chapNumStr.includes(rawTrimmed);
       const titleMatch = removeVietnameseTones(ch.title || '').includes(q);
       return numMatch || titleMatch;
     });
@@ -1085,8 +1256,9 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }, 3200);
   }, [pageChapters, safeCurrentPage, editVoiceRequest]);
 
-  const handleJumpToBrokenChapter = (entry: BrokenLinkEntry) => {
-    const nextFilter: VoiceFilterMode = voiceFilter === 'broken' ? 'broken' : 'all';
+  const handleJumpToIssueChapter = (entry: IssueLinkEntry, targetKind: 'broken' | 'duplicate') => {
+    const nextFilter: VoiceFilterMode =
+      voiceFilter === targetKind ? targetKind : 'all';
     const nextList = sortedChapters.filter((ch) => {
       if (nextFilter === 'broken') {
         const b = brokenLinksMap[ch.id];
@@ -1095,10 +1267,17 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
             (b?.female && getRawVoiceUrl(ch, 'female'))
         );
       }
+      if (nextFilter === 'duplicate') {
+        const b = brokenLinksMap[ch.id];
+        return Boolean(
+          (b?.maleDuplicate && getRawVoiceUrl(ch, 'male')) ||
+            (b?.femaleDuplicate && getRawVoiceUrl(ch, 'female'))
+        );
+      }
       return true;
     });
     const idx = nextList.findIndex(
-      (ch) => ch.id === entry.chapterId || Number(ch.number) === entry.chapterNumber
+      (ch) => ch.id === entry.chapterId || resolveChapterNumber(ch) === entry.chapterNumber
     );
     const targetPage = idx >= 0 ? Math.floor(idx / CHAPTERS_PER_PAGE) + 1 : 1;
 
@@ -1118,27 +1297,31 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     const byNumber = new Map<number, Chapter>();
     for (const u of updatedChaptersList) {
       if (u.id) byId.set(u.id, u);
-      if (Number(u.number) > 0) byNumber.set(Number(u.number), u);
+      const num = resolveChapterNumber(u);
+      if (num > 0) byNumber.set(num, u);
     }
-    const nextChapters = chaptersRef.current.map((item) => {
-      const matched = byId.get(item.id) || byNumber.get(Number(item.number));
-      if (!matched) return item;
-      return {
-        ...item,
-        audioUrl: matched.audioUrl,
-        audioUrlMale: matched.audioUrlMale,
-        audioUrlFemale: matched.audioUrlFemale,
-        mp3Url: matched.mp3Url,
-        maleAudioUrl: matched.maleAudioUrl,
-        audio: matched.audio,
-        femaleAudioUrl: matched.femaleAudioUrl,
-        mp3Female: matched.mp3Female,
-      };
-    });
+    const nextChapters = sortChaptersNaturally(
+      chaptersRef.current.map((item) => {
+        const matched = byId.get(item.id) || byNumber.get(resolveChapterNumber(item));
+        if (!matched) return item;
+        return {
+          ...item,
+          audioUrl: matched.audioUrl,
+          audioUrlMale: matched.audioUrlMale,
+          audioUrlFemale: matched.audioUrlFemale,
+          mp3Url: matched.mp3Url,
+          maleAudioUrl: matched.maleAudioUrl,
+          audio: matched.audio,
+          femaleAudioUrl: matched.femaleAudioUrl,
+          mp3Female: matched.mp3Female,
+        };
+      })
+    );
     chaptersRef.current = nextChapters;
     setChapters(nextChapters);
 
     const counts = computeChapterAudioCounts(nextChapters);
+    syncedCountsKeyRef.current = `${novel.id}:${counts.mp3NamMinhCount}:${counts.mp3HangNgaCount}`;
     onNovelMp3CountsSynced?.(novel.id, counts);
 
     if (onBatchChaptersAudioUpdated) {
@@ -1150,14 +1333,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }
   };
 
-  // Logic 1: Dán link MP3 hàng loạt
+  // Logic 1: Dán link MP3 hàng loạt — ghép chính xác tuyệt đối theo số chương (KHÔNG dùng chỉ số mảng) & tự động ghi đè link cũ
   const handleBulkPasteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBulkReport(null);
 
     const lines = bulkText
       .split(/\r?\n/)
-      .map((l) => l.trim())
+      .map((l) => l.replace(/[\u200B-\u200D\uFEFF]/g, '').normalize('NFC').trim())
       .filter(Boolean);
 
     if (lines.length === 0) {
@@ -1169,58 +1352,111 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       return;
     }
 
+    // Lập bản đồ tra cứu tuyệt đối theo số chương (chapterNumber === X) & dự phòng theo số chương trích từ tiêu đề
     const chapterByNumber = new Map<number, Chapter>();
+    const chapterByTitleNumber = new Map<number, Chapter>();
     for (const ch of sortedChapters) {
-      chapterByNumber.set(Number(ch.number), ch);
+      const resolvedNum = resolveChapterNumber(ch);
+      if (resolvedNum > 0 && !chapterByNumber.has(resolvedNum)) {
+        chapterByNumber.set(resolvedNum, ch);
+      }
+      const titleNum = extractChapterNumberFromTitle(ch.title);
+      if (titleNum !== null && !chapterByTitleNumber.has(titleNum)) {
+        chapterByTitleNumber.set(titleNum, ch);
+      }
     }
+
+    const findChapterByExactNumber = (chapNum: number): Chapter | undefined => {
+      if (!Number.isFinite(chapNum) || chapNum <= 0) return undefined;
+      return chapterByNumber.get(chapNum) || chapterByTitleNumber.get(chapNum);
+    };
 
     let sequentialChapterNum = 1;
     const mappedByChapterKey = new Map<
       string,
-      { chapter: Chapter; url: string }
+      { chapter: Chapter; url: string; hadExistingLink: boolean }
     >();
     const issues: string[] = [];
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // Ưu tiên 1: Chương <số> | <URL> (hỗ trợ |, :, -)
-      const labeledMatch = line.match(
-        /^(?:chương|chuong|c|hồi|hoi|chapter)\s*(\d+)(?:[^|\r\n]*?)\s*(?:\||:|-)\s*(https?:\/\/\S+)$/i
-      );
-      if (labeledMatch) {
-        const chapNum = parseInt(labeledMatch[1], 10);
-        const url = labeledMatch[2].trim();
-        const targetChapter = chapterByNumber.get(chapNum);
-        if (!targetChapter) {
-          issues.push(`Dòng ${i + 1}: Không tìm thấy Chương ${chapNum} trong truyện.`);
-          continue;
-        }
-        if (!isValidHttpUrl(url)) {
-          issues.push(`Dòng ${i + 1}: Đường dẫn không hợp lệ.`);
-          continue;
-        }
-        mappedByChapterKey.set(targetChapter.id, { chapter: targetChapter, url });
+      // Trích xuất URL ở cuối dòng
+      const urlMatch = line.match(/(https?:\/\/\S+)\s*$/i);
+      if (!urlMatch || urlMatch.index === undefined) {
+        issues.push(
+          `Dòng ${i + 1}: Không tìm thấy đường dẫn hợp lệ ("${line.slice(0, 50)}${
+            line.length > 50 ? '...' : ''
+          }").`
+        );
         continue;
       }
 
-      // Ưu tiên 2: Chỉ có <URL> -> gán lần lượt từ Chương 1
-      const bareUrlMatch = line.match(/^(https?:\/\/\S+)$/i);
-      if (bareUrlMatch) {
-        const chapNum = sequentialChapterNum++;
-        const url = bareUrlMatch[1].trim();
-        const targetChapter = chapterByNumber.get(chapNum);
-        if (!targetChapter) {
+      const url = urlMatch[1].trim();
+      if (!isValidHttpUrl(url)) {
+        issues.push(`Dòng ${i + 1}: Đường dẫn không hợp lệ.`);
+        continue;
+      }
+
+      const prefixRaw = line.slice(0, urlMatch.index).trim();
+
+      if (prefixRaw.length > 0) {
+        // Bắt buộc trích xuất chính xác con số X đứng sau "Chương" (hoặc Hồi/Chapter/C) trước dấu phân cách |, :, -
+        let extractedChapNum: number | null = null;
+        const explicitMatch = prefixRaw.match(/(?:chương|chuong|hồi|hoi|chapter)\s*0*(\d+)\b/i);
+        if (explicitMatch) {
+          extractedChapNum = parseInt(explicitMatch[1], 10);
+        } else {
+          const shortMatch = prefixRaw.match(
+            /^(?:c\.?\s*)?0*(\d+)\s*(?:\||:|：|-|–|—)\s*$/i
+          );
+          if (shortMatch) {
+            extractedChapNum = parseInt(shortMatch[1], 10);
+          }
+        }
+
+        if (extractedChapNum === null || !Number.isFinite(extractedChapNum) || extractedChapNum <= 0) {
           issues.push(
-            `Dòng ${i + 1}: Không tìm thấy Chương ${chapNum} (khi gán tuần tự từ Chương 1).`
+            `Dòng ${i + 1}: Không trích xuất được số chương từ "${prefixRaw.slice(
+              0,
+              40
+            )}". Vui lòng dùng định dạng "Chương X | https://...".`
           );
           continue;
         }
-        mappedByChapterKey.set(targetChapter.id, { chapter: targetChapter, url });
+
+        const targetChapter = findChapterByExactNumber(extractedChapNum);
+        if (!targetChapter) {
+          issues.push(
+            `Dòng ${i + 1}: Không tìm thấy Chương ${extractedChapNum} trong danh sách chương của truyện.`
+          );
+          continue;
+        }
+
+        const existingUrl = getRawVoiceUrl(targetChapter, bulkVoice);
+        mappedByChapterKey.set(targetChapter.id, {
+          chapter: targetChapter,
+          url,
+          hadExistingLink: Boolean(existingUrl),
+        });
         continue;
       }
 
-      issues.push(`Dòng ${i + 1}: Không nhận diện được định dạng ("${line.slice(0, 50)}...")`);
+      // Chỉ dán URL trần (không ghi "Chương X") -> tìm chính xác theo số chương 1, 2, 3... (tuyệt đối không lấy theo array index)
+      const chapNum = sequentialChapterNum++;
+      const targetChapter = findChapterByExactNumber(chapNum);
+      if (!targetChapter) {
+        issues.push(
+          `Dòng ${i + 1}: Không tìm thấy Chương ${chapNum} trong truyện (khuyên dùng định dạng "Chương X | https://...").`
+        );
+        continue;
+      }
+      const existingUrl = getRawVoiceUrl(targetChapter, bulkVoice);
+      mappedByChapterKey.set(targetChapter.id, {
+        chapter: targetChapter,
+        url,
+        hadExistingLink: Boolean(existingUrl),
+      });
     }
 
     const entries = Array.from(mappedByChapterKey.values());
@@ -1233,6 +1469,8 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       return;
     }
 
+    const overwrittenCount = entries.filter((item) => item.hadExistingLink).length;
+
     setIsSavingBulk(true);
     try {
       const batchItems: ChapterAudioLinkBatchItem[] = entries.map(({ chapter, url }) => ({
@@ -1241,18 +1479,20 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         audioUrlFemale: bulkVoice === 'female' ? url : undefined,
       }));
 
+      // Tự động ghi đè link cũ (bao gồm dọn sạch các trường link cũ của giọng đang chọn)
       const updatedChapters: Chapter[] = entries.map(({ chapter, url }) => ({
         ...chapter,
-        audioUrlMale: bulkVoice === 'male' ? url : chapter.audioUrlMale,
-        audioUrlFemale: bulkVoice === 'female' ? url : chapter.audioUrlFemale,
+        ...buildVoiceOverwriteLinks(chapter, bulkVoice, url),
       }));
 
-      const nextChaptersSnapshot = sortedChapters.map((item) => {
-        const matched = updatedChapters.find(
-          (u) => u.id === item.id || Number(u.number) === Number(item.number)
-        );
-        return matched ? { ...item, ...matched } : item;
-      });
+      const nextChaptersSnapshot = sortChaptersNaturally(
+        sortedChapters.map((item) => {
+          const matched = updatedChapters.find(
+            (u) => u.id === item.id || resolveChapterNumber(u) === resolveChapterNumber(item)
+          );
+          return matched ? { ...item, ...matched } : item;
+        })
+      );
       const nextCounts = computeChapterAudioCounts(nextChaptersSnapshot);
 
       await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems, nextCounts);
@@ -1260,21 +1500,23 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       applyBatchUpdatesToState(updatedChapters);
 
       const voiceLabel = bulkVoice === 'male' ? 'Nam Minh' : 'Hằng Nga';
+      const overwriteNote =
+        overwrittenCount > 0 ? ` (đã tự động ghi đè ${overwrittenCount} link cũ)` : '';
       setBulkReport({
         type: 'success',
-        message: `Đã ghép thành công ${updatedChapters.length} link MP3 cho giọng ${voiceLabel}${
-          issues.length > 0 ? ` (${issues.length} dòng bị bỏ qua)` : ''
-        }. Đang tự động kiểm tra trùng lặp & trạng thái link...`,
+        message: `Đã ghép thành công ${updatedChapters.length} link MP3 giọng ${voiceLabel}${overwriteNote}${
+          issues.length > 0 ? ` • ${issues.length} dòng bỏ qua` : ''
+        }. Đang tự động kiểm tra link sống/lỗi & trùng lặp...`,
         details: issues.slice(0, 12),
       });
       if (issues.length === 0) {
         setBulkText('');
       }
 
-      // Kiểm tra ngay danh sách vừa dán (Bước 1: trùng/định dạng, Bước 2: hàng đợi metadata 2 link/lần)
+      // Kiểm tra ngay danh sách vừa dán (đợt 4 link/lần, thẻ <audio preload="metadata">, timeout 8s)
       const targetsToVerify = entries.map(({ chapter, url }) => ({
         chapterId: chapter.id,
-        chapterNumber: Number(chapter.number),
+        chapterNumber: resolveChapterNumber(chapter),
         voice: bulkVoice,
         url,
       }));
@@ -1300,7 +1542,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     const minC = Math.min(deleteFromChapter, deleteToChapter);
     const maxC = Math.max(deleteFromChapter, deleteToChapter);
     return sortedChapters.filter((ch) => {
-      const num = Number(ch.number);
+      const num = resolveChapterNumber(ch);
       if (num < minC || num > maxC) return false;
       const hasMale = Boolean(getMaleAudioUrl(ch));
       const hasFemale = Boolean(getFemaleAudioUrl(ch));
@@ -1314,7 +1556,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     const minC = Math.min(deleteFromChapter, deleteToChapter);
     const maxC = Math.max(deleteFromChapter, deleteToChapter);
     const targets = sortedChapters.filter((ch) => {
-      const num = Number(ch.number);
+      const num = resolveChapterNumber(ch);
       if (num < minC || num > maxC) return false;
       const hasMale = Boolean(getMaleAudioUrl(ch));
       const hasFemale = Boolean(getFemaleAudioUrl(ch));
@@ -1360,12 +1602,14 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
           deleteScope === 'female' || deleteScope === 'both' ? undefined : ch.mp3Female,
       }));
 
-      const nextChaptersSnapshot = sortedChapters.map((item) => {
-        const matched = updatedChapters.find(
-          (u) => u.id === item.id || Number(u.number) === Number(item.number)
-        );
-        return matched ? { ...item, ...matched } : item;
-      });
+      const nextChaptersSnapshot = sortChaptersNaturally(
+        sortedChapters.map((item) => {
+          const matched = updatedChapters.find(
+            (u) => u.id === item.id || resolveChapterNumber(u) === resolveChapterNumber(item)
+          );
+          return matched ? { ...item, ...matched } : item;
+        })
+      );
       const nextCounts = computeChapterAudioCounts(nextChaptersSnapshot);
 
       await batchUpdateChapterAudioLinksInFirestore(novel.id, batchItems, nextCounts);
@@ -1385,6 +1629,10 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
               femaleChecking: clearFemale ? false : next[ch.id].femaleChecking,
               maleReason: clearMale ? undefined : next[ch.id].maleReason,
               femaleReason: clearFemale ? undefined : next[ch.id].femaleReason,
+              maleDuplicate: clearMale ? false : next[ch.id].maleDuplicate,
+              femaleDuplicate: clearFemale ? false : next[ch.id].femaleDuplicate,
+              maleDuplicateReason: clearMale ? undefined : next[ch.id].maleDuplicateReason,
+              femaleDuplicateReason: clearFemale ? undefined : next[ch.id].femaleDuplicateReason,
             };
           }
         }
@@ -1416,7 +1664,8 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }
   };
 
-  // Logic 3: Kiểm tra định dạng + trùng link tức thì & hàng đợi kiểm tra sống/chết (tối đa 2 link/lần, nghỉ 250ms, timeout 15s, 0 Reads / 0 Writes)
+  // Logic 3: Kiểm tra bằng thẻ <audio preload="metadata"> theo đợt 4 link (timeout 8s, 0 fetch, 0 Reads/Writes)
+  // Tách rõ hoàn toàn "Link lỗi (không phát được)" và "Link trùng (bị lặp ở chương khác)"
   const verifyTargetLinksQueue = async (
     targetItems: {
       chapterId: string;
@@ -1438,10 +1687,10 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       return;
     }
 
-    // Gom nhóm link hợp lệ trên toàn bộ danh sách chương để phát hiện trùng lặp giữa các chương
+    // Bước 1: Quét trùng lặp giữa các chương (tách riêng với kết quả phát được/lỗi)
     const urlOccurrences = new Map<string, { chapterId: string; chapterNumber: number }[]>();
     for (const ch of chaptersSnapshot) {
-      const chapNum = Number(ch.number);
+      const chapNum = resolveChapterNumber(ch);
       const urls = [getRawVoiceUrl(ch, 'male'), getRawVoiceUrl(ch, 'female')];
       for (const rawUrl of urls) {
         if (!rawUrl || !isValidHttpUrl(rawUrl)) continue;
@@ -1462,27 +1711,33 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       nonce: number;
     }[] = [];
 
-    let syncErrorCount = 0;
+    let formatBrokenCount = 0;
+    let duplicateCount = 0;
 
     for (const item of targetItems) {
       const trimmedUrl = item.url.trim();
       const liveKey = item.voice === 'male' ? 'maleLive' : 'femaleLive';
       const checkingKey = item.voice === 'male' ? 'maleChecking' : 'femaleChecking';
       const reasonKey = item.voice === 'male' ? 'maleReason' : 'femaleReason';
+      const dupKey = item.voice === 'male' ? 'maleDuplicate' : 'femaleDuplicate';
+      const dupReasonKey = item.voice === 'male' ? 'maleDuplicateReason' : 'femaleDuplicateReason';
 
       if (!immediateResults[item.chapterId]) {
         immediateResults[item.chapterId] = {};
       }
 
       if (!isValidHttpUrl(trimmedUrl)) {
-        syncErrorCount += 1;
+        formatBrokenCount += 1;
         immediateResults[item.chapterId][item.voice] = true;
         immediateResults[item.chapterId][liveKey] = false;
         immediateResults[item.chapterId][checkingKey] = false;
-        immediateResults[item.chapterId][reasonKey] = 'Sai định dạng';
+        immediateResults[item.chapterId][reasonKey] = 'Link lỗi (sai định dạng)';
+        immediateResults[item.chapterId][dupKey] = false;
+        immediateResults[item.chapterId][dupReasonKey] = undefined;
         continue;
       }
 
+      // Kiểm tra link trùng ở chương khác (KHÔNG đánh dấu nhầm là Link lỗi không phát được)
       const occurrences = urlOccurrences.get(trimmedUrl) || [];
       const otherNums = occurrences
         .filter((occ) => occ.chapterId !== item.chapterId)
@@ -1490,19 +1745,19 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
         .sort((a, b) => a - b);
 
       if (otherNums.length > 0) {
-        syncErrorCount += 1;
+        duplicateCount += 1;
         const previewNums =
           otherNums.length > 3
             ? `${otherNums.slice(0, 3).join(', ')}...`
             : otherNums.join(', ');
-        immediateResults[item.chapterId][item.voice] = true;
-        immediateResults[item.chapterId][liveKey] = false;
-        immediateResults[item.chapterId][checkingKey] = false;
-        immediateResults[item.chapterId][reasonKey] = `Trùng với Chương ${previewNums}`;
-        continue;
+        immediateResults[item.chapterId][dupKey] = true;
+        immediateResults[item.chapterId][dupReasonKey] = `Trùng với Chương ${previewNums}`;
+      } else {
+        immediateResults[item.chapterId][dupKey] = false;
+        immediateResults[item.chapterId][dupReasonKey] = undefined;
       }
 
-      // Hợp lệ & không trùng -> đưa vào hàng đợi kiểm tra metadata
+      // Vẫn đưa vào hàng đợi kiểm tra thẻ <audio preload="metadata"> để xác định độc lập Link sống hay Link lỗi
       const taskNonce = Date.now() + Math.random();
       latestTargetNonceMapRef.current.set(`${item.chapterId}::${item.voice}`, taskNonce);
       immediateResults[item.chapterId][item.voice] = false;
@@ -1516,41 +1771,45 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       });
     }
 
-    // Đồng bộ lại các chương khác nếu trạng thái trùng lặp trước đó vừa thay đổi
+    // Đồng bộ lại cờ trùng lặp trên toàn bộ danh sách chương (ví dụ khi 1 chương vừa đổi sang link mới khiến chương cũ hết trùng)
     setBrokenLinksMap((prev) => {
       const next: Record<string, BrokenVoiceState> = options?.isFullScan ? {} : { ...prev };
 
       if (!options?.isFullScan) {
         for (const ch of chaptersSnapshot) {
           const prevState = next[ch.id];
-          if (!prevState) continue;
-          const updatedState = { ...prevState };
+          const updatedState: BrokenVoiceState = { ...(prevState || {}) };
+          let touched = false;
           for (const v of ['male', 'female'] as VoiceKey[]) {
-            const reasonKey = v === 'male' ? 'maleReason' : 'femaleReason';
-            const liveKey = v === 'male' ? 'maleLive' : 'femaleLive';
-            if (updatedState[v] && updatedState[reasonKey]?.startsWith('Trùng với Chương')) {
-              const curUrl = getRawVoiceUrl(ch, v);
-              const occ = curUrl ? urlOccurrences.get(curUrl) || [] : [];
-              const otherNums = occ
-                .filter((o) => o.chapterId !== ch.id)
-                .map((o) => o.chapterNumber)
-                .sort((a, b) => a - b);
-              if (otherNums.length === 0) {
-                updatedState[v] = false;
-                updatedState[reasonKey] = undefined;
-                if (curUrl && isValidHttpUrl(curUrl)) {
-                  updatedState[liveKey] = true;
-                }
-              } else {
-                const previewNums =
-                  otherNums.length > 3
-                    ? `${otherNums.slice(0, 3).join(', ')}...`
-                    : otherNums.join(', ');
-                updatedState[reasonKey] = `Trùng với Chương ${previewNums}`;
+            const dupKey = v === 'male' ? 'maleDuplicate' : 'femaleDuplicate';
+            const dupReasonKey = v === 'male' ? 'maleDuplicateReason' : 'femaleDuplicateReason';
+            const curUrl = getRawVoiceUrl(ch, v);
+            const occ = curUrl && isValidHttpUrl(curUrl) ? urlOccurrences.get(curUrl) || [] : [];
+            const otherNums = occ
+              .filter((o) => o.chapterId !== ch.id)
+              .map((o) => o.chapterNumber)
+              .sort((a, b) => a - b);
+
+            if (otherNums.length > 0) {
+              const previewNums =
+                otherNums.length > 3
+                  ? `${otherNums.slice(0, 3).join(', ')}...`
+                  : otherNums.join(', ');
+              const nextReason = `Trùng với Chương ${previewNums}`;
+              if (!updatedState[dupKey] || updatedState[dupReasonKey] !== nextReason) {
+                updatedState[dupKey] = true;
+                updatedState[dupReasonKey] = nextReason;
+                touched = true;
               }
+            } else if (updatedState[dupKey]) {
+              updatedState[dupKey] = false;
+              updatedState[dupReasonKey] = undefined;
+              touched = true;
             }
           }
-          next[ch.id] = updatedState;
+          if (touched) {
+            next[ch.id] = updatedState;
+          }
         }
       }
 
@@ -1560,16 +1819,42 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       return next;
     });
 
+    const buildSummaryText = (
+      prefixText: string,
+      liveCnt: number,
+      brokenCnt: number,
+      dupCnt: number
+    ) => {
+      const parts: string[] = [`${liveCnt} link sống`];
+      parts.push(`${brokenCnt} link lỗi (không phát được)`);
+      parts.push(`${dupCnt} link trùng (bị lặp ở chương khác)`);
+      return `${prefixText}: ${parts.join(' • ')}.`;
+    };
+
     if (liveProbeTasks.length === 0) {
       setIsProbingQueue(false);
       setProbeProgress({ checked: 0, total: 0 });
       setToolbarMessage({
-        type: syncErrorCount > 0 ? 'warning' : 'success',
-        text: `${options?.summaryPrefix || 'Đã kiểm tra'}: ${syncErrorCount} link lỗi / trùng.`,
-        includeBrokenList: syncErrorCount > 0,
+        type: formatBrokenCount > 0 || duplicateCount > 0 ? 'warning' : 'success',
+        text: buildSummaryText(
+          options?.summaryPrefix || 'Đã kiểm tra',
+          0,
+          formatBrokenCount,
+          duplicateCount
+        ),
+        includeBrokenList: formatBrokenCount > 0 || duplicateCount > 0,
       });
       return;
     }
+
+    // Gom các task có cùng URL để mỗi URL chỉ tạo 1 thẻ <audio>, vẫn chạy từng đợt 4 URL
+    const tasksByUrl = new Map<string, typeof liveProbeTasks>();
+    for (const task of liveProbeTasks) {
+      const group = tasksByUrl.get(task.url) || [];
+      group.push(task);
+      tasksByUrl.set(task.url, group);
+    }
+    const uniqueUrlGroups = Array.from(tasksByUrl.entries());
 
     stopQueueRef.current = false;
     setIsProbingQueue(true);
@@ -1579,58 +1864,65 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }
 
     let liveOkCount = 0;
-    let probeFailCount = 0;
+    let probeBrokenCount = 0;
     let processedCount = 0;
 
-    for (let i = 0; i < liveProbeTasks.length; i += LINK_PROBE_BATCH_SIZE) {
+    for (let i = 0; i < uniqueUrlGroups.length; i += LINK_PROBE_BATCH_SIZE) {
       if (isCancelledRef.current || stopQueueRef.current) break;
-      const batch = liveProbeTasks.slice(i, i + LINK_PROBE_BATCH_SIZE);
+      const batchGroups = uniqueUrlGroups.slice(i, i + LINK_PROBE_BATCH_SIZE);
 
       await Promise.all(
-        batch.map(async (task) => {
-          const targetKey = `${task.chapterId}::${task.voice}`;
+        batchGroups.map(async ([urlToProbe, groupTasks]) => {
+          const isGroupStillActive = () =>
+            groupTasks.some(
+              (t) => latestTargetNonceMapRef.current.get(`${t.chapterId}::${t.voice}`) === t.nonce
+            );
+
           const res = await probeAudioMetadataOnce(
-            task.url,
+            urlToProbe,
             LINK_PROBE_TIMEOUT_MS,
-            () =>
-              isCancelledRef.current ||
-              stopQueueRef.current ||
-              latestTargetNonceMapRef.current.get(targetKey) !== task.nonce,
+            () => isCancelledRef.current || stopQueueRef.current || !isGroupStillActive(),
             activeProbeAudiosRef.current
           );
 
-          if (
-            isCancelledRef.current ||
-            res.cancelled ||
-            latestTargetNonceMapRef.current.get(targetKey) !== task.nonce
-          ) {
+          if (isCancelledRef.current || res.cancelled) {
             return;
           }
 
-          const liveKey = task.voice === 'male' ? 'maleLive' : 'femaleLive';
-          const checkingKey = task.voice === 'male' ? 'maleChecking' : 'femaleChecking';
-          const reasonKey = task.voice === 'male' ? 'maleReason' : 'femaleReason';
+          const activeTasks = groupTasks.filter(
+            (t) => latestTargetNonceMapRef.current.get(`${t.chapterId}::${t.voice}`) === t.nonce
+          );
+          if (activeTasks.length === 0) return;
 
-          setBrokenLinksMap((prev) => ({
+          setBrokenLinksMap((prev) => {
+            const next = { ...prev };
+            for (const task of activeTasks) {
+              const liveKey = task.voice === 'male' ? 'maleLive' : 'femaleLive';
+              const checkingKey = task.voice === 'male' ? 'maleChecking' : 'femaleChecking';
+              const reasonKey = task.voice === 'male' ? 'maleReason' : 'femaleReason';
+              next[task.chapterId] = {
+                ...(next[task.chapterId] || {}),
+                [task.voice]: !res.ok,
+                [liveKey]: res.ok,
+                [checkingKey]: false,
+                [reasonKey]: res.ok ? undefined : res.reason || 'Link lỗi (không phát được)',
+              };
+            }
+            return next;
+          });
+
+          if (res.ok) liveOkCount += activeTasks.length;
+          else probeBrokenCount += activeTasks.length;
+          processedCount += activeTasks.length;
+          setProbeProgress((prev) => ({
             ...prev,
-            [task.chapterId]: {
-              ...(prev[task.chapterId] || {}),
-              [task.voice]: !res.ok,
-              [liveKey]: res.ok,
-              [checkingKey]: false,
-              [reasonKey]: res.ok ? undefined : res.reason || 'Link lỗi',
-            },
+            checked: Math.min(prev.total, prev.checked + activeTasks.length),
           }));
-
-          if (res.ok) liveOkCount += 1;
-          else probeFailCount += 1;
-          processedCount += 1;
-          setProbeProgress((prev) => ({ ...prev, checked: prev.checked + 1 }));
         })
       );
 
       if (
-        i + LINK_PROBE_BATCH_SIZE < liveProbeTasks.length &&
+        i + LINK_PROBE_BATCH_SIZE < uniqueUrlGroups.length &&
         !isCancelledRef.current &&
         !stopQueueRef.current
       ) {
@@ -1641,7 +1933,6 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     if (isCancelledRef.current) return;
 
     if (stopQueueRef.current) {
-      // Tắt trạng thái "Đang kiểm tra..." trên các mục còn lại trong hàng đợi
       setBrokenLinksMap((prev) => {
         const next = { ...prev };
         for (const task of liveProbeTasks) {
@@ -1657,15 +1948,20 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
       });
     }
 
-    const totalFailures = syncErrorCount + probeFailCount;
+    const totalBroken = formatBrokenCount + probeBrokenCount;
     const prefix = options?.summaryPrefix || `Đã kiểm tra ${targetItems.length} link`;
     if (stopQueueRef.current) {
       setToolbarMessage({
-        type: totalFailures > 0 ? 'warning' : 'success',
-        text: `Đã dừng kiểm tra (${processedCount}/${liveProbeTasks.length} link): ${liveOkCount} link sống, ${totalFailures} link lỗi.`,
-        includeBrokenList: totalFailures > 0,
+        type: totalBroken > 0 || duplicateCount > 0 ? 'warning' : 'success',
+        text: buildSummaryText(
+          `Đã dừng kiểm tra (${processedCount}/${liveProbeTasks.length} link)`,
+          liveOkCount,
+          totalBroken,
+          duplicateCount
+        ),
+        includeBrokenList: totalBroken > 0 || duplicateCount > 0,
       });
-    } else if (totalFailures === 0) {
+    } else if (totalBroken === 0 && duplicateCount === 0) {
       setToolbarMessage({
         type: 'success',
         text: `${prefix}: tất cả ${liveOkCount} link đều sống và không bị trùng.`,
@@ -1674,7 +1970,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     } else {
       setToolbarMessage({
         type: 'warning',
-        text: `${prefix}: ${liveOkCount} link sống, ${totalFailures} link lỗi hoặc trùng.`,
+        text: buildSummaryText(prefix, liveOkCount, totalBroken, duplicateCount),
         includeBrokenList: true,
       });
     }
@@ -1693,7 +1989,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     }[] = [];
 
     for (const ch of sortedChapters) {
-      const chapNum = Number(ch.number);
+      const chapNum = resolveChapterNumber(ch);
       const rawMale = getRawVoiceUrl(ch, 'male');
       const rawFemale = getRawVoiceUrl(ch, 'female');
       if (rawMale) {
@@ -1730,24 +2026,27 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
   };
 
   const handleSingleLinkSaved = (updatedChapter: Chapter, voice: VoiceKey, newUrl: string) => {
-    const nextChaptersSnapshot = sortedChapters.map((item) =>
-      item.id === updatedChapter.id || Number(item.number) === Number(updatedChapter.number)
-        ? { ...item, ...updatedChapter }
-        : item
+    const chapNum = resolveChapterNumber(updatedChapter);
+    const nextChaptersSnapshot = sortChaptersNaturally(
+      sortedChapters.map((item) =>
+        item.id === updatedChapter.id || resolveChapterNumber(item) === chapNum
+          ? { ...item, ...updatedChapter }
+          : item
+      )
     );
 
     verifyTargetLinksQueue(
       [
         {
           chapterId: updatedChapter.id,
-          chapterNumber: Number(updatedChapter.number),
+          chapterNumber: chapNum,
           voice,
           url: newUrl,
         },
       ],
       nextChaptersSnapshot,
       {
-        summaryPrefix: `Đã kiểm tra Chương ${updatedChapter.number} (${
+        summaryPrefix: `Đã kiểm tra Chương ${chapNum} (${
           voice === 'male' ? 'Nam Minh' : 'Hằng Nga'
         })`,
       }
@@ -1773,7 +2072,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
     for (const ch of sortedChapters) {
       const url = voice === 'male' ? getMaleAudioUrl(ch) : getFemaleAudioUrl(ch);
       if (url) {
-        lines.push(`Chương ${ch.number} | ${url}`);
+        lines.push(`Chương ${resolveChapterNumber(ch)} | ${url}`);
       }
     }
 
@@ -2262,24 +2561,42 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                       : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-300'
                   }`}
                 >
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Link lỗi ({brokenChapterIdsSet.size})</span>
+                </button>
+              )}
+
+              {duplicateChapterIdsSet.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVoiceFilter('duplicate');
+                    setCurrentPage(1);
+                  }}
+                  className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer tabular-nums inline-flex items-center gap-1 ${
+                    voiceFilter === 'duplicate'
+                      ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                      : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                  }`}
+                >
                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                  <span>Link trùng / Lỗi ({brokenChapterIdsSet.size})</span>
+                  <span>Link trùng ({duplicateChapterIdsSet.size})</span>
                 </button>
               )}
             </div>
           </div>
         </div>
 
-        {/* Chapters Body with Prominent Error Summary Banner + 100-chapter Pagination */}
+        {/* Chapters Body with Separated Broken & Duplicate Summary Banners + 100-chapter Pagination */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-5 space-y-3 bg-slate-50/70">
-          {/* Dòng thông báo tổng hợp chương lỗi nổi bật ngay phía trên danh sách chương */}
+          {/* Thông báo 1 (Đỏ): Link lỗi (không phát được) — tách biệt hoàn toàn với Link trùng */}
           {brokenEntries.length > 0 && (
             <div className="rounded-2xl bg-rose-50 border-2 border-rose-300 shadow-xs p-3 sm:p-3.5 space-y-2">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2 min-w-0">
-                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
                   <span className="text-xs sm:text-sm font-extrabold text-rose-800 tabular-nums">
-                    Phát hiện {brokenChapterIdsSet.size} chương bị lỗi link:
+                    Link lỗi (không phát được): {brokenChapterIdsSet.size} chương ({brokenEntries.length} link)
                   </span>
                 </div>
                 <button
@@ -2300,17 +2617,66 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                 <div className="flex flex-wrap items-center gap-2 max-h-36 sm:max-h-44 overflow-y-auto pr-1 pt-0.5">
                   {brokenEntries.map((entry) => (
                     <button
-                      key={`${entry.chapterId}-${entry.voice}`}
+                      key={`broken-${entry.chapterId}-${entry.voice}`}
                       type="button"
-                      onClick={() => handleJumpToBrokenChapter(entry)}
+                      onClick={() => handleJumpToIssueChapter(entry, 'broken')}
                       className="min-h-[40px] px-3 py-1.5 rounded-xl bg-white hover:bg-rose-600 hover:text-white border border-rose-300 text-rose-700 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer transition shadow-2xs group"
-                      title={`Bấm để nhảy tới Chương ${entry.chapterNumber} và sửa link ${entry.voiceLabel}`}
+                      title={`Bấm để nhảy tới Chương ${entry.chapterNumber} và sửa link lỗi ${entry.voiceLabel}`}
                     >
                       <span>
                         Chương {entry.chapterNumber} ({entry.voiceLabel})
                       </span>
                       {entry.reason ? (
                         <span className="px-1.5 py-0.5 rounded-md bg-rose-100 group-hover:bg-rose-500 text-rose-700 group-hover:text-white text-[10px] font-extrabold">
+                          {entry.reason}
+                        </span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Thông báo 2 (Vàng cam): Link trùng (bị lặp ở chương khác) — tách biệt hoàn toàn với Link lỗi */}
+          {duplicateEntries.length > 0 && (
+            <div className="rounded-2xl bg-amber-50 border-2 border-amber-300 shadow-xs p-3 sm:p-3.5 space-y-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="text-xs sm:text-sm font-extrabold text-amber-900 tabular-nums">
+                    Link trùng (bị lặp ở chương khác): {duplicateChapterIdsSet.size} chương ({duplicateEntries.length} link)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsDuplicateSummaryCollapsed((prev) => !prev)}
+                  className="min-h-[40px] px-3 py-1 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-amber-800 text-xs font-bold inline-flex items-center gap-1 cursor-pointer shrink-0 transition"
+                >
+                  <span>{isDuplicateSummaryCollapsed ? 'Mở rộng' : 'Thu gọn'}</span>
+                  {isDuplicateSummaryCollapsed ? (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+
+              {!isDuplicateSummaryCollapsed && (
+                <div className="flex flex-wrap items-center gap-2 max-h-36 sm:max-h-44 overflow-y-auto pr-1 pt-0.5">
+                  {duplicateEntries.map((entry) => (
+                    <button
+                      key={`dup-${entry.chapterId}-${entry.voice}`}
+                      type="button"
+                      onClick={() => handleJumpToIssueChapter(entry, 'duplicate')}
+                      className="min-h-[40px] px-3 py-1.5 rounded-xl bg-white hover:bg-amber-600 hover:text-white border border-amber-300 text-amber-900 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer transition shadow-2xs group"
+                      title={`Bấm để nhảy tới Chương ${entry.chapterNumber} và đổi link trùng ${entry.voiceLabel}`}
+                    >
+                      <span>
+                        Chương {entry.chapterNumber} ({entry.voiceLabel})
+                      </span>
+                      {entry.reason ? (
+                        <span className="px-1.5 py-0.5 rounded-md bg-amber-100 group-hover:bg-amber-500 text-amber-900 group-hover:text-white text-[10px] font-extrabold">
                           {entry.reason}
                         </span>
                       ) : null}
@@ -2349,7 +2715,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="min-w-0 flex-1">
                       <div className="font-bold text-xs sm:text-sm text-slate-900 break-words flex flex-wrap items-center gap-1.5">
-                        <span>{ch.title || `Chương ${ch.number}`}</span>
+                        <span>{ch.title || `Chương ${resolveChapterNumber(ch)}`}</span>
                         {isChapterScheduledPending(ch) && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[10px] font-bold">
                             <Clock className="w-3 h-3" />
@@ -2358,7 +2724,7 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                         )}
                       </div>
                       <div className="text-[11px] text-slate-500 font-medium mt-0.5 tabular-nums">
-                        Chương {ch.number}
+                        Chương {resolveChapterNumber(ch)}
                       </div>
                     </div>
                   </div>
@@ -2390,6 +2756,9 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                         const reasonKey = voice === 'male' ? 'maleReason' : 'femaleReason';
                         const checkingKey = voice === 'male' ? 'maleChecking' : 'femaleChecking';
                         const liveKey = voice === 'male' ? 'maleLive' : 'femaleLive';
+                        const dupKey = voice === 'male' ? 'maleDuplicate' : 'femaleDuplicate';
+                        const dupReasonKey =
+                          voice === 'male' ? 'maleDuplicateReason' : 'femaleDuplicateReason';
                         return {
                           ...prev,
                           [chId]: {
@@ -2398,6 +2767,8 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                             [liveKey]: false,
                             [checkingKey]: false,
                             [reasonKey]: undefined,
+                            [dupKey]: false,
+                            [dupReasonKey]: undefined,
                           },
                         };
                       });
@@ -2409,17 +2780,30 @@ export const AdminNovelMp3DrawerModal: React.FC<AdminNovelMp3DrawerModalProps> =
                         audioUrl: links.audioUrl,
                         audioUrlMale: links.audioUrlMale,
                         audioUrlFemale: links.audioUrlFemale,
+                        mp3Url: links.mp3Url,
+                        maleAudioUrl: links.maleAudioUrl,
+                        audio: links.audio,
+                        femaleAudioUrl: links.femaleAudioUrl,
+                        mp3Female: links.mp3Female,
                       };
-                      const nextChapters = chaptersRef.current.map((item) =>
-                        item.id === targetChap.id ||
-                        Number(item.number) === Number(targetChap.number)
-                          ? {
-                              ...item,
-                              audioUrl: links.audioUrl,
-                              audioUrlMale: links.audioUrlMale,
-                              audioUrlFemale: links.audioUrlFemale,
-                            }
-                          : item
+                      const targetNum = resolveChapterNumber(targetChap);
+                      const nextChapters = sortChaptersNaturally(
+                        chaptersRef.current.map((item) =>
+                          item.id === targetChap.id ||
+                          resolveChapterNumber(item) === targetNum
+                            ? {
+                                ...item,
+                                audioUrl: links.audioUrl,
+                                audioUrlMale: links.audioUrlMale,
+                                audioUrlFemale: links.audioUrlFemale,
+                                mp3Url: links.mp3Url,
+                                maleAudioUrl: links.maleAudioUrl,
+                                audio: links.audio,
+                                femaleAudioUrl: links.femaleAudioUrl,
+                                mp3Female: links.mp3Female,
+                              }
+                            : item
+                        )
                       );
                       chaptersRef.current = nextChapters;
                       setChapters(nextChapters);

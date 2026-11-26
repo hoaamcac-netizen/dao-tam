@@ -70,6 +70,7 @@ import {
   saveNovelsToStorage,
   invalidateNovelsCache,
   clearChapterAudioCache,
+  syncChapterAudioInStorageCache,
   CHAPTER_CACHE_PREFIX,
   CHAPTER_CACHE_TS_PREFIX,
   makeChapterCacheKey,
@@ -4184,13 +4185,19 @@ export async function updateChapterAudioUrlInFirestore(
 
   if (voice === 'female') {
     subPayload.audioUrlFemale = cleanUrl ? cleanUrl : deleteField();
+    subPayload.femaleAudioUrl = deleteField();
+    subPayload.mp3Female = deleteField();
   } else {
     if (cleanUrl) {
       subPayload.audioUrlMale = cleanUrl;
+      subPayload.audioUrl = cleanUrl;
     } else {
       subPayload.audioUrlMale = deleteField();
       subPayload.audioUrl = deleteField();
     }
+    subPayload.mp3Url = deleteField();
+    subPayload.maleAudioUrl = deleteField();
+    subPayload.audio = deleteField();
   }
 
   const chNumId = String(chapter.number);
@@ -4219,6 +4226,15 @@ export async function updateChapterAudioUrlInFirestore(
   }
 
   // 2. Đồng bộ trong mảng mục lục chapters và cờ hasMaleAudio / hasFemaleAudio / bộ đếm MP3 trên root doc novels/{novelId}
+  let syncedMetaPatch:
+    | {
+        mp3NamMinhCount?: number;
+        mp3HangNgaCount?: number;
+        hasMaleAudio?: boolean;
+        hasFemaleAudio?: boolean;
+        hasAudio?: boolean;
+      }
+    | undefined;
   try {
     const novelRef = doc(db, 'novels', novelId);
     const novelSnap = await getDoc(novelRef);
@@ -4237,13 +4253,19 @@ export async function updateChapterAudioUrlInFirestore(
             } else {
               delete nextEntry.audioUrlFemale;
             }
+            delete nextEntry.femaleAudioUrl;
+            delete nextEntry.mp3Female;
           } else {
             if (cleanUrl) {
               nextEntry.audioUrlMale = cleanUrl;
+              nextEntry.audioUrl = cleanUrl;
             } else {
               delete nextEntry.audioUrlMale;
               delete nextEntry.audioUrl;
             }
+            delete nextEntry.mp3Url;
+            delete nextEntry.maleAudioUrl;
+            delete nextEntry.audio;
           }
           return cleanUndefinedFields(nextEntry);
         });
@@ -4255,15 +4277,18 @@ export async function updateChapterAudioUrlInFirestore(
           else flags.hasMaleAudio = true;
           flags.hasAudio = true;
         }
+        syncedMetaPatch = {
+          hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
+          hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
+          hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
+          mp3NamMinhCount: resolvedMaleCount,
+          mp3HangNgaCount: resolvedFemaleCount,
+        };
         await setDoc(
           novelRef,
           {
             chapters: updatedChapters,
-            hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
-            hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
-            hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
-            mp3NamMinhCount: resolvedMaleCount,
-            mp3HangNgaCount: resolvedFemaleCount,
+            ...syncedMetaPatch,
             updatedAt: nowTs,
           },
           { merge: true }
@@ -4284,11 +4309,40 @@ export async function updateChapterAudioUrlInFirestore(
           }
           if (cleanUrl) nextFlags.hasAudio = true;
         }
+        syncedMetaPatch = {
+          ...(typeof nextFlags.mp3NamMinhCount === 'number'
+            ? { mp3NamMinhCount: nextFlags.mp3NamMinhCount }
+            : {}),
+          ...(typeof nextFlags.mp3HangNgaCount === 'number'
+            ? { mp3HangNgaCount: nextFlags.mp3HangNgaCount }
+            : {}),
+          ...(typeof nextFlags.hasMaleAudio === 'boolean'
+            ? { hasMaleAudio: nextFlags.hasMaleAudio }
+            : {}),
+          ...(typeof nextFlags.hasFemaleAudio === 'boolean'
+            ? { hasFemaleAudio: nextFlags.hasFemaleAudio }
+            : {}),
+          ...(typeof nextFlags.hasAudio === 'boolean' ? { hasAudio: nextFlags.hasAudio } : {}),
+        };
         await setDoc(novelRef, nextFlags, { merge: true });
       }
     }
-    // Xóa cache chi tiết chương này và cache danh sách truyện để trang đọc nhận link MP3 mới nhất ngay lập tức
-    clearChapterAudioCache(novelId, [{ id: chapter.id, number: chapter.number }]);
+    // Cập nhật trực tiếp link mới vào cache localStorage/sessionStorage (0 Reads phát sinh)
+    syncChapterAudioInStorageCache(
+      novelId,
+      [
+        {
+          id: chapter.id,
+          number: chapter.number,
+          updateMale: voice === 'male',
+          updateFemale: voice === 'female',
+          ...(voice === 'male'
+            ? { audioUrlMale: cleanUrl || null, audioUrl: cleanUrl || null }
+            : { audioUrlFemale: cleanUrl || null }),
+        },
+      ],
+      syncedMetaPatch
+    );
   } catch (err) {
     console.warn('Lỗi đồng bộ liên kết audio lên mục lục truyện:', err);
   }
@@ -4371,10 +4425,14 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         const cleanMale = typeof item.audioUrlMale === 'string' ? item.audioUrlMale.trim() : '';
         if (cleanMale) {
           subPayload.audioUrlMale = cleanMale;
+          subPayload.audioUrl = cleanMale;
         } else {
           subPayload.audioUrlMale = deleteField();
           subPayload.audioUrl = deleteField();
         }
+        subPayload.mp3Url = deleteField();
+        subPayload.maleAudioUrl = deleteField();
+        subPayload.audio = deleteField();
       }
 
       if (item.audioUrlFemale !== undefined) {
@@ -4385,6 +4443,8 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         } else {
           subPayload.audioUrlFemale = deleteField();
         }
+        subPayload.femaleAudioUrl = deleteField();
+        subPayload.mp3Female = deleteField();
       }
 
       batch.set(doc(db, 'novels', novelId, 'chapters', chNumId), subPayload, { merge: true });
@@ -4402,6 +4462,15 @@ export async function batchUpdateChapterAudioLinksInFirestore(
   }
 
   // 2. Đồng bộ 1 lần duy nhất lên mảng chapters và cờ + bộ đếm MP3 trên root doc novels/{novelId}
+  let syncedMetaPatch:
+    | {
+        mp3NamMinhCount?: number;
+        mp3HangNgaCount?: number;
+        hasMaleAudio?: boolean;
+        hasFemaleAudio?: boolean;
+        hasAudio?: boolean;
+      }
+    | undefined;
   const novelRef = doc(db, 'novels', novelId);
   const novelSnap = await getDoc(novelRef);
   if (novelSnap.exists()) {
@@ -4419,10 +4488,14 @@ export async function batchUpdateChapterAudioLinksInFirestore(
             typeof match.audioUrlMale === 'string' ? match.audioUrlMale.trim() : '';
           if (cleanMale) {
             nextEntry.audioUrlMale = cleanMale;
+            nextEntry.audioUrl = cleanMale;
           } else {
             delete nextEntry.audioUrlMale;
             delete nextEntry.audioUrl;
           }
+          delete nextEntry.mp3Url;
+          delete nextEntry.maleAudioUrl;
+          delete nextEntry.audio;
         }
         if (match.audioUrlFemale !== undefined) {
           const cleanFemale =
@@ -4432,6 +4505,8 @@ export async function batchUpdateChapterAudioLinksInFirestore(
           } else {
             delete nextEntry.audioUrlFemale;
           }
+          delete nextEntry.femaleAudioUrl;
+          delete nextEntry.mp3Female;
         }
         return cleanUndefinedFields(nextEntry);
       });
@@ -4454,16 +4529,20 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         flags.hasAudio = true;
       }
 
+      syncedMetaPatch = {
+        hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
+        hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
+        hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
+        mp3NamMinhCount: resolvedMaleCount,
+        mp3HangNgaCount: resolvedFemaleCount,
+      };
+
       await withTimeout(
         setDoc(
           novelRef,
           {
             chapters: updatedChapters,
-            hasMaleAudio: flags.hasMaleAudio || resolvedMaleCount > 0,
-            hasFemaleAudio: flags.hasFemaleAudio || resolvedFemaleCount > 0,
-            hasAudio: flags.hasAudio || resolvedMaleCount > 0 || resolvedFemaleCount > 0,
-            mp3NamMinhCount: resolvedMaleCount,
-            mp3HangNgaCount: resolvedFemaleCount,
+            ...syncedMetaPatch,
             updatedAt: nowTs,
           },
           { merge: true }
@@ -4490,6 +4569,21 @@ export async function batchUpdateChapterAudioLinksInFirestore(
         if (anyFemaleAdded) patchFlags.hasFemaleAudio = true;
         if (anyMaleAdded || anyFemaleAdded) patchFlags.hasAudio = true;
       }
+      syncedMetaPatch = {
+        ...(typeof patchFlags.mp3NamMinhCount === 'number'
+          ? { mp3NamMinhCount: patchFlags.mp3NamMinhCount }
+          : {}),
+        ...(typeof patchFlags.mp3HangNgaCount === 'number'
+          ? { mp3HangNgaCount: patchFlags.mp3HangNgaCount }
+          : {}),
+        ...(typeof patchFlags.hasMaleAudio === 'boolean'
+          ? { hasMaleAudio: patchFlags.hasMaleAudio }
+          : {}),
+        ...(typeof patchFlags.hasFemaleAudio === 'boolean'
+          ? { hasFemaleAudio: patchFlags.hasFemaleAudio }
+          : {}),
+        ...(typeof patchFlags.hasAudio === 'boolean' ? { hasAudio: patchFlags.hasAudio } : {}),
+      };
       await withTimeout(
         setDoc(novelRef, patchFlags, { merge: true }),
         15000,
@@ -4498,10 +4592,36 @@ export async function batchUpdateChapterAudioLinksInFirestore(
     }
   }
 
-  // Xóa cache chi tiết của các chương vừa đổi link & làm mới cache truyện để trình phát đọc link mới ngay lập tức
-  clearChapterAudioCache(
+  // Cập nhật trực tiếp link mới vào cache localStorage & sessionStorage của bộ truyện (0 Reads phát sinh)
+  syncChapterAudioInStorageCache(
     novelId,
-    validItems.map((item) => ({ id: item.chapter.id, number: item.chapter.number }))
+    validItems.map((item) => ({
+      id: item.chapter.id,
+      number: item.chapter.number,
+      updateMale: item.audioUrlMale !== undefined,
+      updateFemale: item.audioUrlFemale !== undefined,
+      ...(item.audioUrlMale !== undefined
+        ? {
+            audioUrlMale:
+              typeof item.audioUrlMale === 'string' && item.audioUrlMale.trim()
+                ? item.audioUrlMale.trim()
+                : null,
+            audioUrl:
+              typeof item.audioUrlMale === 'string' && item.audioUrlMale.trim()
+                ? item.audioUrlMale.trim()
+                : null,
+          }
+        : {}),
+      ...(item.audioUrlFemale !== undefined
+        ? {
+            audioUrlFemale:
+              typeof item.audioUrlFemale === 'string' && item.audioUrlFemale.trim()
+                ? item.audioUrlFemale.trim()
+                : null,
+          }
+        : {}),
+    })),
+    syncedMetaPatch
   );
 }
 

@@ -1537,6 +1537,11 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                               audioUrl: links.audioUrl,
                               audioUrlMale: links.audioUrlMale,
                               audioUrlFemale: links.audioUrlFemale,
+                              mp3Url: links.mp3Url,
+                              maleAudioUrl: links.maleAudioUrl,
+                              audio: links.audio,
+                              femaleAudioUrl: links.femaleAudioUrl,
+                              mp3Female: links.mp3Female,
                             };
                             setChapters((prev) =>
                               (prev || []).map((item) =>
@@ -1547,6 +1552,11 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                                       audioUrl: links.audioUrl,
                                       audioUrlMale: links.audioUrlMale,
                                       audioUrlFemale: links.audioUrlFemale,
+                                      mp3Url: links.mp3Url,
+                                      maleAudioUrl: links.maleAudioUrl,
+                                      audio: links.audio,
+                                      femaleAudioUrl: links.femaleAudioUrl,
+                                      mp3Female: links.mp3Female,
                                     }
                                   : item
                               )

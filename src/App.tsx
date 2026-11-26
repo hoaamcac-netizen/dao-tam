@@ -170,7 +170,7 @@ import {
   getCachedNovelsIfFresh,
   isGenresCacheFresh,
   markGenresCacheFresh,
-  clearChapterAudioCache,
+  syncChapterAudioInStorageCache,
   makeChapterCacheKey,
   makeChapterCacheTsKey,
   clearNovelsStorageCache,
@@ -2990,8 +2990,6 @@ function DaoTamApp() {
 
   // Đồng bộ tức thì tất cả các trường link MP3 + cờ hasMaleAudio / hasFemaleAudio của 1 chương vào state của App
   const handleChapterAudioUpdated = (novelId: string, updatedChapter: Chapter) => {
-    clearChapterAudioCache(novelId, [{ id: updatedChapter.id, number: updatedChapter.number }]);
-
     const cleanOpt = (v?: string) =>
       typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 
@@ -3006,6 +3004,18 @@ function DaoTamApp() {
       femaleAudioUrl: cleanOpt(updatedChapter.femaleAudioUrl),
       mp3Female: cleanOpt(updatedChapter.mp3Female),
     };
+
+    syncChapterAudioInStorageCache(novelId, [
+      {
+        id: cleanUpdatedChapter.id,
+        number: cleanUpdatedChapter.number,
+        updateMale: true,
+        updateFemale: true,
+        audioUrl: cleanUpdatedChapter.audioUrl || cleanUpdatedChapter.audioUrlMale || null,
+        audioUrlMale: cleanUpdatedChapter.audioUrlMale || cleanUpdatedChapter.audioUrl || null,
+        audioUrlFemale: cleanUpdatedChapter.audioUrlFemale || null,
+      },
+    ]);
 
     const mergeAudioFields = (c: Chapter): Chapter => ({
       ...c,
@@ -3095,11 +3105,6 @@ function DaoTamApp() {
   const handleBatchChaptersAudioUpdated = (novelId: string, updatedChapters: Chapter[]) => {
     if (!Array.isArray(updatedChapters) || updatedChapters.length === 0) return;
 
-    clearChapterAudioCache(
-      novelId,
-      updatedChapters.map((c) => ({ id: c.id, number: c.number }))
-    );
-
     const cleanOpt = (v?: string) =>
       typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 
@@ -3114,6 +3119,19 @@ function DaoTamApp() {
       femaleAudioUrl: cleanOpt(ch.femaleAudioUrl),
       mp3Female: cleanOpt(ch.mp3Female),
     }));
+
+    syncChapterAudioInStorageCache(
+      novelId,
+      cleanedChapters.map((c) => ({
+        id: c.id,
+        number: c.number,
+        updateMale: true,
+        updateFemale: true,
+        audioUrl: c.audioUrl || c.audioUrlMale || null,
+        audioUrlMale: c.audioUrlMale || c.audioUrl || null,
+        audioUrlFemale: c.audioUrlFemale || null,
+      }))
+    );
 
     const byId = new Map<string, Chapter>();
     const byNumber = new Map<number, Chapter>();

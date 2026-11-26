@@ -526,6 +526,223 @@ export function clearChapterAudioCache(
   } catch {}
 }
 
+export interface ChapterAudioCachePatch {
+  id?: string;
+  number?: number | string;
+  audioUrl?: string | null;
+  audioUrlMale?: string | null;
+  audioUrlFemale?: string | null;
+  mp3Url?: string | null;
+  maleAudioUrl?: string | null;
+  audio?: string | null;
+  femaleAudioUrl?: string | null;
+  mp3Female?: string | null;
+  updateMale?: boolean;
+  updateFemale?: boolean;
+}
+
+export interface NovelAudioMetaCachePatch {
+  mp3NamMinhCount?: number;
+  mp3HangNgaCount?: number;
+  hasMaleAudio?: boolean;
+  hasFemaleAudio?: boolean;
+  hasAudio?: boolean;
+}
+
+/**
+ * Cập nhật/làm mới trực tiếp link MP3 vào cache localStorage & sessionStorage của bộ truyện
+ * (không xóa timestamp cache danh sách truyện, tránh buộc đọc lại toàn bộ Firestore).
+ */
+export function syncChapterAudioInStorageCache(
+  novelId: string,
+  patches: ChapterAudioCachePatch[],
+  novelMetaPatch?: NovelAudioMetaCachePatch
+): void {
+  if (!novelId || typeof window === 'undefined') return;
+
+  const nowTs = Date.now();
+  const tsStr = String(nowTs);
+  const legacyPrefixes = [
+    'chapter_full_',
+    'chapter_full_ts_',
+    'chapter_full_v2_',
+    'chapter_full_ts_v2_',
+    'chapter_full_v3_',
+    'chapter_full_ts_v3_',
+  ];
+
+  const applyPatchToRecord = (
+    record: Record<string, any>,
+    patch: ChapterAudioCachePatch
+  ): Record<string, any> => {
+    const next: Record<string, any> = { ...record, cachedAt: nowTs };
+    const shouldUpdateMale =
+      patch.updateMale === true ||
+      patch.audioUrlMale !== undefined ||
+      patch.audioUrl !== undefined;
+    const shouldUpdateFemale =
+      patch.updateFemale === true || patch.audioUrlFemale !== undefined;
+
+    if (shouldUpdateMale) {
+      const cleanMale =
+        typeof patch.audioUrlMale === 'string' && patch.audioUrlMale.trim()
+          ? patch.audioUrlMale.trim()
+          : typeof patch.audioUrl === 'string' && patch.audioUrl.trim()
+          ? patch.audioUrl.trim()
+          : '';
+      if (cleanMale) {
+        next.audioUrlMale = cleanMale;
+        next.audioUrl = cleanMale;
+      } else {
+        delete next.audioUrlMale;
+        delete next.audioUrl;
+      }
+      delete next.mp3Url;
+      delete next.maleAudioUrl;
+      delete next.audio;
+    }
+
+    if (shouldUpdateFemale) {
+      const cleanFemale =
+        typeof patch.audioUrlFemale === 'string' && patch.audioUrlFemale.trim()
+          ? patch.audioUrlFemale.trim()
+          : '';
+      if (cleanFemale) {
+        next.audioUrlFemale = cleanFemale;
+      } else {
+        delete next.audioUrlFemale;
+      }
+      delete next.femaleAudioUrl;
+      delete next.mp3Female;
+    }
+
+    return next;
+  };
+
+  const patchSingleStorageKey = (
+    storageType: 'local' | 'session',
+    dataKey: string,
+    tsKey: string,
+    patch: ChapterAudioCachePatch
+  ) => {
+    const raw = storageType === 'local' ? safeGetItem(dataKey) : safeSessionGetItem(dataKey);
+    if (!raw) return;
+    if (raw.trim().startsWith('{')) {
+      const parsed = safeJsonParse<Record<string, any> | null>(raw, null);
+      if (parsed && typeof parsed === 'object') {
+        const updated = applyPatchToRecord(parsed, patch);
+        const serialized = JSON.stringify(updated);
+        if (storageType === 'local') {
+          safeSetItem(dataKey, serialized);
+          safeSetItem(tsKey, tsStr);
+        } else {
+          safeSessionSetItem(dataKey, serialized);
+          safeSessionSetItem(tsKey, tsStr);
+        }
+        return;
+      }
+    }
+    // Xóa cache định dạng cũ không tương thích để tránh giữ link cũ
+    if (storageType === 'local') {
+      safeRemoveItem(dataKey);
+      safeRemoveItem(tsKey);
+    } else {
+      safeSessionRemoveItem(dataKey);
+      safeSessionRemoveItem(tsKey);
+    }
+  };
+
+  try {
+    if (Array.isArray(patches) && patches.length > 0) {
+      for (const patch of patches) {
+        if (!patch) continue;
+        const keys: string[] = [];
+        if (
+          patch.number !== undefined &&
+          patch.number !== null &&
+          String(patch.number).trim() !== ''
+        ) {
+          keys.push(String(patch.number).trim());
+        }
+        if (patch.id && String(patch.id).trim() !== '') {
+          const idKey = String(patch.id).trim();
+          if (!keys.includes(idKey)) keys.push(idKey);
+        }
+
+        for (const chapKey of keys) {
+          const dataKey = makeChapterCacheKey(novelId, chapKey);
+          const tsKey = makeChapterCacheTsKey(novelId, chapKey);
+          patchSingleStorageKey('local', dataKey, tsKey, patch);
+          patchSingleStorageKey('session', dataKey, tsKey, patch);
+
+          // Dọn sạch các key cache đời cũ (v1/v2/v3) & sessionStorage cũ của chương này
+          for (const prefix of legacyPrefixes) {
+            safeRemoveItem(`${prefix}${novelId}_${chapKey}`);
+            safeSessionRemoveItem(`${prefix}${novelId}_${chapKey}`);
+          }
+          safeSessionRemoveItem(`daotam_chapter_${novelId}_${chapKey}`);
+        }
+      }
+    }
+
+    // Cập nhật trực tiếp metadata MP3 của bộ truyện trong dao_tam_novels (localStorage) mà KHÔNG hủy TTL
+    if (novelMetaPatch) {
+      const rawNovels = safeGetItem(NOVELS_CACHE_KEY);
+      if (rawNovels) {
+        const parsedNovels = safeJsonParse<any[]>(rawNovels, []);
+        if (Array.isArray(parsedNovels) && parsedNovels.length > 0) {
+          let changed = false;
+          const nextNovels = parsedNovels.map((n) => {
+            if (!n || n.id !== novelId) return n;
+            changed = true;
+            return {
+              ...n,
+              ...(typeof novelMetaPatch.mp3NamMinhCount === 'number'
+                ? { mp3NamMinhCount: Math.max(0, novelMetaPatch.mp3NamMinhCount) }
+                : {}),
+              ...(typeof novelMetaPatch.mp3HangNgaCount === 'number'
+                ? { mp3HangNgaCount: Math.max(0, novelMetaPatch.mp3HangNgaCount) }
+                : {}),
+              ...(typeof novelMetaPatch.hasMaleAudio === 'boolean'
+                ? { hasMaleAudio: novelMetaPatch.hasMaleAudio }
+                : {}),
+              ...(typeof novelMetaPatch.hasFemaleAudio === 'boolean'
+                ? { hasFemaleAudio: novelMetaPatch.hasFemaleAudio }
+                : {}),
+              ...(typeof novelMetaPatch.hasAudio === 'boolean'
+                ? { hasAudio: novelMetaPatch.hasAudio }
+                : {}),
+              updatedAt: nowTs,
+            };
+          });
+          if (changed) {
+            safeSetItem(NOVELS_CACHE_KEY, JSON.stringify(nextNovels));
+            safeSetItem(NOVELS_CACHE_TS_KEY, tsStr);
+          }
+        }
+      }
+
+      // Đồng bộ nếu sessionStorage cũng có bản sao danh sách truyện
+      const rawSessionNovels = safeSessionGetItem(NOVELS_CACHE_KEY);
+      if (rawSessionNovels) {
+        const parsedSession = safeJsonParse<any[]>(rawSessionNovels, []);
+        if (Array.isArray(parsedSession) && parsedSession.length > 0) {
+          const nextSession = parsedSession.map((n) =>
+            n && n.id === novelId
+              ? {
+                  ...n,
+                  ...novelMetaPatch,
+                  updatedAt: nowTs,
+                }
+              : n
+          );
+          safeSessionSetItem(NOVELS_CACHE_KEY, JSON.stringify(nextSession));
+        }
+      }
+    }
+  } catch {}
+}
+
 export function isGenresCacheFresh(ttlMs: number = NOVELS_CACHE_TTL_MS): boolean {
   if (typeof window === 'undefined') return false;
   try {
