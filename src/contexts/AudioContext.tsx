@@ -335,6 +335,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const chunksRef = useRef<QueuedAudioChunk[]>([]);
   const voiceIdRef = useRef<string>('vi-VN-NamMinhNeural');
   const preferredVoiceIdRef = useRef<string>('vi-VN-NamMinhNeural');
+  const isUserExplicitDeviceVoiceRef = useRef<boolean>(false);
   const playbackRateRef = useRef<number>(1.0);
   const autoNextRef = useRef<boolean>(true);
   const activeNovelRef = useRef<Novel | null>(null);
@@ -698,9 +699,16 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const stored = safeGetItem('daotam_reader_settings');
       if (stored) {
         const parsed = JSON.parse(stored);
-        const resolvedVoice = normalizeEdgeVoiceId(
+        const rawVoice = normalizeEdgeVoiceId(
           parsed.selectedVoiceId || 'vi-VN-NamMinhNeural'
         );
+        const explicitDevice =
+          isDeviceFallbackVoice(rawVoice) && parsed.selectedVoiceExplicitDevice === true;
+        const resolvedVoice = explicitDevice
+          ? 'device-fallback'
+          : isDeviceFallbackVoice(rawVoice)
+          ? 'vi-VN-NamMinhNeural'
+          : rawVoice;
         if (!Number.isFinite(resolvedSpeed)) {
           const parsedSpeed = Number(parsed.voiceSpeed);
           resolvedSpeed =
@@ -710,6 +718,7 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
         const resolvedAutoNext =
           parsed.autoNextChapter !== undefined ? Boolean(parsed.autoNextChapter) : true;
+        isUserExplicitDeviceVoiceRef.current = explicitDevice;
         setVoiceIdState(resolvedVoice);
         voiceIdRef.current = resolvedVoice;
         preferredVoiceIdRef.current = resolvedVoice;
@@ -725,6 +734,16 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setIsBarVisibleState(true);
       }
     } catch {}
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.getVoices();
+      } catch {}
+      return subscribeBrowserVoicesChanged(() => {
+        const best = getMatchingBrowserVoice();
+        if (best) selectedBrowserVoiceRef.current = best;
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -2411,6 +2430,8 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const setVoiceId = useCallback(
     (newVoice: string) => {
       const normalized = normalizeEdgeVoiceId(newVoice);
+      const isExplicitDevice = isDeviceFallbackVoice(normalized);
+      isUserExplicitDeviceVoiceRef.current = isExplicitDevice;
       preferredVoiceIdRef.current = normalized;
       setVoiceIdState(normalized);
       voiceIdRef.current = normalized;
@@ -2423,7 +2444,11 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const parsed = stored ? JSON.parse(stored) : {};
         safeSetItem(
           'daotam_reader_settings',
-          JSON.stringify({ ...parsed, selectedVoiceId: normalized })
+          JSON.stringify({
+            ...parsed,
+            selectedVoiceId: normalized,
+            selectedVoiceExplicitDevice: isExplicitDevice,
+          })
         );
       } catch {}
 
@@ -2639,15 +2664,32 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
       let resolvedVoice = resolveEffectiveVoiceForNovel(
         preferredVoiceIdRef.current,
-        initialAvailability
+        initialAvailability,
+        effectiveChapter,
+        { isUserExplicitDevice: isUserExplicitDeviceVoiceRef.current, chapterLinksLoaded: false }
       );
       if (voiceIdRef.current !== resolvedVoice) {
         voiceIdRef.current = resolvedVoice;
         setVoiceIdState(resolvedVoice);
       }
       let directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, resolvedVoice);
+      if (!directAudioUrl && !isUserExplicitDeviceVoiceRef.current) {
+        const maleUrl = resolveChapterVoiceAudioUrl(effectiveChapter, 'vi-VN-NamMinhNeural');
+        const femaleUrl = resolveChapterVoiceAudioUrl(effectiveChapter, 'vi-VN-HoaiMyNeural');
+        if (maleUrl) {
+          resolvedVoice = 'vi-VN-NamMinhNeural';
+          directAudioUrl = maleUrl;
+        } else if (femaleUrl) {
+          resolvedVoice = 'vi-VN-HoaiMyNeural';
+          directAudioUrl = femaleUrl;
+        }
+        if (voiceIdRef.current !== resolvedVoice) {
+          voiceIdRef.current = resolvedVoice;
+          setVoiceIdState(resolvedVoice);
+        }
+      }
       const preferredMissingOnChapter =
-        !isDeviceFallbackVoice(preferredVoiceIdRef.current) &&
+        !isUserExplicitDeviceVoiceRef.current &&
         !resolveChapterVoiceAudioUrl(effectiveChapter, preferredVoiceIdRef.current);
       let effectiveNovel: Novel = novel;
 
@@ -2693,22 +2735,24 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   updatedLinks = true;
                 }
               }
-              if (updatedLinks) {
-                const refreshedAvailability = getNovelVoiceAvailability(
-                  novel,
-                  chaptersListRef.current,
-                  effectiveChapter
-                );
-                resolvedVoice = resolveEffectiveVoiceForNovel(
-                  preferredVoiceIdRef.current,
-                  refreshedAvailability
-                );
-                if (voiceIdRef.current !== resolvedVoice) {
-                  voiceIdRef.current = resolvedVoice;
-                  setVoiceIdState(resolvedVoice);
-                }
-                directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, resolvedVoice);
+              const refreshedAvailability = getNovelVoiceAvailability(
+                novel,
+                chaptersListRef.current,
+                effectiveChapter
+              );
+              resolvedVoice = resolveEffectiveVoiceForNovel(
+                preferredVoiceIdRef.current,
+                refreshedAvailability,
+                effectiveChapter,
+                { isUserExplicitDevice: isUserExplicitDeviceVoiceRef.current, chapterLinksLoaded: true }
+              );
+              if (voiceIdRef.current !== resolvedVoice) {
+                voiceIdRef.current = resolvedVoice;
+                setVoiceIdState(resolvedVoice);
+              }
+              directAudioUrl = resolveChapterVoiceAudioUrl(effectiveChapter, resolvedVoice);
 
+              if (updatedLinks) {
                 if (
                   (refreshedAvailability.hasMaleMp3 && !novel.hasMaleAudio) ||
                   (refreshedAvailability.hasFemaleMp3 && !novel.hasFemaleAudio)
@@ -2763,15 +2807,13 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setMp3CurrentTime(0);
         setMp3Duration(0);
 
-        if (isDeviceFallbackVoice(resolvedVoice)) {
-          setFallbackNotice(null);
-        } else {
-          const missingVoiceLabel =
-            resolvedVoice === 'vi-VN-HoaiMyNeural' ? 'Hằng Nga' : 'Nam Minh';
-          setFallbackNotice(
-            `Chương ${effectiveChapter.number} chưa có link MP3 ${missingVoiceLabel} — đang đọc bằng Giọng Máy`
-          );
+        // Chương này chưa có cả MP3 Nam Minh lẫn Hằng Nga -> chuyển sang Giọng Máy
+        if (!isDeviceFallbackVoice(resolvedVoice)) {
+          resolvedVoice = 'device-fallback';
+          voiceIdRef.current = 'device-fallback';
+          setVoiceIdState('device-fallback');
         }
+        setFallbackNotice(null);
 
         let parsedChunks = preparedChaptersRef.current.get(chapterRequestKey);
 
@@ -2832,7 +2874,9 @@ export const AudioProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     );
                     const refreshedVoice = resolveEffectiveVoiceForNovel(
                       preferredVoiceIdRef.current,
-                      refreshedAvailability
+                      refreshedAvailability,
+                      effectiveChapter,
+                      { isUserExplicitDevice: isUserExplicitDeviceVoiceRef.current, chapterLinksLoaded: true }
                     );
                     if (voiceIdRef.current !== refreshedVoice) {
                       voiceIdRef.current = refreshedVoice;

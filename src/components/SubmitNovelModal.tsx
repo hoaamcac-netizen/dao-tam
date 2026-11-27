@@ -20,8 +20,10 @@ import {
   AlertCircle,
   AlertTriangle,
   Lock,
-  FileText
+  FileText,
+  Youtube
 } from 'lucide-react';
+import { extractYouTubeVideoId } from '../utils/youtube';
 
 interface SubmitNovelModalProps {
   isOpen: boolean;
@@ -46,6 +48,8 @@ interface SubmitNovelModalProps {
     totalExpectedChapters?: number;
     isOriginal?: boolean;
     isShortStory?: boolean;
+    youtubeVideoId?: string;
+    isYoutubeVipLocked?: boolean;
     isSensitive?: boolean;
     status?: 'Hoàn thành' | 'Đang ra';
     scheduledPublishAt?: number;
@@ -134,6 +138,10 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
   const [isExclusive, setIsExclusive] = useState<boolean>(false);
   const [isOriginal, setIsOriginal] = useState(false); // Toggle Truyện sáng tác
   const [isShortStory, setIsShortStory] = useState<boolean>(false); // Toggle Truyện ngắn / đoản văn
+  const [youtubeUrlInput, setYoutubeUrlInput] = useState<string>('');
+  const [youtubeVideoId, setYoutubeVideoId] = useState<string>('');
+  const [youtubeError, setYoutubeError] = useState<string | null>(null);
+  const [isYoutubeVipLocked, setIsYoutubeVipLocked] = useState<boolean>(false);
   const [description, setDescription] = useState('');
   const [isCompleted, setIsCompleted] = useState(false); // Toggle Đã bộ / Hoàn thành
   const [coverImage, setCoverImage] = useState<string>('');
@@ -321,6 +329,18 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
 
     const finalCover = coverImage || coverUrlInput.trim() || 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&w=600&q=80';
 
+    let finalYoutubeVideoId = '';
+    if (isShortStory && youtubeUrlInput.trim()) {
+      const ytRes = extractYouTubeVideoId(youtubeUrlInput);
+      if (!ytRes.videoId) {
+        const msg = ytRes.error || 'Link YouTube không hợp lệ.';
+        setYoutubeError(msg);
+        setSubmitError(msg);
+        return;
+      }
+      finalYoutubeVideoId = ytRes.videoId;
+    }
+
     let scheduledTimestamp: number | undefined = undefined;
     if (scheduledPublishAt) {
       const parsedTime = new Date(scheduledPublishAt).getTime();
@@ -355,6 +375,8 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
         mainCategory,
         isOriginal,
         isShortStory,
+        youtubeVideoId: isShortStory ? finalYoutubeVideoId : '',
+        isYoutubeVipLocked: isShortStory ? isYoutubeVipLocked : false,
         isSensitive,
         status: isCompleted ? 'Hoàn thành' : 'Đang ra',
         publishStatus: 'published',
@@ -403,6 +425,8 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
           totalExpectedChapters: 100,
           isOriginal,
           isShortStory,
+          youtubeVideoId: isShortStory ? finalYoutubeVideoId : '',
+          isYoutubeVipLocked: isShortStory ? isYoutubeVipLocked : false,
           isSensitive,
           status: isCompleted ? 'Hoàn thành' : 'Đang ra',
           scheduledPublishAt: scheduledTimestamp,
@@ -424,6 +448,10 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
         setChapters([]);
         setManuscriptText('');
         setIsShortStory(false);
+        setYoutubeUrlInput('');
+        setYoutubeVideoId('');
+        setYoutubeError(null);
+        setIsYoutubeVipLocked(false);
       }
 
       setTimeout(() => {
@@ -716,6 +744,78 @@ export const SubmitNovelModal: React.FC<SubmitNovelModalProps> = ({
                   <div className="w-11 h-6 bg-slate-200 dark:bg-slate-700 dark:border dark:border-white peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-pink-600"></div>
                 </label>
               </div>
+
+              {isShortStory && (
+                <div className="p-4 rounded-xl bg-rose-50/70 dark:bg-slate-800/80 border border-rose-200 dark:border-rose-900/60 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Youtube className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+                    <span className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                      Audio / Video YouTube cho Truyện Ngắn
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+                      Link chia sẻ YouTube (hỗ trợ mọi định dạng link YouTube)
+                    </label>
+                    <input
+                      type="text"
+                      value={youtubeUrlInput}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setYoutubeUrlInput(val);
+                        if (!val.trim()) {
+                          setYoutubeVideoId('');
+                          setYoutubeError(null);
+                          return;
+                        }
+                        const res = extractYouTubeVideoId(val);
+                        if (res.videoId) {
+                          setYoutubeVideoId(res.videoId);
+                          setYoutubeError(null);
+                        } else {
+                          setYoutubeVideoId('');
+                          setYoutubeError(res.error || 'Link YouTube không hợp lệ.');
+                        }
+                      }}
+                      placeholder="https://youtu.be/... hoặc https://www.youtube.com/watch?v=..."
+                      className="w-full min-h-[44px] px-3.5 py-2 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-xs sm:text-sm text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:border-rose-500"
+                    />
+                    {youtubeVideoId && !youtubeError && (
+                      <div className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700 dark:text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>Đã nhận diện Video ID: {youtubeVideoId}</span>
+                      </div>
+                    )}
+                    {youtubeError && (
+                      <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>{youtubeError}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 pt-2 border-t border-rose-200/70 dark:border-slate-700">
+                    <div className="min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-800 dark:text-slate-100 block">
+                        Khóa VIP Audio YouTube
+                      </span>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                        Mặc định TẮT (miễn phí cho mọi người nghe vì có quảng cáo YouTube; có thể gạt BẬT để khóa VIP)
+                      </p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={isYoutubeVipLocked}
+                        onChange={(e) => setIsYoutubeVipLocked(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-slate-200 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-600"></div>
+                    </label>
+                  </div>
+                </div>
+              )}
 
               {/* Mô tả truyện */}
               <div>

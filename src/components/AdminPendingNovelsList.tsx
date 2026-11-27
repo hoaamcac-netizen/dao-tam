@@ -23,7 +23,8 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
-  RefreshCw
+  RefreshCw,
+  Youtube
 } from 'lucide-react';
 
 export interface AdminPendingNovelsListProps {
@@ -343,6 +344,25 @@ export const AdminPendingNovelsList: React.FC<AdminPendingNovelsListProps> = ({
                     <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
                       {novel.mainCategory}
                     </span>
+
+                    {novel.isShortStory && (
+                      <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200">
+                        Truyện Ngắn
+                      </span>
+                    )}
+
+                    {novel.isShortStory && novel.youtubeVideoId && (
+                      <span
+                        className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border flex items-center gap-1 ${
+                          novel.isYoutubeVipLocked
+                            ? 'bg-amber-50 text-amber-800 border-amber-200'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}
+                      >
+                        <Youtube className="w-3 h-3" />
+                        {novel.isYoutubeVipLocked ? 'YouTube VIP' : 'YouTube FREE'}
+                      </span>
+                    )}
 
                     <span className="text-[10px] font-black px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-300 flex items-center gap-1">
                       <Clock className="w-3 h-3 text-amber-600" />

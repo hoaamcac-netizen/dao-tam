@@ -463,16 +463,40 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
   ]);
 
   const effectiveReaderVoiceId = useMemo(() => {
-    const baseVoice =
-      audioContext.activeNovel?.id === novel.id
-        ? audioContext.voiceId
-        : readerSettings.selectedVoiceId;
-    return resolveEffectiveVoiceForNovel(baseVoice, readerVoiceAvailability);
+    void chapterAudioMetaTick;
+    const isCurrentActiveNovel = audioContext.activeNovel?.id === novel.id;
+    const baseVoice = isCurrentActiveNovel
+      ? audioContext.voiceId
+      : readerSettings.selectedVoiceId;
+    const mergedChapter: Chapter =
+      isCurrentChapterAudio && audioContext.activeChapter
+        ? {
+            ...chapter,
+            audioUrl: chapter.audioUrl || audioContext.activeChapter.audioUrl,
+            audioUrlMale: chapter.audioUrlMale || audioContext.activeChapter.audioUrlMale,
+            audioUrlFemale: chapter.audioUrlFemale || audioContext.activeChapter.audioUrlFemale,
+            mp3Url: chapter.mp3Url || audioContext.activeChapter.mp3Url,
+            maleAudioUrl: chapter.maleAudioUrl || audioContext.activeChapter.maleAudioUrl,
+            audio: chapter.audio || audioContext.activeChapter.audio,
+            femaleAudioUrl: chapter.femaleAudioUrl || audioContext.activeChapter.femaleAudioUrl,
+            mp3Female: chapter.mp3Female || audioContext.activeChapter.mp3Female,
+          }
+        : chapter;
+    return resolveEffectiveVoiceForNovel(baseVoice, readerVoiceAvailability, mergedChapter, {
+      isUserExplicitDevice: Boolean(readerSettings.selectedVoiceExplicitDevice),
+      chapterLinksLoaded: !isLoadingFullContent,
+    });
   }, [
     audioContext.activeNovel?.id,
+    audioContext.activeChapter,
     audioContext.voiceId,
     novel.id,
+    chapter,
+    isCurrentChapterAudio,
+    isLoadingFullContent,
+    chapterAudioMetaTick,
     readerSettings.selectedVoiceId,
+    readerSettings.selectedVoiceExplicitDevice,
     readerVoiceAvailability,
   ]);
 
@@ -678,8 +702,13 @@ export const ChapterReader: React.FC<ChapterReaderProps> = ({
 
   const handleChangeVoice = (newVoiceId: string) => {
     const normalized = normalizeEdgeVoiceId(newVoiceId);
+    const isExplicitDevice = normalized === 'device-fallback';
     setReaderSettings((prev) => {
-      const updated = { ...prev, selectedVoiceId: normalized };
+      const updated = {
+        ...prev,
+        selectedVoiceId: normalized,
+        selectedVoiceExplicitDevice: isExplicitDevice,
+      };
       safeSetItem('daotam_reader_settings', JSON.stringify(updated));
       return updated;
     });

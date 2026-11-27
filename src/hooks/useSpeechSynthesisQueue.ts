@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { splitTextIntoSpeechChunks } from '../utils/audioChunker';
-import { getMatchingBrowserVoice } from '../utils/rulesAndVoices';
+import { getMatchingBrowserVoice, subscribeBrowserVoicesChanged } from '../utils/rulesAndVoices';
 
 /**
  * Kích thước cửa sổ đệm (Sliding Window Buffer Size) cho Web Speech API.
@@ -109,6 +109,18 @@ export function useSpeechSynthesisQueue({
     playbackRateRef.current = initialPlaybackRate;
     setPlaybackRateState(initialPlaybackRate);
   }, [initialPlaybackRate]);
+
+  useEffect(() => {
+    if (!isSupported) return;
+    try {
+      window.speechSynthesis.getVoices();
+    } catch {}
+    return subscribeBrowserVoicesChanged(() => {
+      try {
+        window.speechSynthesis.getVoices();
+      } catch {}
+    });
+  }, [isSupported]);
 
   /**
    * Đẩy (enqueue) một chunk cụ thể vào hàng đợi window.speechSynthesis với đầy đủ Rate & Voice hiện tại
@@ -242,9 +254,35 @@ export function useSpeechSynthesisQueue({
       setIsPlaying(true);
 
       // MỞ RỘNG BUFFER: Nạp sẵn liên tiếp từ targetIndex đến targetIndex + BUFFER_SIZE - 1
-      const initialBufferEnd = Math.min(targetIndex + BUFFER_SIZE, listLen);
-      for (let idx = targetIndex; idx < initialBufferEnd; idx++) {
-        enqueueChunk(idx, nextSessionId);
+      const startBuffer = () => {
+        if (queueSessionIdRef.current !== nextSessionId || isStoppedRef.current) return;
+        const initialBufferEnd = Math.min(targetIndex + BUFFER_SIZE, listLen);
+        for (let idx = targetIndex; idx < initialBufferEnd; idx++) {
+          enqueueChunk(idx, nextSessionId);
+        }
+      };
+
+      const existingVoices = window.speechSynthesis.getVoices() || [];
+      if (existingVoices.length === 0) {
+        let settled = false;
+        let timerId: ReturnType<typeof setTimeout> | null = null;
+        const unsub = subscribeBrowserVoicesChanged(() => {
+          if ((window.speechSynthesis.getVoices() || []).length > 0 && !settled) {
+            settled = true;
+            if (timerId) clearTimeout(timerId);
+            unsub();
+            startBuffer();
+          }
+        });
+        timerId = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            unsub();
+            startBuffer();
+          }
+        }, 350);
+      } else {
+        startBuffer();
       }
     },
     [isSupported, enqueueChunk]

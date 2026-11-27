@@ -2090,6 +2090,11 @@ function DaoTamApp() {
         mainCategory: sub.mainCategory,
         isOriginal: sub.mainCategory === 'truyen-sang-tac',
         isShortStory: Boolean(sub.isShortStory),
+        youtubeVideoId:
+          sub.isShortStory && typeof sub.youtubeVideoId === 'string'
+            ? sub.youtubeVideoId.trim()
+            : '',
+        isYoutubeVipLocked: Boolean(sub.isShortStory && sub.isYoutubeVipLocked),
         status: 'Đang ra',
         publishStatus: 'published',
         isHot: true,
@@ -3234,6 +3239,51 @@ function DaoTamApp() {
         })
       );
     } catch {}
+  };
+
+  // Đồng bộ ngay cấu hình YouTube Truyện Ngắn khi Admin cập nhật (0 Reads phát sinh)
+  const handleUpdateNovelYoutubeSettings = (
+    novelId: string,
+    payload: {
+      isShortStory: boolean;
+      youtubeVideoId: string;
+      isYoutubeVipLocked: boolean;
+    }
+  ) => {
+    setNovels((prev) => {
+      const next = (prev || []).map((n) =>
+        n.id === novelId
+          ? {
+              ...n,
+              isShortStory: payload.isShortStory,
+              youtubeVideoId: payload.youtubeVideoId,
+              isYoutubeVipLocked: payload.isYoutubeVipLocked,
+            }
+          : n
+      );
+      saveNovelsToStorage(next);
+      return next;
+    });
+    setSelectedNovel((prev) =>
+      prev && prev.id === novelId
+        ? {
+            ...prev,
+            isShortStory: payload.isShortStory,
+            youtubeVideoId: payload.youtubeVideoId,
+            isYoutubeVipLocked: payload.isYoutubeVipLocked,
+          }
+        : prev
+    );
+    setEditingNovel((prev) =>
+      prev && prev.id === novelId
+        ? {
+            ...prev,
+            isShortStory: payload.isShortStory,
+            youtubeVideoId: payload.youtubeVideoId,
+            isYoutubeVipLocked: payload.isYoutubeVipLocked,
+          }
+        : prev
+    );
   };
 
   // Cập nhật ngay 2 trường đếm mp3NamMinhCount & mp3HangNgaCount trên state danh sách (0 Reads phát sinh)
@@ -4652,6 +4702,7 @@ function DaoTamApp() {
         onChapterAudioUpdated={handleChapterAudioUpdated}
         onBatchChaptersAudioUpdated={handleBatchChaptersAudioUpdated}
         onNovelMp3CountsSynced={handleNovelMp3CountsSynced}
+        onUpdateNovelYoutubeSettings={handleUpdateNovelYoutubeSettings}
       />
 
       {/* Edit Novel & Chapters (Page View is primary in-web flow) */}

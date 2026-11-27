@@ -3032,6 +3032,11 @@ export async function fetchNovelsFromFirestore(_limitCount?: number): Promise<No
         categories: resolvedCategories,
         genres: Array.isArray((novelData as any).genres) ? (novelData as any).genres : resolvedCategories,
         isShortStory: Boolean(novelData.isShortStory),
+        youtubeVideoId:
+          typeof novelData.youtubeVideoId === 'string' && novelData.youtubeVideoId.trim()
+            ? novelData.youtubeVideoId.trim()
+            : '',
+        isYoutubeVipLocked: Boolean(novelData.isYoutubeVipLocked),
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
@@ -3145,6 +3150,11 @@ export async function fetchNovelBySlugOrId(slugOrId: string): Promise<Novel | nu
       categories: resolvedCategories,
       genres: Array.isArray((novelData as any).genres) ? (novelData as any).genres : resolvedCategories,
       isShortStory: Boolean(novelData.isShortStory),
+      youtubeVideoId:
+        typeof novelData.youtubeVideoId === 'string' && novelData.youtubeVideoId.trim()
+          ? novelData.youtubeVideoId.trim()
+          : '',
+      isYoutubeVipLocked: Boolean(novelData.isYoutubeVipLocked),
       status: novelData.status || 'Đang ra',
       flowerCount: Number(novelData.flowerCount || 0),
       coinCount: Number(novelData.coinCount || 0),
@@ -3267,6 +3277,11 @@ export async function fetchShortStoriesFromFirestore(_limitCount?: number): Prom
         categories: resolvedCategories,
         genres: Array.isArray((novelData as any).genres) ? (novelData as any).genres : resolvedCategories,
         isShortStory: true,
+        youtubeVideoId:
+          typeof novelData.youtubeVideoId === 'string' && novelData.youtubeVideoId.trim()
+            ? novelData.youtubeVideoId.trim()
+            : '',
+        isYoutubeVipLocked: Boolean(novelData.isYoutubeVipLocked),
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
@@ -3451,6 +3466,11 @@ export async function queryNovelsWithFilters(
         categories: resolvedCategories,
         genres: Array.isArray((novelData as any).genres) ? (novelData as any).genres : resolvedCategories,
         isShortStory: Boolean(novelData.isShortStory),
+        youtubeVideoId:
+          typeof novelData.youtubeVideoId === 'string' && novelData.youtubeVideoId.trim()
+            ? novelData.youtubeVideoId.trim()
+            : '',
+        isYoutubeVipLocked: Boolean(novelData.isYoutubeVipLocked),
         status: novelData.status || 'Đang ra',
         flowerCount: Number(novelData.flowerCount || 0),
         coinCount: Number(novelData.coinCount || 0),
@@ -3765,6 +3785,9 @@ export async function saveNovelToFirestore(
     hasFemaleAudio: audioFlags.hasFemaleAudio,
     mp3NamMinhCount: audioFlags.mp3NamMinhCount,
     mp3HangNgaCount: audioFlags.mp3HangNgaCount,
+    youtubeVideoId:
+      typeof novel.youtubeVideoId === 'string' ? novel.youtubeVideoId.trim() : '',
+    isYoutubeVipLocked: Boolean(novel.isYoutubeVipLocked),
     latestPublishAt,
   };
 

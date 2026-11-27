@@ -64,6 +64,8 @@
         "fullBookPriceXu": { "type": "number", "description": "Giá Xu trọn bộ" },
         "fullBookDiscountPriceXu": { "type": "number", "description": "Giá Xu ưu đãi combo" },
         "isShortStory": { "type": "boolean", "description": "Đánh dấu truyện ngắn / đoản văn" },
+        "youtubeVideoId": { "type": "string", "description": "ID video YouTube nhúng cho Truyện Ngắn" },
+        "isYoutubeVipLocked": { "type": "boolean", "description": "Công tắc khóa VIP Audio YouTube (mặc định false = miễn phí)" },
         "updatedAt": { "type": "number", "description": "Thời gian cập nhật thông tin truyện" },
         "lastChapterUpdatedAt": { "type": "number", "description": "Thời gian ra hoặc sửa chương gần nhất (dùng để sắp xếp Mới cập nhật & Truyện full)" },
         "mp3NamMinhCount": { "type": "number", "description": "Số chương đã gắn MP3 giọng Nam Minh (đồng bộ 0 Reads)" },
@@ -122,6 +124,8 @@
         "author": { "type": "string", "description": "Tác giả" },
         "mainCategory": { "type": "string", "description": "Phân mục chính" },
         "isShortStory": { "type": "boolean", "description": "Đánh dấu truyện ngắn / đoản văn" },
+        "youtubeVideoId": { "type": "string", "description": "ID video YouTube nhúng cho Truyện Ngắn" },
+        "isYoutubeVipLocked": { "type": "boolean", "description": "Công tắc khóa VIP Audio YouTube" },
         "description": { "type": "string", "description": "Văn án" },
         "status": { "type": "string", "description": "pending, approved hoặc rejected" },
         "submittedAt": { "type": "number", "description": "Thời gian gửi" }

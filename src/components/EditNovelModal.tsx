@@ -12,6 +12,7 @@ import {
   isChapterVisibleToReader,
   toDatetimeLocalInput,
 } from '../utils/rulesAndVoices';
+import { extractYouTubeVideoId, buildYouTubeShareUrl } from '../utils/youtube';
 import { AdminChapterMp3Actions } from './AdminGitHubAudioManager';
 import { 
   fetchChaptersForNovel, 
@@ -52,7 +53,8 @@ import {
   Headphones,
   Clock,
   Wand2,
-  AlertCircle
+  AlertCircle,
+  Youtube
 } from 'lucide-react';
 
 export interface EditNovelModalProps {
@@ -92,6 +94,14 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   const [isEditorRole, setIsEditorRole] = useState(novel.publisherRoles?.includes('editor') ?? !!novel.editor);
   const [isExclusive, setIsExclusive] = useState(!!novel.isExclusive);
   const [isShortStory, setIsShortStory] = useState(!!novel.isShortStory);
+  const [youtubeUrlInput, setYoutubeUrlInput] = useState<string>(() =>
+    novel.youtubeVideoId ? buildYouTubeShareUrl(novel.youtubeVideoId) : ''
+  );
+  const [youtubeVideoId, setYoutubeVideoId] = useState<string>(novel.youtubeVideoId || '');
+  const [youtubeError, setYoutubeError] = useState<string | null>(null);
+  const [isYoutubeVipLocked, setIsYoutubeVipLocked] = useState<boolean>(
+    Boolean(novel.isYoutubeVipLocked)
+  );
   const [mainCategory, setMainCategory] = useState<MainCategory>(novel.mainCategory || 'dam-my');
   const [status, setStatus] = useState<Novel['status']>(novel.status || 'Đang ra');
   const [coverImage, setCoverImage] = useState(novel.coverImage || '');
@@ -159,6 +169,10 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
       setIsEditorRole(novel.publisherRoles?.includes('editor') ?? !!novel.editor);
       setIsExclusive(!!novel.isExclusive);
       setIsShortStory(!!novel.isShortStory);
+      setYoutubeUrlInput(novel.youtubeVideoId ? buildYouTubeShareUrl(novel.youtubeVideoId) : '');
+      setYoutubeVideoId(novel.youtubeVideoId || '');
+      setYoutubeError(null);
+      setIsYoutubeVipLocked(Boolean(novel.isYoutubeVipLocked));
       setMainCategory(novel.mainCategory || 'dam-my');
       setStatus(novel.status || 'Đang ra');
       setCoverImage(novel.coverImage || '');
@@ -610,8 +624,20 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
   // Save entire novel changes
   const handleSaveAllChanges = async () => {
     if (!title.trim()) {
-      alert('Vui lòng nhập tên truyện.');
+      setSaveErrorMsg('Vui lòng nhập tên truyện.');
       return;
+    }
+
+    let finalYoutubeVideoId = '';
+    if (isShortStory && youtubeUrlInput.trim()) {
+      const ytRes = extractYouTubeVideoId(youtubeUrlInput);
+      if (!ytRes.videoId) {
+        const msg = ytRes.error || 'Link YouTube không hợp lệ.';
+        setYoutubeError(msg);
+        setSaveErrorMsg(msg);
+        return;
+      }
+      finalYoutubeVideoId = ytRes.videoId;
     }
 
     const publisherRoles: StoryRole[] = [];
@@ -652,6 +678,8 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
       publisherRoles,
       isExclusive,
       isShortStory,
+      youtubeVideoId: isShortStory ? finalYoutubeVideoId : '',
+      isYoutubeVipLocked: isShortStory ? isYoutubeVipLocked : false,
       mainCategory,
       isOriginal: mainCategory === 'truyen-sang-tac',
       status,
@@ -989,6 +1017,78 @@ export const EditNovelModal: React.FC<EditNovelModalProps> = ({
                     </label>
                   </div>
                 </div>
+
+                {isShortStory && (
+                  <div className="p-4 bg-rose-50/70 rounded-2xl border border-rose-200 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Youtube className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span className="text-xs sm:text-sm font-extrabold text-slate-900">
+                        Audio / Video YouTube cho Truyện Ngắn
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                        Link chia sẻ YouTube (youtu.be/..., watch?v=..., shorts/..., embed/...)
+                      </label>
+                      <input
+                        type="text"
+                        value={youtubeUrlInput}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setYoutubeUrlInput(val);
+                          if (!val.trim()) {
+                            setYoutubeVideoId('');
+                            setYoutubeError(null);
+                            return;
+                          }
+                          const res = extractYouTubeVideoId(val);
+                          if (res.videoId) {
+                            setYoutubeVideoId(res.videoId);
+                            setYoutubeError(null);
+                          } else {
+                            setYoutubeVideoId('');
+                            setYoutubeError(res.error || 'Link YouTube không hợp lệ.');
+                          }
+                        }}
+                        placeholder="https://youtu.be/... hoặc https://www.youtube.com/watch?v=..."
+                        className="w-full min-h-[44px] bg-white border border-slate-300 focus:border-rose-500 rounded-xl px-3.5 py-2 text-slate-900 text-xs sm:text-sm font-medium focus:outline-none"
+                      />
+                      {youtubeVideoId && !youtubeError && (
+                        <div className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span>Đã trích xuất Video ID: {youtubeVideoId}</span>
+                        </div>
+                      )}
+                      {youtubeError && (
+                        <div className="mt-1.5 flex items-start gap-1.5 text-[11px] font-bold text-rose-600">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>{youtubeError}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 pt-2 border-t border-rose-200/70">
+                      <div className="min-w-0">
+                        <span className="text-xs sm:text-sm font-bold text-slate-900 block">
+                          Khóa VIP Audio YouTube
+                        </span>
+                        <p className="text-[11px] text-slate-600">
+                          Mặc định TẮT (miễn phí cho mọi người nghe vì có quảng cáo YouTube; Admin/Tác giả có thể bật khóa VIP)
+                        </p>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={isYoutubeVipLocked}
+                          onChange={(e) => setIsYoutubeVipLocked(e.target.checked)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-rose-600"></div>
+                      </label>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>

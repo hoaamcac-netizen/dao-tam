@@ -57,6 +57,8 @@ export interface Novel {
   isHot?: boolean;
   isOriginal?: boolean; // Đánh dấu truyện tự sáng tác chính chủ
   isShortStory?: boolean; // Đánh dấu truyện ngắn / đoản văn (thuộc tính Format bổ sung)
+  youtubeVideoId?: string; // Video ID YouTube cho Truyện Ngắn
+  isYoutubeVipLocked?: boolean; // Công tắc khóa VIP Audio YouTube (mặc định TẮT / false = miễn phí)
   isSensitive?: boolean; // Truyện có sử dụng một số từ ngữ nhạy cảm (bạo lực, kích thích,...)
   isExclusive?: boolean; // Đăng độc quyền tại Đạo Tâm (hưởng 90% doanh thu cho Editor, 95% cho Tác giả)
   royaltyRate?: number; // Tỷ lệ nhuận bút (Tác giả 95%, Editor độc quyền 90%, Editor không độc quyền 70%)
@@ -104,6 +106,8 @@ export interface NovelSubmission {
   royaltyRate?: number; // 95% cho tác giả, 90% cho editor độc quyền, 70% cho không độc quyền
   mainCategory: MainCategory;
   isShortStory?: boolean; // Đánh dấu truyện ngắn / đoản văn (thuộc tính Format bổ sung)
+  youtubeVideoId?: string; // Video ID YouTube cho Truyện Ngắn
+  isYoutubeVipLocked?: boolean; // Công tắc khóa VIP Audio YouTube
   categories: string[];
   description: string;
   coverImage: string;
@@ -321,6 +325,7 @@ export interface ReaderSettings {
   autoNextChapter: boolean; // Tự động chuyển chương khi nghe audio hết chương
   voiceSpeed: number; // 0.75 - 3.0
   selectedVoiceId: string; // 'vi-VN-HoaiMyNeural' | 'vi-VN-NamMinhNeural' | 'device-fallback'
+  selectedVoiceExplicitDevice?: boolean;
   autoHighlight: boolean;
   audioEngine?: 'native' | 'edge'; // 'native' (Tức thì 0s trễ, mượt mà tức thì) | 'edge' (Edge Cloud)
 }

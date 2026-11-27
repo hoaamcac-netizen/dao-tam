@@ -20,8 +20,10 @@ import {
   fetchFinanceStatsFromFirestore,
   fetchTodayApprovedTopUpsFromFirestore,
   getVietnamStartOfDayMs,
+  updateNovelMetadataInFirestore,
   type FinanceStats
 } from '../firebase/services';
+import { extractYouTubeVideoId, buildYouTubeShareUrl } from '../utils/youtube';
 import { checkIsAdmin } from '../firebase/config';
 import type { QueryDocumentSnapshot, DocumentData } from 'firebase/firestore';
 import { AdminPendingNovelsList } from './AdminPendingNovelsList';
@@ -72,7 +74,8 @@ import {
   KeyRound,
   GitMerge,
   RefreshCw,
-  Headphones
+  Headphones,
+  Youtube
 } from 'lucide-react';
 import { DaoTamLogo } from './DaoTamLogo';
 import { AdminNovelMp3DrawerModal } from './AdminGitHubAudioManager';
@@ -123,6 +126,14 @@ interface AdminDashboardModalProps {
       hasAudio: boolean;
     }
   ) => void;
+  onUpdateNovelYoutubeSettings?: (
+    novelId: string,
+    payload: {
+      isShortStory: boolean;
+      youtubeVideoId: string;
+      isYoutubeVipLocked: boolean;
+    }
+  ) => void;
 }
 
 export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
@@ -155,9 +166,16 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   onChapterAudioUpdated,
   onBatchChaptersAudioUpdated,
   onNovelMp3CountsSynced,
+  onUpdateNovelYoutubeSettings,
 }) => {
   const [activeTab, setActiveTab] = useState<'requests' | 'submissions' | 'payouts' | 'reports' | 'novels' | 'batch' | 'comments' | 'tools' | 'users' | 'support_chat' | 'global_banner'>('requests');
   const [mp3ManagingNovel, setMp3ManagingNovel] = useState<Novel | null>(null);
+  const [youtubeManagingNovel, setYoutubeManagingNovel] = useState<Novel | null>(null);
+  const [youtubeUrlInput, setYoutubeUrlInput] = useState<string>('');
+  const [youtubeVipLockedInput, setYoutubeVipLockedInput] = useState<boolean>(false);
+  const [youtubeIsShortStoryInput, setYoutubeIsShortStoryInput] = useState<boolean>(true);
+  const [youtubeFormError, setYoutubeFormError] = useState<string | null>(null);
+  const [isSavingYoutubeSettings, setIsSavingYoutubeSettings] = useState<boolean>(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved'>('pending');
   const [reportFilterStatus, setReportFilterStatus] = useState<'all' | 'pending' | 'resolved'>('pending');
@@ -565,9 +583,66 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   // Novel Management state
   const [novelSearchQuery, setNovelSearchQuery] = useState('');
-  const [novelStatusFilter, setNovelStatusFilter] = useState<'all' | 'visible' | 'hidden' | 'missing_male' | 'missing_female'>('all');
+  const [novelStatusFilter, setNovelStatusFilter] = useState<'all' | 'visible' | 'hidden' | 'short_stories' | 'missing_male' | 'missing_female'>('all');
   const [confirmDeleteNovel, setConfirmDeleteNovel] = useState<Novel | null>(null);
   const [isReloadingNovels, setIsReloadingNovels] = useState(false);
+
+  const openYoutubeManager = (novel: Novel) => {
+    setYoutubeManagingNovel(novel);
+    setYoutubeIsShortStoryInput(Boolean(novel.isShortStory));
+    setYoutubeUrlInput(novel.youtubeVideoId ? buildYouTubeShareUrl(novel.youtubeVideoId) : '');
+    setYoutubeVipLockedInput(Boolean(novel.isYoutubeVipLocked));
+    setYoutubeFormError(null);
+  };
+
+  const handleSaveYoutubeSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!youtubeManagingNovel || isSavingYoutubeSettings) return;
+
+    const trimmedUrl = youtubeUrlInput.trim();
+    let resolvedVideoId = '';
+    if (trimmedUrl) {
+      const parsed = extractYouTubeVideoId(trimmedUrl);
+      if (!parsed.videoId) {
+        setYoutubeFormError(
+          parsed.error ||
+            'Link YouTube chưa đúng định dạng. Vui lòng dán link youtu.be/..., watch?v=..., shorts/... hoặc embed/...'
+        );
+        return;
+      }
+      resolvedVideoId = parsed.videoId;
+    }
+
+    setYoutubeFormError(null);
+    setIsSavingYoutubeSettings(true);
+    try {
+      const nextIsShort = youtubeIsShortStoryInput;
+      const nextVideoId = nextIsShort ? resolvedVideoId : '';
+      const nextVipLocked = nextIsShort ? Boolean(youtubeVipLockedInput) : false;
+
+      await updateNovelMetadataInFirestore(
+        youtubeManagingNovel.id,
+        {
+          isShortStory: nextIsShort,
+          youtubeVideoId: nextVideoId,
+          isYoutubeVipLocked: nextVipLocked,
+        },
+        { touchUpdatedAt: false }
+      );
+
+      onUpdateNovelYoutubeSettings?.(youtubeManagingNovel.id, {
+        isShortStory: nextIsShort,
+        youtubeVideoId: nextVideoId,
+        isYoutubeVipLocked: nextVipLocked,
+      });
+
+      setYoutubeManagingNovel(null);
+    } catch (err: any) {
+      setYoutubeFormError(err?.message || 'Không thể lưu cấu hình YouTube vào Firestore.');
+    } finally {
+      setIsSavingYoutubeSettings(false);
+    }
+  };
 
   // Batch chapters state
   const [selectedNovelId, setSelectedNovelId] = useState<string>(novels?.[0]?.id || '');
@@ -675,6 +750,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
   const targetNovel = safeNovels.find((n) => n.id === selectedNovelId) || safeNovels[0];
 
+  const shortStoriesCount = safeNovels.filter((n) => Boolean(n.isShortStory)).length;
+
   const missingMaleNovelsCount = safeNovels.filter((n) => {
     const { totalChapters, namMinhCount } = getNovelMp3Counts(n);
     return totalChapters > 0 ? namMinhCount < totalChapters : namMinhCount === 0;
@@ -696,6 +773,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     if (!matchesSearch) return false;
     if (novelStatusFilter === 'visible') return !n.isHidden;
     if (novelStatusFilter === 'hidden') return !!n.isHidden;
+    if (novelStatusFilter === 'short_stories') return Boolean(n.isShortStory);
     if (novelStatusFilter === 'missing_male') {
       const { totalChapters, namMinhCount } = getNovelMp3Counts(n);
       return totalChapters > 0 ? namMinhCount < totalChapters : namMinhCount === 0;
@@ -2299,7 +2377,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                  {(['all', 'visible', 'hidden', 'missing_male', 'missing_female'] as const).map((st) => (
+                  {(['all', 'visible', 'hidden', 'short_stories', 'missing_male', 'missing_female'] as const).map((st) => (
                     <button
                       key={st}
                       type="button"
@@ -2316,6 +2394,8 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         ? `Đang hiện (${safeNovels.filter((n) => !n.isHidden)?.length || 0})`
                         : st === 'hidden'
                         ? `Đã ẩn (${safeNovels.filter((n) => n.isHidden)?.length || 0})`
+                        : st === 'short_stories'
+                        ? `Truyện Ngắn (${shortStoriesCount})`
                         : st === 'missing_male'
                         ? `Thiếu MP3 Nam Minh (${missingMaleNovelsCount})`
                         : `Thiếu MP3 Hằng Nga (${missingFemaleNovelsCount})`}
@@ -2388,6 +2468,28 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border tabular-nums max-w-full ${femaleBadgeClass}`}>
                             Hằng Nga: {hangNgaCount}/{totalChapters}
                           </span>
+                          {novel.isShortStory && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold border bg-pink-50 text-pink-700 border-pink-200">
+                              Truyện Ngắn
+                            </span>
+                          )}
+                          {novel.isShortStory && novel.youtubeVideoId && (
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                                novel.isYoutubeVipLocked
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              }`}
+                            >
+                              <Youtube className="w-3 h-3" />
+                              {novel.isYoutubeVipLocked ? 'YouTube VIP' : 'YouTube FREE'}
+                            </span>
+                          )}
+                          {novel.isShortStory && !novel.youtubeVideoId && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold border bg-slate-100 text-slate-600 border-slate-200">
+                              Chưa có YouTube
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -2395,8 +2497,22 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                     <div className="flex items-center gap-2 flex-wrap w-full md:w-auto md:justify-end pt-2 border-t border-slate-100 md:border-t-0 md:pt-0 shrink-0">
                       <button
                         type="button"
+                        onClick={() => openYoutubeManager(novel)}
+                        className={`min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 cursor-pointer transition ${
+                          novel.isShortStory
+                            ? 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'
+                            : 'bg-slate-50 hover:bg-slate-100 text-slate-600 border-slate-200'
+                        }`}
+                        title="Cài đặt link Audio/Video YouTube và khóa VIP cho Truyện Ngắn"
+                      >
+                        <Youtube className={`w-3.5 h-3.5 ${novel.isShortStory ? 'text-rose-600' : 'text-slate-500'}`} />
+                        <span>YouTube</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => setMp3ManagingNovel(novel)}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
+                        className="min-h-[38px] px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition"
                         title="Quản lý và dán link MP3 cho từng chương (Nam Minh & Hằng Nga)"
                       >
                         <Headphones className="w-3.5 h-3.5 text-emerald-600" />
@@ -4305,6 +4421,150 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
             onNovelMp3CountsSynced?.(novelId, counts);
           }}
         />
+      )}
+
+      {/* Modal quản lý Audio / Video YouTube & Khóa VIP cho Truyện Ngắn */}
+      {youtubeManagingNovel && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-3 sm:p-4 bg-slate-950/60 backdrop-blur-xs">
+          <div className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-rose-50/70">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0">
+                  <Youtube className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 truncate">
+                    Audio / Video YouTube (Truyện Ngắn)
+                  </h3>
+                  <p className="text-[11px] text-slate-600 truncate">
+                    {youtubeManagingNovel.title}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setYoutubeManagingNovel(null)}
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 hover:text-slate-900 cursor-pointer"
+                aria-label="Đóng"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveYoutubeSettings} className="p-4 sm:p-5 space-y-4">
+              {youtubeFormError && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-semibold flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>{youtubeFormError}</span>
+                </div>
+              )}
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                <div>
+                  <span className="text-xs font-bold text-slate-900 block">
+                    Phân loại là Truyện Ngắn
+                  </span>
+                  <span className="text-[11px] text-slate-500">
+                    Bật để hiển thị trình phát Audio YouTube nổi bật phía trên nội dung truyện chữ
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={youtubeIsShortStoryInput}
+                  onChange={(e) => setYoutubeIsShortStoryInput(e.target.checked)}
+                  className="w-5 h-5 accent-pink-600 rounded cursor-pointer shrink-0"
+                />
+              </label>
+
+              {youtubeIsShortStoryInput && (
+                <>
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-bold text-slate-800">
+                      Link chia sẻ YouTube (youtu.be, watch?v=, shorts, embed)
+                    </label>
+                    <input
+                      type="text"
+                      value={youtubeUrlInput}
+                      onChange={(e) => {
+                        setYoutubeUrlInput(e.target.value);
+                        if (youtubeFormError) setYoutubeFormError(null);
+                      }}
+                      placeholder="https://youtu.be/... hoặc https://www.youtube.com/watch?v=..."
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs text-slate-900 focus:outline-none focus:border-pink-500"
+                    />
+                    {youtubeUrlInput.trim() && (() => {
+                      const previewParsed = extractYouTubeVideoId(youtubeUrlInput.trim());
+                      if (previewParsed.videoId) {
+                        return (
+                          <p className="text-[11px] font-semibold text-emerald-700 flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Video ID hợp lệ: {previewParsed.videoId}</span>
+                          </p>
+                        );
+                      }
+                      if (previewParsed.error) {
+                        return (
+                          <p className="text-[11px] font-semibold text-amber-700 flex items-center gap-1">
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                            <span>{previewParsed.error}</span>
+                          </p>
+                        );
+                      }
+                      return null;
+                    })()}
+                    <p className="text-[11px] text-slate-500">
+                      Để trống nếu muốn gỡ link YouTube khỏi truyện này.
+                    </p>
+                  </div>
+
+                  <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-amber-50/70 border border-amber-200 cursor-pointer">
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 block">
+                        Khóa VIP Audio YouTube
+                      </span>
+                      <span className="text-[11px] text-slate-600">
+                        Mặc định TẮT (nghe miễn phí có quảng cáo YouTube). Bật nếu chỉ cho thành viên đã mở khóa/VIP nghe.
+                      </span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={youtubeVipLockedInput}
+                      onChange={(e) => setYoutubeVipLockedInput(e.target.checked)}
+                      className="w-5 h-5 accent-amber-600 rounded cursor-pointer shrink-0"
+                    />
+                  </label>
+                </>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setYoutubeManagingNovel(null)}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingYoutubeSettings}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {isSavingYoutubeSettings ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Đang lưu...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Lưu cài đặt YouTube</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
     </div>

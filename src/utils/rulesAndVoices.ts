@@ -270,23 +270,44 @@ export function getNovelVoiceAvailability(
 }
 
 /**
- * Chọn giọng phù hợp với dữ liệu MP3 hiện có của bộ truyện:
- * - Nếu người đọc chủ động chọn Giọng Máy Google -> giữ nguyên Giọng Máy Google.
- * - Nếu giọng đang ưu tiên chưa có link MP3 trong bộ truyện -> chuyển sang giọng MP3 còn lại nếu có, hoặc mặc định Giọng Máy Google.
+ * Chọn giọng phù hợp với dữ liệu MP3 hiện có của bộ truyện / chương:
+ * 1) Nếu người đọc chủ động chọn Giọng Máy -> giữ nguyên Giọng Máy.
+ * 2) Nếu chương có file MP3 Nam Minh -> ưu tiên chọn và phát MP3 Nam Minh trước (trừ khi người đọc chủ động chọn Hằng Nga và chương có Hằng Nga).
+ * 3) Nếu chương không có Nam Minh mà có MP3 Hằng Nga -> chọn và phát MP3 Hằng Nga.
+ * 4) Nếu chương/truyện chưa có cả MP3 Nam Minh lẫn Hằng Nga -> sử dụng Giọng Máy.
  */
 export function resolveEffectiveVoiceForNovel(
   preferredVoiceId: string | null | undefined,
-  availability: NovelAudioVoiceAvailability
+  availability: NovelAudioVoiceAvailability,
+  currentChapter?: Partial<Chapter> | null,
+  options?: {
+    isUserExplicitDevice?: boolean;
+    chapterLinksLoaded?: boolean;
+  }
 ): string {
   const normalized = normalizeEdgeVoiceId(preferredVoiceId || undefined);
-  if (isDeviceFallbackVoice(normalized)) {
+  const isExplicitDevice = Boolean(options?.isUserExplicitDevice);
+  const chapterLinksLoaded = Boolean(options?.chapterLinksLoaded);
+
+  if (isExplicitDevice && isDeviceFallbackVoice(normalized)) {
     return DEVICE_FALLBACK_VOICE_ID;
   }
+
+  const chapMaleUrl = currentChapter ? getChapterAudioUrl(currentChapter, 'male') : '';
+  const chapFemaleUrl = currentChapter ? getChapterAudioUrl(currentChapter, 'female') : '';
+
   if (normalized === 'vi-VN-HoaiMyNeural') {
+    if (chapFemaleUrl) return 'vi-VN-HoaiMyNeural';
+    if (chapMaleUrl) return 'vi-VN-NamMinhNeural';
+    if (currentChapter && chapterLinksLoaded) return DEVICE_FALLBACK_VOICE_ID;
     if (availability.hasFemaleMp3) return 'vi-VN-HoaiMyNeural';
     if (availability.hasMaleMp3) return 'vi-VN-NamMinhNeural';
     return DEVICE_FALLBACK_VOICE_ID;
   }
+
+  if (chapMaleUrl) return 'vi-VN-NamMinhNeural';
+  if (chapFemaleUrl) return 'vi-VN-HoaiMyNeural';
+  if (currentChapter && chapterLinksLoaded) return DEVICE_FALLBACK_VOICE_ID;
   if (availability.hasMaleMp3) return 'vi-VN-NamMinhNeural';
   if (availability.hasFemaleMp3) return 'vi-VN-HoaiMyNeural';
   return DEVICE_FALLBACK_VOICE_ID;
@@ -385,13 +406,18 @@ function isMaleVietnameseBrowserVoice(v: SpeechSynthesisVoice): boolean {
   if (
     rawName.includes('namminh') ||
     rawName.includes('nam minh') ||
-    rawUri.includes('namminh')
+    rawUri.includes('namminh') ||
+    rawUri.includes('nam minh') ||
+    rawName.includes('giọng nam')
   ) {
     return true;
   }
+  // Loại bỏ cụm "việt nam" / "viet nam" trước khi tách token để không nhận nhầm tên quốc gia thành giọng nam
+  const strippedName = rawName.replace(/vi[eệ]t\s+nam/gi, 'vietnam');
+  const strippedUri = rawUri.replace(/vi[eệ]t\s+nam/gi, 'vietnam');
   const allTokens = new Set([
-    ...tokenizeBrowserVoiceText(rawName),
-    ...tokenizeBrowserVoiceText(rawUri),
+    ...tokenizeBrowserVoiceText(strippedName),
+    ...tokenizeBrowserVoiceText(strippedUri),
   ]);
   return (
     allTokens.has('an') ||
@@ -423,7 +449,7 @@ export function getMatchingBrowserVoice(_voiceId?: string): SpeechSynthesisVoice
 
   if (viVoices.length === 0) return null;
 
-  // Loại trừ các giọng nam; chỉ fallback sang giọng nam nếu thiết bị hoàn toàn không có giọng nữ nào khác
+  // Không chọn mặc định các giọng nam (Nam Minh, NamMinh, An, Male); chỉ fallback nếu không còn giọng nào khác
   const nonMaleViVoices = viVoices.filter((v) => !isMaleVietnameseBrowserVoice(v));
   const candidateVoices = nonMaleViVoices.length > 0 ? nonMaleViVoices : viVoices;
 
@@ -437,19 +463,23 @@ export function getMatchingBrowserVoice(_voiceId?: string): SpeechSynthesisVoice
     ]);
     let score = 0;
 
-    // Ưu tiên 1: Google Tiếng Việt / Google Vietnamese
-    if (
-      name === 'google tiếng việt' ||
-      name === 'google vietnamese' ||
-      name.includes('google tiếng việt') ||
-      name.includes('google vietnamese') ||
-      uri.includes('google tiếng việt') ||
-      uri.includes('google vietnamese')
-    ) {
+    const isGoogleVoice = name.includes('google') || uri.includes('google');
+    const isViLang = lang.startsWith('vi') || lang.includes('vi-vn') || lang.includes('vi_vn') || lang.includes('vi');
+
+    // Ưu tiên 1: Giọng có tên chứa "Google" và mã ngôn ngữ "vi" (ví dụ: "Google Tiếng Việt")
+    if (isGoogleVoice && isViLang) {
       score += 1000;
+      if (
+        name.includes('google tiếng việt') ||
+        name.includes('google vietnamese') ||
+        uri.includes('google tiếng việt') ||
+        uri.includes('google vietnamese')
+      ) {
+        score += 200;
+      }
     }
 
-    // Ưu tiên 2: Các giọng nữ tiếng Việt phổ biến (HoaiMy, Linh, Female, Nữ, gft, vie)
+    // Ưu tiên 2 (iPhone/Safari hoặc không có Google): Giọng nữ tiếng Việt (Hoài My, HoaiMy, Linh, Female, Nữ) với lang vi-VN
     if (
       name.includes('hoaimy') ||
       name.includes('hoài my') ||
@@ -461,11 +491,10 @@ export function getMatchingBrowserVoice(_voiceId?: string): SpeechSynthesisVoice
       tokens.has('gft') ||
       tokens.has('vie')
     ) {
-      score += 350;
+      score += 400;
     }
 
-    if (name.includes('google')) score += 150;
-    if (lang === 'vi-vn' || lang === 'vi_vn') score += 50;
+    if (lang === 'vi-vn' || lang === 'vi_vn') score += 60;
     else if (lang.includes('vi')) score += 30;
 
     if (name.includes('natural') || name.includes('neural') || name.includes('online')) score += 25;

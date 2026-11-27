@@ -15,6 +15,7 @@ import {
 import { checkIsAdmin } from '../firebase/config';
 import { safeSetItem } from '../utils/safeStorage';
 import { useAudio } from '../contexts/AudioContext';
+import { YouTubeShortStoryPlayer } from './YouTubeShortStoryPlayer';
 import { 
   BookOpen, 
   Heart, 
@@ -353,6 +354,28 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
     novel.fullBookDiscountPriceXu > 0 &&
     novel.fullBookDiscountPriceXu < novel.fullBookPriceXu
   ) ? Math.round(((novel.fullBookPriceXu - novel.fullBookDiscountPriceXu) / novel.fullBookPriceXu) * 100) : 0;
+
+  const shortStoryYoutubeId = (novel.youtubeVideoId || '').trim();
+  const shortStoryListedPrice =
+    novel.fullBookPriceXu && novel.fullBookPriceXu > 0
+      ? novel.fullBookPriceXu
+      : Math.round(
+          safeChapters
+            .filter((c) => c.isVip)
+            .reduce((sum, c) => sum + (c.priceXu || 0), 0) * 100
+        ) / 100;
+  const shortStoryEffectivePrice =
+    isFull &&
+    novel.fullBookDiscountPriceXu &&
+    novel.fullBookDiscountPriceXu > 0 &&
+    (!shortStoryListedPrice || novel.fullBookDiscountPriceXu < shortStoryListedPrice)
+      ? novel.fullBookDiscountPriceXu
+      : shortStoryListedPrice;
+  const canWatchLockedYoutube =
+    !novel.isYoutubeVipLocked ||
+    isOwnerOrAdmin ||
+    isFullBookUnlocked ||
+    unlockedChapterIds.length > 0;
 
   return (
     <div 
@@ -808,12 +831,99 @@ export const NovelDetail: React.FC<NovelDetailProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         
         {/* Left / Main Column */}
-        <div className="lg:col-span-8 space-y-8">
-          
+        <div className="lg:col-span-8 space-y-6">
+          {novel.isShortStory && shortStoryYoutubeId && (
+            <YouTubeShortStoryPlayer
+              novelTitle={novel.title}
+              videoId={shortStoryYoutubeId}
+              isYoutubeVipLocked={Boolean(novel.isYoutubeVipLocked)}
+              canWatchLockedVideo={canWatchLockedYoutube}
+              unlockPriceXu={shortStoryEffectivePrice}
+              onRequestUnlock={
+                firstChapter
+                  ? () => onOpenVipPurchase(novel, firstChapter, 'full_book_only')
+                  : undefined
+              }
+            />
+          )}
 
+          {novel.isShortStory && (
+            <div className="bg-gradient-to-r from-pink-50 to-rose-50 dark:from-slate-900 dark:to-slate-800 border border-pink-200 dark:border-pink-900/60 rounded-3xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm text-slate-900 dark:text-white">
+              <div className="flex items-start sm:items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-2xl bg-pink-100 dark:bg-pink-950/70 text-pink-600 dark:text-pink-400 flex items-center justify-center shrink-0">
+                  <BookOpen className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">
+                      Truyện Chữ Trọn Bộ
+                    </span>
+                    {discountPercent > 0 && !isFullBookUnlocked && (
+                      <span className="text-[10px] font-black text-white bg-gradient-to-r from-rose-600 to-amber-500 px-2 py-0.5 rounded-md shadow-xs tabular-nums">
+                        Tiết kiệm {discountPercent}%
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 font-medium mt-0.5">
+                    {isFullBookUnlocked || isOwnerOrAdmin
+                      ? 'Tài khoản của bạn đã có quyền đọc toàn bộ nội dung truyện chữ.'
+                      : shortStoryEffectivePrice > 0
+                      ? 'Mở khóa một lần để đọc toàn bộ truyện chữ mượt mà, không giới hạn.'
+                      : 'Truyện chữ hiện đang mở đọc miễn phí.'}
+                  </p>
+                  {!isFullBookUnlocked && !isOwnerOrAdmin && shortStoryEffectivePrice > 0 && (
+                    <div className="text-xs mt-1 flex items-center gap-2 flex-wrap tabular-nums">
+                      {shortStoryListedPrice > shortStoryEffectivePrice && (
+                        <span className="line-through text-slate-500 dark:text-slate-400">
+                          {formatXu(shortStoryListedPrice)} xu
+                        </span>
+                      )}
+                      <span className="font-extrabold text-pink-600 dark:text-pink-400 text-sm">
+                        {formatXu(shortStoryEffectivePrice)} XU
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {!isFullBookUnlocked && !isOwnerOrAdmin && shortStoryEffectivePrice > 0 ? (
+                <button
+                  type="button"
+                  disabled={!firstChapter}
+                  onClick={() => {
+                    if (firstChapter) {
+                      onOpenVipPurchase(novel, firstChapter, 'full_book_only');
+                    }
+                  }}
+                  className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-50 text-white font-extrabold text-xs sm:text-sm shadow-md shadow-pink-600/25 cursor-pointer whitespace-nowrap transition inline-flex items-center justify-center gap-2"
+                >
+                  <Coins className="w-4 h-4 shrink-0" />
+                  <span>ĐỌC TRUYỆN CHỮ TRỌN BỘ — {formatXu(shortStoryEffectivePrice)} XU</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!firstChapter}
+                  onClick={() => {
+                    if (firstChapter) {
+                      onSelectChapter({ ...novel, chapters: safeChapters }, firstChapter);
+                    }
+                  }}
+                  className="w-full sm:w-auto min-h-[44px] px-5 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500 disabled:opacity-50 text-white font-extrabold text-xs sm:text-sm shadow-md shadow-pink-600/25 cursor-pointer whitespace-nowrap transition inline-flex items-center justify-center gap-2"
+                >
+                  <BookOpen className="w-4 h-4 shrink-0" />
+                  <span>
+                    {isFullBookUnlocked || isOwnerOrAdmin
+                      ? 'ĐỌC TRUYỆN CHỮ TRỌN BỘ (ĐÃ MỞ KHÓA)'
+                      : 'ĐỌC TRUYỆN CHỮ TRỌN BỘ'}
+                  </span>
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Ưu Đãi Trọn Bộ Banner (Combo VIP) - Chỉ hiển thị khi truyện đã Hoàn thành / Full, ẩn khi Đang ra */}
-          {!isFullBookUnlocked && isFull && (
+          {!novel.isShortStory && !isFullBookUnlocked && isFull && (
             <div className="bundle-discount-block bg-gradient-to-r from-pink-50 to-rose-50 dark:from-slate-900 dark:to-slate-800 border border-pink-200 dark:border-pink-900/60 rounded-3xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm text-slate-900 dark:text-white">
               <div className="flex items-center gap-3.5">
                 <div className="w-11 h-11 rounded-2xl bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 flex items-center justify-center flex-shrink-0 text-xl shadow-xs">

@@ -57,6 +57,8 @@ export interface LightweightNovelStorage {
   isOriginal?: boolean;
   isExclusive?: boolean;
   isShortStory?: boolean;
+  youtubeVideoId?: string;
+  isYoutubeVipLocked?: boolean;
   isHot?: boolean;
   isSensitive?: boolean;
   hasAudio?: boolean;
@@ -352,6 +354,12 @@ export function stripNovelForStorage(novel: any): LightweightNovelStorage {
     isOriginal: novel?.isOriginal,
     isExclusive: novel?.isExclusive,
     isShortStory: novel?.isShortStory,
+    ...(typeof novel?.youtubeVideoId === 'string' && novel.youtubeVideoId.trim()
+      ? { youtubeVideoId: novel.youtubeVideoId.trim() }
+      : {}),
+    ...(typeof novel?.isYoutubeVipLocked === 'boolean'
+      ? { isYoutubeVipLocked: novel.isYoutubeVipLocked }
+      : {}),
     isHot: novel?.isHot,
     isSensitive: novel?.isSensitive,
     hasAudio: Boolean(novel?.hasAudio || hasMaleAudio || hasFemaleAudio),
