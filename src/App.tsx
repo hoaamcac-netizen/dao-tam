@@ -1418,18 +1418,39 @@ function DaoTamApp() {
         ? {
             userId: req.userId,
             nextXu: options.nextXu ?? req.xuAmount,
+            processedAt: options?.approvedRequest?.processedAt || options?.approvedRequest?.approvedAt || Date.now(),
+            processedBy: options?.approvedRequest?.processedBy || activeUser?.email || 'admin@daotam.vn',
           }
-        : await approveTopUpTransactionInFirestore(requestId);
+        : await approveTopUpTransactionInFirestore(requestId, activeUser?.email);
 
-      const approvedAtMs = options?.approvedRequest?.approvedAt || Date.now();
+      const approvedAtMs = result.processedAt || Date.now();
+      const processedByEmail = result.processedBy || activeUser?.email || 'admin@daotam.vn';
+
       setTopUpRequests((prev) => {
         const exists = prev.some((r) => r.id === requestId);
         if (exists) {
           return prev.map((r) =>
-            r.id === requestId ? { ...r, status: 'approved', approvedAt: approvedAtMs } : r
+            r.id === requestId
+              ? {
+                  ...r,
+                  status: 'approved',
+                  approvedAt: approvedAtMs,
+                  processedAt: approvedAtMs,
+                  processedBy: processedByEmail,
+                }
+              : r
           );
         }
-        return [{ ...req, status: 'approved', approvedAt: approvedAtMs }, ...prev];
+        return [
+          {
+            ...req,
+            status: 'approved',
+            approvedAt: approvedAtMs,
+            processedAt: approvedAtMs,
+            processedBy: processedByEmail,
+          },
+          ...prev,
+        ];
       });
 
       // Nếu chính là tài khoản đang đăng nhập trên máy này
@@ -1460,18 +1481,72 @@ function DaoTamApp() {
     }
   };
 
-  const handleRejectTopUp = async (requestId: string, reason?: string) => {
-    const req = topUpRequests.find((r) => r.id === requestId);
-    if (req && req.status !== 'pending') {
+  const handleRejectTopUp = async (
+    requestId: string,
+    reason?: string,
+    options?: {
+      alreadyProcessedInFirestore?: boolean;
+      rejectedRequest?: TopUpRequest;
+    }
+  ) => {
+    const req = topUpRequests.find((r) => r.id === requestId) || options?.rejectedRequest;
+    if (!options?.alreadyProcessedInFirestore && req && req.status !== 'pending') {
       console.warn(`Lệnh nạp ${requestId} không ở trạng thái pending.`);
       return;
     }
 
     try {
-      await rejectTopUpTransactionInFirestore(requestId, reason);
-      setTopUpRequests((prev) =>
-        prev.map((r) => (r.id === requestId ? { ...r, status: 'rejected', rejectedAt: Date.now() } : r))
-      );
+      const result = options?.alreadyProcessedInFirestore
+        ? {
+            processedAt:
+              options?.rejectedRequest?.processedAt ||
+              options?.rejectedRequest?.rejectedAt ||
+              Date.now(),
+            processedBy:
+              options?.rejectedRequest?.processedBy || activeUser?.email || 'admin@daotam.vn',
+            rejectReason:
+              options?.rejectedRequest?.rejectReason ||
+              reason?.trim() ||
+              'Từ chối bởi Quản trị viên',
+          }
+        : await rejectTopUpTransactionInFirestore(requestId, reason, activeUser?.email);
+
+      const rejectedAtMs = result.processedAt || Date.now();
+      const processedByEmail = result.processedBy || activeUser?.email || 'admin@daotam.vn';
+      const finalReason = result.rejectReason || reason?.trim() || 'Từ chối bởi Quản trị viên';
+
+      setTopUpRequests((prev) => {
+        const exists = prev.some((r) => r.id === requestId);
+        if (exists) {
+          return prev.map((r) =>
+            r.id === requestId
+              ? {
+                  ...r,
+                  status: 'rejected',
+                  rejectedAt: rejectedAtMs,
+                  processedAt: rejectedAtMs,
+                  processedBy: processedByEmail,
+                  rejectReason: finalReason,
+                  rejectionReason: finalReason,
+                }
+              : r
+          );
+        }
+        return req
+          ? [
+              {
+                ...req,
+                status: 'rejected',
+                rejectedAt: rejectedAtMs,
+                processedAt: rejectedAtMs,
+                processedBy: processedByEmail,
+                rejectReason: finalReason,
+                rejectionReason: finalReason,
+              },
+              ...prev,
+            ]
+          : prev;
+      });
     } catch (err) {
       console.error('Lỗi từ chối nạp tiền trên Firestore:', err);
       throw err;

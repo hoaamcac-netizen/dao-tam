@@ -4977,9 +4977,81 @@ export async function createTopUpRequestInFirestore(
   }
 }
 
+const VN_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+function toTopUpTimestampMs(val: any): number {
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  if (val && typeof val.toMillis === 'function') return val.toMillis();
+  if (val && typeof val.seconds === 'number') return val.seconds * 1000;
+  if (typeof val === 'string') {
+    const parsed = Date.parse(val);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function normalizeTopUpDoc(docId: string, rawData: Record<string, any>): TopUpRequest {
+  const createdAt = toTopUpTimestampMs(rawData.createdAt);
+  const approvedAt = toTopUpTimestampMs(rawData.approvedAt) || undefined;
+  const rejectedAt = toTopUpTimestampMs(rawData.rejectedAt) || undefined;
+  const processedAt =
+    toTopUpTimestampMs(rawData.processedAt) || approvedAt || rejectedAt || undefined;
+  const rejectReason =
+    typeof rawData.rejectReason === 'string' && rawData.rejectReason.trim()
+      ? rawData.rejectReason.trim()
+      : typeof rawData.rejectionReason === 'string' && rawData.rejectionReason.trim()
+      ? rawData.rejectionReason.trim()
+      : undefined;
+
+  return {
+    ...(rawData as TopUpRequest),
+    id: docId,
+    userEmail: typeof rawData.userEmail === 'string' ? rawData.userEmail.trim() : '',
+    userName: typeof rawData.userName === 'string' ? rawData.userName.trim() : '',
+    amountVnd: Number(rawData.amountVnd) || 0,
+    xuAmount: Number(rawData.xuAmount) || 0,
+    createdAt,
+    approvedAt,
+    rejectedAt,
+    processedAt,
+    processedBy:
+      typeof rawData.processedBy === 'string' && rawData.processedBy.trim()
+        ? rawData.processedBy.trim()
+        : undefined,
+    rejectReason,
+    rejectionReason: rejectReason,
+  };
+}
+
+export function getVietnamYearMonthKey(referenceMs: number = Date.now()): string {
+  const vnDate = new Date(referenceMs + VN_OFFSET_MS);
+  const year = vnDate.getUTCFullYear();
+  const month = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+export function getVietnamDateKey(referenceMs: number = Date.now()): string {
+  const vnDate = new Date(referenceMs + VN_OFFSET_MS);
+  const year = vnDate.getUTCFullYear();
+  const month = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(vnDate.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function getVietnamMonthRangeMs(yearMonth: string): { startMs: number; endMs: number } {
+  const match = /^(\d{4})-(\d{2})$/.exec((yearMonth || '').trim());
+  const nowVn = new Date(Date.now() + VN_OFFSET_MS);
+  const year = match ? Number(match[1]) : nowVn.getUTCFullYear();
+  const monthIdx = match ? Math.max(0, Math.min(11, Number(match[2]) - 1)) : nowVn.getUTCMonth();
+
+  const startMs = Date.UTC(year, monthIdx, 1, 0, 0, 0, 0) - VN_OFFSET_MS;
+  const endMs = Date.UTC(year, monthIdx + 1, 1, 0, 0, 0, 0) - VN_OFFSET_MS;
+  return { startMs, endMs };
+}
+
 /**
  * Tải danh sách yêu cầu nạp tiền:
- * - Admin: Tải toàn bộ danh sách
+ * - Admin (khi khởi tạo): Chỉ lấy các đơn đang chờ duyệt (pending) để hiển thị badge, tiết kiệm Reads
  * - User thường: Chỉ tải yêu cầu của chính user (filterUserId)
  */
 export async function fetchTopUpRequestsFromFirestore(filterUserId?: string): Promise<TopUpRequest[]> {
@@ -4988,21 +5060,91 @@ export async function fetchTopUpRequestsFromFirestore(filterUserId?: string): Pr
     const colRef = collection(db, path);
     const q = filterUserId
       ? query(colRef, where('userId', '==', filterUserId), limit(20))
-      : query(colRef, orderBy('createdAt', 'desc'), limit(20));
+      : query(colRef, where('status', '==', 'pending'), limit(50));
 
     const snap = await getDocs(q);
-    const list: TopUpRequest[] = (snap?.docs || []).map((d) => ({
-      ...(d.data() as TopUpRequest),
-      id: d.id,
-    }));
+    const list: TopUpRequest[] = (snap?.docs || []).map((d) =>
+      normalizeTopUpDoc(d.id, d.data() as Record<string, any>)
+    );
 
-    if (filterUserId) {
-      list.sort((a, b) => b.createdAt - a.createdAt);
-    }
+    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     return list;
   } catch (error) {
     console.warn('Lỗi tải topup_requests:', error);
     return [];
+  }
+}
+
+/**
+ * PHÍA ADMIN: Truy vấn các bill nạp xu nằm trong đúng khoảng thời gian của Tháng đang chọn (YYYY-MM),
+ * sắp xếp mới nhất lên đầu. KHÔNG tải toàn bộ collection.
+ */
+export async function fetchTopUpRequestsByMonthFromFirestore(yearMonth: string): Promise<TopUpRequest[]> {
+  const path = 'topup_requests';
+  const { startMs, endMs } = getVietnamMonthRangeMs(yearMonth);
+  try {
+    const colRef = collection(db, path);
+    const q = query(
+      colRef,
+      where('createdAt', '>=', startMs),
+      where('createdAt', '<', endMs),
+      orderBy('createdAt', 'desc'),
+      limit(500)
+    );
+    const snap = await getDocs(q);
+    const list: TopUpRequest[] = (snap?.docs || []).map((d) =>
+      normalizeTopUpDoc(d.id, d.data() as Record<string, any>)
+    );
+    list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return list;
+  } catch (error) {
+    console.warn(`Lỗi tải topup_requests tháng ${yearMonth}:`, error);
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+/**
+ * PHÍA ADMIN: Tìm toàn bộ lịch sử bill của 1 Gmail trên Firebase (không giới hạn tháng).
+ * Không dùng orderBy kèm where userEmail để tránh yêu cầu Composite Index.
+ */
+export async function fetchTopUpRequestsByGmailFromFirestore(emailQuery: string): Promise<TopUpRequest[]> {
+  const path = 'topup_requests';
+  const raw = (emailQuery || '').trim();
+  const lower = raw.toLowerCase();
+  if (!lower) return [];
+
+  try {
+    const colRef = collection(db, path);
+    const mergedById = new Map<string, TopUpRequest>();
+
+    if (lower.includes('@')) {
+      const queries = [query(colRef, where('userEmail', '==', lower), limit(200))];
+      if (raw !== lower) {
+        queries.push(query(colRef, where('userEmail', '==', raw), limit(200)));
+      }
+      const snaps = await Promise.all(queries.map((q) => getDocs(q)));
+      snaps.forEach((snap) => {
+        (snap?.docs || []).forEach((d) => {
+          mergedById.set(d.id, normalizeTopUpDoc(d.id, d.data() as Record<string, any>));
+        });
+      });
+    } else {
+      const q = query(
+        colRef,
+        where('userEmail', '>=', lower),
+        where('userEmail', '<=', `${lower}\uf8ff`),
+        limit(200)
+      );
+      const snap = await getDocs(q);
+      (snap?.docs || []).forEach((d) => {
+        mergedById.set(d.id, normalizeTopUpDoc(d.id, d.data() as Record<string, any>));
+      });
+    }
+
+    return Array.from(mergedById.values()).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  } catch (error) {
+    console.warn(`Lỗi tìm kiếm lịch sử nạp theo Gmail "${raw}":`, error);
+    handleFirestoreError(error, OperationType.LIST, path);
   }
 }
 
@@ -5146,16 +5288,23 @@ export async function fetchTodayApprovedTopUpsFromFirestore(): Promise<TopUpRequ
  * Nếu 1 trong 3 việc thất bại, Firebase tự động Rollback toàn bộ.
  * (4) Sau khi transaction cộng xu thành công, cập nhật stats/finance trong try/catch riêng để không ảnh hưởng tới khách.
  */
-export async function approveTopUpTransactionInFirestore(requestId: string): Promise<{
+export async function approveTopUpTransactionInFirestore(
+  requestId: string,
+  adminEmail?: string
+): Promise<{
   nextXu: number;
   userId: string;
   xuAmount: number;
   amountVnd: number;
   transferCode: string;
+  processedAt: number;
+  processedBy: string;
 }> {
   const path = `topup_requests/${requestId}`;
   try {
     const reqRef = doc(db, 'topup_requests', requestId);
+    const resolvedAdminEmail =
+      adminEmail?.trim() || auth.currentUser?.email?.trim() || 'admin@daotam.vn';
 
     const result = await runTransaction(db, async (transaction) => {
       // =========================================================================
@@ -5188,13 +5337,13 @@ export async function approveTopUpTransactionInFirestore(requestId: string): Pro
 
       // Tính toán dữ liệu trong bộ nhớ (Chưa gọi bất kỳ lệnh ghi nào)
       let nextXu = reqData.xuAmount;
-      let existingNotifications: UserNotification[] = [];
 
       if (userSnap.exists()) {
         const uData = userSnap.data() as Record<string, any>;
         nextXu = extractXuBalances(uData).xuBalance + reqData.xuAmount;
-        existingNotifications = Array.isArray(uData?.notifications) ? uData.notifications : [];
       }
+
+      const processedAtMs = Date.now();
 
       // Chuẩn bị document thông báo nạp thành công (Chỉ tạo tham chiếu, chưa ghi)
       const notifCol = collection(db, 'notifications');
@@ -5205,7 +5354,7 @@ export async function approveTopUpTransactionInFirestore(requestId: string): Pro
         title: `Bạn đã nạp ${formatXu(reqData.xuAmount)} Xu thành công`,
         message: `Yêu cầu nạp ${reqData.amountVnd.toLocaleString('vi-VN')}đ (+${formatXu(reqData.xuAmount)} Xu) với mã GD "${reqData.transferCode}" đã được Admin phê duyệt thành công! Số dư ví hiện tại là ${formatXu(nextXu)} Xu.`,
         type: 'topup',
-        createdAt: Date.now(),
+        createdAt: processedAtMs,
         isRead: false,
         topUpRequestId: requestId,
       };
@@ -5214,10 +5363,12 @@ export async function approveTopUpTransactionInFirestore(requestId: string): Pro
       // GIAI ĐOẠN 2: TẤT CẢ LỆNH GHI (WRITES) NẰM Ở NỬA DƯỚI (TUYỆT ĐỐI KHÔNG CÒN GET)
       // =========================================================================
 
-      // (1) Đổi status lệnh nạp thành 'approved'
+      // (1) Đổi status lệnh nạp thành 'approved', lưu vĩnh viễn lịch sử xử lý (KHÔNG XÓA)
       transaction.update(reqRef, {
         status: 'approved',
-        approvedAt: Date.now(),
+        approvedAt: processedAtMs,
+        processedAt: processedAtMs,
+        processedBy: resolvedAdminEmail,
       });
 
       // (2) Cập nhật ví User bằng increment() an toàn tuyệt đối (không ghi đè số dư tuyệt đối)
@@ -5251,6 +5402,8 @@ export async function approveTopUpTransactionInFirestore(requestId: string): Pro
         xuAmount: reqData.xuAmount,
         amountVnd: reqData.amountVnd,
         transferCode: reqData.transferCode,
+        processedAt: processedAtMs,
+        processedBy: resolvedAdminEmail,
       };
     });
 
@@ -5294,16 +5447,22 @@ export const approveTopUpRequest = approveTopUpTransactionInFirestore;
  */
 export async function rejectTopUpTransactionInFirestore(
   requestId: string,
-  reason?: string
+  reason?: string,
+  adminEmail?: string
 ): Promise<{
   userId: string;
   transferCode: string;
   amountVnd: number;
   xuAmount: number;
+  processedAt: number;
+  processedBy: string;
+  rejectReason: string;
 }> {
   const path = `topup_requests/${requestId}`;
   try {
     const reqRef = doc(db, 'topup_requests', requestId);
+    const resolvedAdminEmail =
+      adminEmail?.trim() || auth.currentUser?.email?.trim() || 'admin@daotam.vn';
 
     return await runTransaction(db, async (transaction) => {
       // =========================================================================
@@ -5341,10 +5500,13 @@ export async function rejectTopUpTransactionInFirestore(
         }
       }
 
+      const processedAtMs = Date.now();
+      const finalReason = reason?.trim() || 'Từ chối bởi Quản trị viên';
+
       // Chuẩn bị payload thông báo từ chối (trong bộ nhớ)
       const notifCol = collection(db, 'notifications');
       const notifDocRef = doc(notifCol);
-      const customReason = reason?.trim() 
+      const customReason = reason?.trim()
         ? `Lý do: ${reason.trim()}`
         : 'Vui lòng kiểm tra lại thông tin chuyển khoản ngân hàng, mã giao dịch hoặc liên hệ Ban Quản Trị Đạo Tâm để được hỗ trợ.';
 
@@ -5354,7 +5516,7 @@ export async function rejectTopUpTransactionInFirestore(
         title: `Lệnh nạp ${formatXu(reqData.xuAmount)} Xu đã bị từ chối`,
         message: `Lệnh nạp ${reqData.amountVnd.toLocaleString('vi-VN')}đ (+${formatXu(reqData.xuAmount)} Xu) với mã GD "${reqData.transferCode}" đã bị từ chối. ${customReason}`,
         type: 'topup',
-        createdAt: Date.now(),
+        createdAt: processedAtMs,
         isRead: false,
         topUpRequestId: requestId,
       };
@@ -5363,11 +5525,14 @@ export async function rejectTopUpTransactionInFirestore(
       // GIAI ĐOẠN 2: TẤT CẢ LỆNH GHI (WRITES) NẰM Ở NỬA DƯỚI (TUYỆT ĐỐI KHÔNG CÒN GET)
       // =========================================================================
 
-      // (1) Cập nhật trạng thái lệnh nạp thành 'rejected'
+      // (1) Cập nhật trạng thái lệnh nạp thành 'rejected', lưu vĩnh viễn lịch sử xử lý (KHÔNG XÓA)
       transaction.update(reqRef, {
         status: 'rejected',
-        rejectedAt: Date.now(),
-        rejectionReason: reason || 'Từ chối bởi Quản trị viên',
+        rejectedAt: processedAtMs,
+        processedAt: processedAtMs,
+        processedBy: resolvedAdminEmail,
+        rejectReason: finalReason,
+        rejectionReason: finalReason,
       });
 
       // (2) Ghi document thông báo vào collection 'notifications'
@@ -5385,6 +5550,9 @@ export async function rejectTopUpTransactionInFirestore(
         transferCode: reqData.transferCode,
         amountVnd: reqData.amountVnd,
         xuAmount: reqData.xuAmount,
+        processedAt: processedAtMs,
+        processedBy: resolvedAdminEmail,
+        rejectReason: finalReason,
       };
     });
   } catch (error) {

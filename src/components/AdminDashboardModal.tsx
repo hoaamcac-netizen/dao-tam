@@ -6,20 +6,22 @@ import {
   deleteNovelCommentFromFirestore,
   approveTopUpTransactionInFirestore,
   rejectTopUpTransactionInFirestore,
+  fetchTopUpRequestsByMonthFromFirestore,
+  fetchTopUpRequestsByGmailFromFirestore,
   fetchUsersPaginatedFromFirestore,
   searchUsersByEmailPrefixFromFirestore,
   fetchLockedUsersCountFromFirestore,
   sortUsersAdminPriority,
   toggleBanUserInFirestore,
-  listenToPendingTopUpRequestsRealtime,
   fetchGlobalBannerSettingsForAdmin,
   saveGlobalBannerSettings,
   donateCoinsToUserByAdmin,
   grantStoryAccessToUserByAdmin,
   mergeDuplicateUsers,
   fetchFinanceStatsFromFirestore,
-  fetchTodayApprovedTopUpsFromFirestore,
   getVietnamStartOfDayMs,
+  getVietnamYearMonthKey,
+  getVietnamDateKey,
   updateNovelMetadataInFirestore,
   type FinanceStats
 } from '../firebase/services';
@@ -75,7 +77,11 @@ import {
   GitMerge,
   RefreshCw,
   Headphones,
-  Youtube
+  Youtube,
+  Calendar,
+  Mail,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
 import { DaoTamLogo } from './DaoTamLogo';
 import { AdminNovelMp3DrawerModal } from './AdminGitHubAudioManager';
@@ -92,7 +98,14 @@ interface AdminDashboardModalProps {
       nextXu?: number;
     }
   ) => void;
-  onRejectRequest: (requestId: string) => void;
+  onRejectRequest: (
+    requestId: string,
+    reason?: string,
+    options?: {
+      alreadyProcessedInFirestore?: boolean;
+      rejectedRequest?: TopUpRequest;
+    }
+  ) => void;
   user: UserProfile;
   novels: Novel[];
   onAddBatchChapters: (novelId: string, chapters: Chapter[]) => void;
@@ -177,13 +190,31 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
   const [youtubeFormError, setYoutubeFormError] = useState<string | null>(null);
   const [isSavingYoutubeSettings, setIsSavingYoutubeSettings] = useState<boolean>(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
-  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'approved'>('pending');
+  const [filterStatus, setFilterStatus] = useState<'pending' | 'approved' | 'rejected' | 'all'>('pending');
   const [reportFilterStatus, setReportFilterStatus] = useState<'all' | 'pending' | 'resolved'>('pending');
   const [previewSubmission, setPreviewSubmission] = useState<NovelSubmission | null>(null);
   const [previewChapterIndex, setPreviewChapterIndex] = useState<number>(0);
   const [copiedStkId, setCopiedStkId] = useState<string | null>(null);
+  const [copiedEmailId, setCopiedEmailId] = useState<string | null>(null);
   const [inspectingBillRequest, setInspectingBillRequest] = useState<TopUpRequest | null>(null);
+  const [isBillZoomed, setIsBillZoomed] = useState<boolean>(false);
   const [copiedCodeInModal, setCopiedCodeInModal] = useState(false);
+
+  // Bộ lọc Duyệt Nạp / Dò Bill theo Tháng, Ngày & Gmail + Cache theo tháng trong phiên
+  const currentVnMonthKey = getVietnamYearMonthKey();
+  const [selectedTopUpMonth, setSelectedTopUpMonth] = useState<string>(currentVnMonthKey);
+  const [selectedTopUpDate, setSelectedTopUpDate] = useState<string>('');
+  const [gmailSearchInput, setGmailSearchInput] = useState<string>('');
+  const [appliedGmailFilter, setAppliedGmailFilter] = useState<string>('');
+  const [monthlyTopUpCache, setMonthlyTopUpCache] = useState<Record<string, TopUpRequest[]>>({});
+  const [loadingTopUpMonth, setLoadingTopUpMonth] = useState<string | null>(null);
+  const [globalGmailSearchEmail, setGlobalGmailSearchEmail] = useState<string | null>(null);
+  const [globalGmailResults, setGlobalGmailResults] = useState<TopUpRequest[]>([]);
+  const [isSearchingGlobalGmail, setIsSearchingGlobalGmail] = useState<boolean>(false);
+
+  // Modal nhập lý do từ chối bill
+  const [rejectingModalRequest, setRejectingModalRequest] = useState<TopUpRequest | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState<string>('');
 
   // Top-Up Request Approval & Rejection Safe Handling State
   const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
@@ -192,47 +223,64 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     text: string;
   } | null>(null);
 
-  // Realtime onSnapshot (DUY NHẤT cho Tab 1 Duyệt Nạp Xu): Lắng nghe lệnh nạp pending limit(20), tự hủy khi đóng modal hoặc chuyển tab
-  const [livePendingTopUps, setLivePendingTopUps] = useState<TopUpRequest[] | null>(null);
   const [financeStats, setFinanceStats] = useState<FinanceStats | null>(null);
   const [isLoadingFinanceStats, setIsLoadingFinanceStats] = useState<boolean>(false);
-  const [todayApprovedRequests, setTodayApprovedRequests] = useState<TopUpRequest[]>([]);
+  const financeStatsLoadedRef = useRef<boolean>(false);
+
+  const loadMonthTopUps = async (monthKey: string, forceRefresh = false) => {
+    if (!monthKey) return;
+    if (!forceRefresh && monthlyTopUpCache[monthKey] !== undefined) {
+      return;
+    }
+    setLoadingTopUpMonth(monthKey);
+    try {
+      const rows = await fetchTopUpRequestsByMonthFromFirestore(monthKey);
+      setMonthlyTopUpCache((prev) => ({
+        ...prev,
+        [monthKey]: Array.isArray(rows) ? rows : [],
+      }));
+    } catch (err: any) {
+      console.warn(`Lỗi tải danh sách nạp xu tháng ${monthKey}:`, err);
+      setTopUpFeedback({
+        type: 'warning_error',
+        text: `Không thể tải lịch sử nạp xu tháng ${monthKey}: ${err?.message || 'Lỗi kết nối hệ thống'}`,
+      });
+    } finally {
+      setLoadingTopUpMonth((prev) => (prev === monthKey ? null : prev));
+    }
+  };
 
   useEffect(() => {
     if (!isOpen || activeTab !== 'requests') return;
 
     let isMounted = true;
 
-    // Đọc 1 lần duy nhất document stats/finance (chỉ tốn 1 Read) + đơn duyệt hôm nay theo giờ VN
-    setIsLoadingFinanceStats(true);
-    Promise.all([
-      fetchFinanceStatsFromFirestore(),
-      fetchTodayApprovedTopUpsFromFirestore(),
-    ])
-      .then(([statsDoc, todayApprovedList]) => {
-        if (!isMounted) return;
-        setFinanceStats(statsDoc);
-        setTodayApprovedRequests(Array.isArray(todayApprovedList) ? todayApprovedList : []);
-      })
-      .catch((err) => {
-        console.warn('Không thể tải thống kê doanh thu Admin:', err);
-      })
-      .finally(() => {
-        if (isMounted) setIsLoadingFinanceStats(false);
-      });
+    // Chỉ đọc 1 lần document stats/finance trong phiên (1 Read)
+    if (!financeStatsLoadedRef.current) {
+      setIsLoadingFinanceStats(true);
+      fetchFinanceStatsFromFirestore()
+        .then((statsDoc) => {
+          if (!isMounted) return;
+          financeStatsLoadedRef.current = true;
+          setFinanceStats(statsDoc);
+        })
+        .catch((err) => {
+          console.warn('Không thể tải thống kê doanh thu Admin:', err);
+        })
+        .finally(() => {
+          if (isMounted) setIsLoadingFinanceStats(false);
+        });
+    }
 
-    // Truy vấn Realtime where('status', '==', 'pending'), limit(20)
-    const unsubscribe = listenToPendingTopUpRequestsRealtime((pendingList) => {
-      if (!isMounted) return;
-      setLivePendingTopUps(Array.isArray(pendingList) ? pendingList : []);
-    });
+    // Chỉ truy vấn Firebase đúng tháng đang chọn nếu tháng đó chưa có trong cache phiên
+    if (!globalGmailSearchEmail && monthlyTopUpCache[selectedTopUpMonth] === undefined) {
+      loadMonthTopUps(selectedTopUpMonth);
+    }
 
-    // Cleanup function: Ngắt kết nối ngay khi đóng modal hoặc chuyển tab khác để bảo vệ Quota
     return () => {
       isMounted = false;
-      unsubscribe();
     };
-  }, [isOpen, activeTab]);
+  }, [isOpen, activeTab, selectedTopUpMonth, globalGmailSearchEmail]);
 
   // User Management State (Spark Quota Optimized with limit 25 & startAfter)
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
@@ -785,22 +833,6 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     return true;
   });
 
-  const effectiveTopUpRequests = livePendingTopUps
-    ? [...livePendingTopUps, ...safeTopUpRequests.filter((r) => r.status !== 'pending')]
-    : safeTopUpRequests;
-
-  const filteredRequests = (effectiveTopUpRequests || []).filter((r) => {
-    if (filterStatus === 'all') return true;
-    return r.status === filterStatus;
-  });
-
-  const pendingSubmissions = safeNovelSubmissions.filter((s) => s.status === 'pending');
-  const processedSubmissions = safeNovelSubmissions.filter((s) => s.status !== 'pending');
-  const displayedSubmissions = submissionFilterStatus === 'pending' ? pendingSubmissions : processedSubmissions;
-  const pendingTopUpCount = (livePendingTopUps || safeTopUpRequests).filter((r) => r.status === 'pending')?.length || 0;
-  const pendingWithdrawalCount = safeWithdrawalRequests.filter((w) => w.status === 'pending')?.length || 0;
-  const pendingReportsCount = safeNovelReports.filter((r) => r.status === 'pending')?.length || 0;
-
   const toTimestampMs = (val: any): number => {
     if (typeof val === 'number' && Number.isFinite(val)) return val;
     if (val && typeof val.toMillis === 'function') return val.toMillis();
@@ -808,16 +840,99 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     return 0;
   };
 
-  // Tính doanh thu & Xu đã duyệt HÔM NAY (từ 00:00:00 giờ Việt Nam)
+  const formatDateTimeDdMmYyyyHhMm = (val: any): string => {
+    const ms = toTimestampMs(val);
+    if (!ms) return '--/--/---- --:--';
+    const vnDate = new Date(ms + 7 * 60 * 60 * 1000);
+    const dd = String(vnDate.getUTCDate()).padStart(2, '0');
+    const mm = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+    const yyyy = vnDate.getUTCFullYear();
+    const hh = String(vnDate.getUTCHours()).padStart(2, '0');
+    const min = String(vnDate.getUTCMinutes()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}`;
+  };
+
+  // Nguồn dữ liệu chính của Tab Duyệt Nạp: chế độ tìm toàn bộ Gmail HOẶC tháng đang chọn (đã cache)
+  const activeTopUpSourceList: TopUpRequest[] = globalGmailSearchEmail
+    ? globalGmailResults
+    : monthlyTopUpCache[selectedTopUpMonth] ??
+      safeTopUpRequests.filter((r) => getVietnamYearMonthKey(toTimestampMs(r.createdAt)) === selectedTopUpMonth);
+
+  // Lọc theo Ngày cụ thể và Gmail (trên dữ liệu đã tải, 0 Reads thêm)
+  const scopedTopUpRequests = (activeTopUpSourceList || []).filter((req) => {
+    if (!globalGmailSearchEmail && selectedTopUpDate) {
+      const reqDateKey = getVietnamDateKey(toTimestampMs(req.createdAt));
+      if (reqDateKey !== selectedTopUpDate) return false;
+    }
+    const qEmail = appliedGmailFilter.trim().toLowerCase();
+    if (qEmail) {
+      const reqEmail = (req.userEmail || '').toLowerCase();
+      if (!reqEmail.includes(qEmail)) return false;
+    }
+    return true;
+  });
+
+  // Đếm 4 tab trạng thái trong phạm vi đang lọc
+  const topUpTabCounts = {
+    pending: scopedTopUpRequests.filter((r) => r.status === 'pending').length,
+    approved: scopedTopUpRequests.filter((r) => r.status === 'approved').length,
+    rejected: scopedTopUpRequests.filter((r) => r.status === 'rejected').length,
+    all: scopedTopUpRequests.length,
+  };
+
+  const filteredRequests = scopedTopUpRequests.filter((r) => {
+    if (filterStatus === 'all') return true;
+    return r.status === filterStatus;
+  });
+
+  // Cảnh báo trùng lặp: cùng 1 Gmail gửi >= 2 yêu cầu nạp giống nhau về số tiền trong vòng 24 giờ
+  const duplicateRequestIds = new Set<string>();
+  const duplicateCheckGroups = new Map<string, TopUpRequest[]>();
+  (activeTopUpSourceList || []).forEach((req) => {
+    if (req.status === 'cancelled') return;
+    const normEmail = (req.userEmail || '').trim().toLowerCase();
+    if (!normEmail) return;
+    const key = `${normEmail}::${Number(req.amountVnd) || 0}`;
+    const arr = duplicateCheckGroups.get(key) || [];
+    arr.push(req);
+    duplicateCheckGroups.set(key, arr);
+  });
+  duplicateCheckGroups.forEach((items) => {
+    if (items.length < 2) return;
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const t1 = toTimestampMs(items[i].createdAt);
+        const t2 = toTimestampMs(items[j].createdAt);
+        if (Math.abs(t1 - t2) <= DAY_MS) {
+          duplicateRequestIds.add(items[i].id);
+          duplicateRequestIds.add(items[j].id);
+        }
+      }
+    }
+  });
+
+  const pendingSubmissions = safeNovelSubmissions.filter((s) => s.status === 'pending');
+  const processedSubmissions = safeNovelSubmissions.filter((s) => s.status !== 'pending');
+  const displayedSubmissions = submissionFilterStatus === 'pending' ? pendingSubmissions : processedSubmissions;
+  const pendingTopUpCount =
+    (monthlyTopUpCache[currentVnMonthKey] || safeTopUpRequests).filter((r) => r.status === 'pending')?.length || 0;
+  const pendingWithdrawalCount = safeWithdrawalRequests.filter((w) => w.status === 'pending')?.length || 0;
+  const pendingReportsCount = safeNovelReports.filter((r) => r.status === 'pending')?.length || 0;
+
+  // Tính doanh thu & Xu đã duyệt HÔM NAY từ cache tháng hiện tại (0 Reads phát sinh)
   const vnStartOfDayMs = getVietnamStartOfDayMs();
   const approvedTopUpsById = new Map<string, TopUpRequest>();
-  [...effectiveTopUpRequests, ...todayApprovedRequests].forEach((req) => {
+  [
+    ...(monthlyTopUpCache[currentVnMonthKey] || []),
+    ...safeTopUpRequests,
+  ].forEach((req) => {
     if (!req?.id || req.status !== 'approved') return;
     approvedTopUpsById.set(req.id, req);
   });
 
   const todayApprovedList = Array.from(approvedTopUpsById.values()).filter((r) => {
-    const actionTimeMs = toTimestampMs(r.approvedAt) || toTimestampMs(r.createdAt);
+    const actionTimeMs = toTimestampMs(r.processedAt) || toTimestampMs(r.approvedAt) || toTimestampMs(r.createdAt);
     return actionTimeMs >= vnStartOfDayMs;
   });
 
@@ -874,14 +989,93 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
     setTimeout(() => setCopiedStkId(null), 2000);
   };
 
-  // Xử lý duyệt nạp xu nguyên tử (Atomic Transaction):
-  // 1. Kiểm tra validation: status phải là 'pending'
-  // 2. Chặn double-click bằng processingRequestId
-  // 3. Thực hiện 3 việc cùng lúc: Đổi status 'approved', cộng Xu vào ví User, ghi document vào collection notifications
-  // 4. Nếu thành công: hiển thị banner màu HỒNG
-  // 5. Nếu lỗi mạng/database: bắt lỗi catch và hiển thị banner màu VÀNG (tuyệt đối không dùng màu đỏ)
+  const handleCopyEmail = (id: string, email: string) => {
+    if (!email) return;
+    navigator.clipboard.writeText(email);
+    setCopiedEmailId(id);
+    setTimeout(() => setCopiedEmailId(null), 2000);
+  };
+
+  const applyTopUpPatchInMemory = (requestId: string, updater: (prevReq: TopUpRequest) => TopUpRequest) => {
+    setMonthlyTopUpCache((prev) => {
+      const next: Record<string, TopUpRequest[]> = {};
+      for (const [k, list] of Object.entries(prev)) {
+        next[k] = list.map((r) => (r.id === requestId ? updater(r) : r));
+      }
+      return next;
+    });
+    setGlobalGmailResults((prev) => prev.map((r) => (r.id === requestId ? updater(r) : r)));
+    setInspectingBillRequest((prev) => (prev && prev.id === requestId ? updater(prev) : prev));
+  };
+
+  const handleSelectTopUpMonth = (nextMonth: string) => {
+    if (!nextMonth) return;
+    setGlobalGmailSearchEmail(null);
+    setSelectedTopUpMonth(nextMonth);
+    if (selectedTopUpDate && !selectedTopUpDate.startsWith(nextMonth)) {
+      setSelectedTopUpDate('');
+    }
+    if (monthlyTopUpCache[nextMonth] === undefined) {
+      loadMonthTopUps(nextMonth);
+    }
+  };
+
+  const handleSelectTopUpDate = (nextDate: string) => {
+    setGlobalGmailSearchEmail(null);
+    setSelectedTopUpDate(nextDate);
+    if (nextDate && nextDate.length >= 7) {
+      const monthFromDate = nextDate.slice(0, 7);
+      if (monthFromDate !== selectedTopUpMonth) {
+        setSelectedTopUpMonth(monthFromDate);
+        if (monthlyTopUpCache[monthFromDate] === undefined) {
+          loadMonthTopUps(monthFromDate);
+        }
+      }
+    }
+  };
+
+  const handleSubmitLocalGmailSearch = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAppliedGmailFilter(gmailSearchInput.trim());
+  };
+
+  const handleSearchAllHistoryByGmail = async () => {
+    const clean = gmailSearchInput.trim().toLowerCase();
+    if (!clean) {
+      setTopUpFeedback({
+        type: 'warning_error',
+        text: 'Vui lòng nhập Gmail người nạp trước khi tìm toàn bộ lịch sử.',
+      });
+      return;
+    }
+    setAppliedGmailFilter(clean);
+    setIsSearchingGlobalGmail(true);
+    setTopUpFeedback(null);
+    try {
+      const results = await fetchTopUpRequestsByGmailFromFirestore(clean);
+      setGlobalGmailSearchEmail(clean);
+      setGlobalGmailResults(Array.isArray(results) ? results : []);
+      setFilterStatus('all');
+    } catch (err: any) {
+      setTopUpFeedback({
+        type: 'warning_error',
+        text: `Không thể truy vấn lịch sử Gmail "${clean}": ${err?.message || 'Lỗi kết nối Firestore'}`,
+      });
+    } finally {
+      setIsSearchingGlobalGmail(false);
+    }
+  };
+
+  const handleExitGlobalGmailSearch = () => {
+    setGlobalGmailSearchEmail(null);
+    setGlobalGmailResults([]);
+  };
+
+  // Xử lý duyệt nạp xu nguyên tử (1 Write cập nhật bill + cộng Xu ví User, không xóa, không re-fetch)
   const handleApprove = async (docId: string) => {
-    const targetReq = effectiveTopUpRequests.find((r) => r.id === docId);
+    const targetReq =
+      activeTopUpSourceList.find((r) => r.id === docId) ||
+      safeTopUpRequests.find((r) => r.id === docId);
     if (!targetReq) return;
 
     if (processingRequestId || targetReq.status !== 'pending') {
@@ -891,18 +1085,19 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
     setProcessingRequestId(docId);
     try {
-      const approvedResult = await approveTopUpTransactionInFirestore(docId);
-      const approvedNow = Date.now();
+      const adminEmail = user?.email || 'admin@daotam.vn';
+      const approvedResult = await approveTopUpTransactionInFirestore(docId, adminEmail);
+      const approvedNow = approvedResult.processedAt || Date.now();
       const updatedReq: TopUpRequest = {
         ...targetReq,
         status: 'approved',
         approvedAt: approvedNow,
+        processedAt: approvedNow,
+        processedBy: approvedResult.processedBy || adminEmail,
       };
 
-      setTodayApprovedRequests((prev) => [
-        updatedReq,
-        ...prev.filter((r) => r.id !== docId),
-      ]);
+      applyTopUpPatchInMemory(docId, () => updatedReq);
+
       setFinanceStats((prev) => ({
         totalRevenueVnd: (prev?.totalRevenueVnd || 0) + (Number(approvedResult.amountVnd) || 0),
         totalApprovedXu: (prev?.totalApprovedXu || 0) + (Number(approvedResult.xuAmount) || 0),
@@ -917,7 +1112,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
       setTopUpFeedback({
         type: 'success',
-        text: `✓ Đã phê duyệt thành công lệnh nạp mã "${targetReq.transferCode}"! Đã cộng +${targetReq.xuAmount.toLocaleString('vi-VN')} Xu vào ví của độc giả ${targetReq.userName}.`,
+        text: `Đã duyệt lệnh "${targetReq.transferCode}" (+${targetReq.xuAmount.toLocaleString('vi-VN')} Xu) cho ${targetReq.userEmail || targetReq.userName}.`,
       });
     } catch (err: any) {
       console.error('Lỗi khi duyệt nạp xu:', err);
@@ -928,42 +1123,55 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       } catch {}
       setTopUpFeedback({
         type: 'warning_error',
-        text: `⚠️ Cảnh báo lỗi duyệt nạp tiền: ${errMsg}`,
+        text: `Cảnh báo lỗi duyệt nạp tiền: ${errMsg}`,
       });
     } finally {
       setProcessingRequestId(null);
     }
   };
 
-  // Xử lý từ chối nạp xu:
-  // 1. Kiểm tra validation: status phải là 'pending'
-  // 2. Chặn double-click bằng processingRequestId
-  // 3. Hộp thoại xác nhận nhỏ (confirm) trước khi từ chối để tránh admin bấm nhầm
-  // 4. Cập nhật status thành 'rejected' và ghi document vào collection notifications báo user biết mã XYZ bị từ chối
-  // 5. Nếu thành công: hiển thị banner màu HỒNG
-  // 6. Nếu lỗi: bắt lỗi catch và hiển thị banner màu VÀNG (tuyệt đối không dùng màu đỏ)
-  const handleReject = async (docId: string) => {
-    const targetReq = safeTopUpRequests.find((r) => r.id === docId);
-    if (!targetReq) return;
+  // Mở modal nhập lý do từ chối
+  const openRejectModal = (req: TopUpRequest) => {
+    if (processingRequestId || req.status !== 'pending') return;
+    setRejectingModalRequest(req);
+    setRejectReasonInput('');
+  };
 
-    if (processingRequestId || targetReq.status !== 'pending') {
-      console.warn(`[Admin] Lệnh nạp ${docId} không ở trạng thái pending hoặc đang được xử lý.`);
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `⚠️ Bạn có chắc chắn muốn TỪ CHỐI lệnh nạp này không?\n\n• Mã GD: ${targetReq.transferCode}\n• Độc giả: ${targetReq.userName} (${targetReq.userEmail})\n• Số tiền: ${targetReq.amountVnd.toLocaleString('vi-VN')} VNĐ (+${targetReq.xuAmount} Xu)\n\nHệ thống sẽ đổi trạng thái thành "Từ chối" và gửi thông báo tới độc giả.`
-    );
-    if (!confirmed) return;
+  // Xác nhận từ chối bill (tuyệt đối KHÔNG deleteDoc, chỉ cập nhật status='rejected', processedAt, processedBy, rejectReason)
+  const handleConfirmReject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectingModalRequest || processingRequestId) return;
+    const targetReq = rejectingModalRequest;
+    const docId = targetReq.id;
+    const finalReason = rejectReasonInput.trim() || 'Chưa khớp giao dịch trên sao kê ngân hàng';
 
     setProcessingRequestId(docId);
     try {
-      await rejectTopUpTransactionInFirestore(docId);
-      onRejectRequest(docId);
+      const adminEmail = user?.email || 'admin@daotam.vn';
+      const rejectedResult = await rejectTopUpTransactionInFirestore(docId, finalReason, adminEmail);
+      const rejectedNow = rejectedResult.processedAt || Date.now();
+      const updatedReq: TopUpRequest = {
+        ...targetReq,
+        status: 'rejected',
+        rejectedAt: rejectedNow,
+        processedAt: rejectedNow,
+        processedBy: rejectedResult.processedBy || adminEmail,
+        rejectReason: rejectedResult.rejectReason || finalReason,
+        rejectionReason: rejectedResult.rejectReason || finalReason,
+      };
+
+      applyTopUpPatchInMemory(docId, () => updatedReq);
+      setRejectingModalRequest(null);
+      setRejectReasonInput('');
+
+      onRejectRequest(docId, finalReason, {
+        alreadyProcessedInFirestore: true,
+        rejectedRequest: updatedReq,
+      });
 
       setTopUpFeedback({
         type: 'success',
-        text: `✓ Đã từ chối lệnh nạp mã "${targetReq.transferCode}" của độc giả ${targetReq.userName} và gửi thông báo phản hồi tới tài khoản.`,
+        text: `Đã từ chối lệnh "${targetReq.transferCode}" của ${targetReq.userEmail || targetReq.userName} (lý do: ${finalReason}).`,
       });
     } catch (err: any) {
       console.error('Lỗi khi từ chối nạp xu:', err);
@@ -974,7 +1182,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       } catch {}
       setTopUpFeedback({
         type: 'warning_error',
-        text: `⚠️ Cảnh báo lỗi từ chối lệnh nạp: ${errMsg}`,
+        text: `Cảnh báo lỗi từ chối lệnh nạp: ${errMsg}`,
       });
     } finally {
       setProcessingRequestId(null);
@@ -1458,42 +1666,225 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
           )}
           
           {/* =========================================================================
-              TAB 1: DUYỆT NẠP XU (TOP-UP QUEUE)
+              TAB 1: DUYỆT NẠP XU / DÒ BILL (THEO THÁNG, NGÀY, GMAIL)
              ========================================================================= */}
           {activeTab === 'requests' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-                  <div className="text-slate-500 text-xs font-semibold">Doanh Thu Hôm Nay:</div>
-                  <div className="text-xl sm:text-2xl font-black text-emerald-600 mt-1">
+            <div className="space-y-4 overflow-x-hidden">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
+                <div className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="text-slate-500 text-[11px] sm:text-xs font-semibold">Doanh Thu Hôm Nay</div>
+                  <div className="text-base sm:text-xl font-black text-emerald-600 mt-1 tabular-nums">
                     {todayRevenueVnd.toLocaleString('vi-VN')} VNĐ
                   </div>
                 </div>
 
-                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-                  <div className="text-slate-500 text-xs font-semibold">Xu Đã Duyệt Hôm Nay:</div>
-                  <div className="text-xl sm:text-2xl font-black text-pink-600 mt-1">
+                <div className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="text-slate-500 text-[11px] sm:text-xs font-semibold">Xu Duyệt Hôm Nay</div>
+                  <div className="text-base sm:text-xl font-black text-pink-600 mt-1 tabular-nums">
                     {todayXuApproved.toLocaleString('vi-VN')} Xu
                   </div>
                 </div>
 
-                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-                  <div className="text-slate-500 text-xs font-semibold">Tổng Doanh Thu Tích Lũy:</div>
-                  <div className="text-xl sm:text-2xl font-black text-indigo-600 mt-1">
+                <div className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="text-slate-500 text-[11px] sm:text-xs font-semibold">Tổng Tích Lũy</div>
+                  <div className="text-base sm:text-xl font-black text-indigo-600 mt-1 tabular-nums">
                     {isLoadingFinanceStats && !financeStats
                       ? '...'
                       : `${allTimeRevenueVnd.toLocaleString('vi-VN')} VNĐ`}
                   </div>
-                  <div className="text-[11px] font-semibold text-slate-400 mt-0.5">
-                    Tổng Xu đã duyệt: {allTimeApprovedXu.toLocaleString('vi-VN')} Xu
+                  <div className="text-[11px] font-semibold text-slate-400 mt-0.5 tabular-nums truncate">
+                    {allTimeApprovedXu.toLocaleString('vi-VN')} Xu
                   </div>
                 </div>
 
-                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
-                  <div className="text-slate-500 text-xs font-semibold">Yêu Cầu Chờ Duyệt:</div>
-                  <div className="text-xl sm:text-2xl font-black text-rose-600 mt-1">
-                    {pendingTopUpCount} lệnh nạp
+                <div className="p-3.5 sm:p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="text-slate-500 text-[11px] sm:text-xs font-semibold">Chờ Duyệt Hiện Tại</div>
+                  <div className="text-base sm:text-xl font-black text-rose-600 mt-1 tabular-nums">
+                    {topUpTabCounts.pending} lệnh
                   </div>
+                </div>
+              </div>
+
+              {/* Thanh công cụ lọc gọn gàng Mobile-First: Tháng, Ngày cụ thể, Gmail & 4 Tab trạng thái */}
+              <div className="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3 overflow-x-hidden">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5">
+                  {/* Bộ chọn Tháng/Năm */}
+                  <div className="lg:col-span-3 space-y-1 min-w-0">
+                    <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                      <Calendar className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+                      <span>Tháng / Năm</span>
+                    </label>
+                    <input
+                      type="month"
+                      value={selectedTopUpMonth}
+                      onChange={(e) => handleSelectTopUpMonth(e.target.value)}
+                      className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:border-pink-500 focus:bg-white"
+                    />
+                  </div>
+
+                  {/* Bộ chọn Ngày cụ thể + Xóa lọc ngày */}
+                  <div className="lg:col-span-4 space-y-1 min-w-0">
+                    <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                      <Clock className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+                      <span>Ngày cụ thể (tùy chọn)</span>
+                    </label>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <input
+                        type="date"
+                        value={selectedTopUpDate}
+                        onChange={(e) => handleSelectTopUpDate(e.target.value)}
+                        className="flex-1 min-w-0 min-h-[44px] px-3 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs font-semibold text-slate-900 focus:outline-none focus:border-pink-500 focus:bg-white"
+                      />
+                      {selectedTopUpDate && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTopUpDate('')}
+                          className="min-h-[44px] px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer transition"
+                        >
+                          Xóa lọc ngày
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Ô tìm kiếm theo Gmail */}
+                  <form onSubmit={handleSubmitLocalGmailSearch} className="sm:col-span-2 lg:col-span-5 space-y-1 min-w-0">
+                    <label className="flex items-center gap-1.5 text-[11px] font-bold text-slate-600">
+                      <Mail className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+                      <span>Tìm kiếm theo Gmail người nạp</span>
+                    </label>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="relative flex-1 min-w-0">
+                        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={gmailSearchInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setGmailSearchInput(val);
+                            setAppliedGmailFilter(val.trim());
+                          }}
+                          placeholder="vd: docgia@gmail.com..."
+                          className="w-full min-h-[44px] pl-9 pr-8 py-2 rounded-xl bg-slate-50 border border-slate-300 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-pink-500 focus:bg-white"
+                        />
+                        {gmailSearchInput && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setGmailSearchInput('');
+                              setAppliedGmailFilter('');
+                              if (globalGmailSearchEmail) handleExitGlobalGmailSearch();
+                            }}
+                            aria-label="Xóa tìm Gmail"
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        type="submit"
+                        className="min-h-[44px] px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-xs font-bold whitespace-nowrap shrink-0 cursor-pointer transition"
+                      >
+                        Tìm
+                      </button>
+                    </div>
+                  </form>
+                </div>
+
+                {/* Thanh hành động phụ: Tìm toàn bộ lịch sử Gmail trên Firebase & Làm mới */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      disabled={!gmailSearchInput.trim() || isSearchingGlobalGmail}
+                      onClick={handleSearchAllHistoryByGmail}
+                      className="w-full sm:w-auto min-h-[44px] px-3.5 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition disabled:opacity-45 disabled:cursor-not-allowed"
+                    >
+                      {isSearchingGlobalGmail ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Đang tìm trên Firebase...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Tìm toàn bộ lịch sử Gmail này</span>
+                        </>
+                      )}
+                    </button>
+
+                    {globalGmailSearchEmail && (
+                      <button
+                        type="button"
+                        onClick={handleExitGlobalGmailSearch}
+                        className="w-full sm:w-auto min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Quay lại xem tháng {selectedTopUpMonth}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={loadingTopUpMonth === selectedTopUpMonth || isSearchingGlobalGmail}
+                    onClick={() => {
+                      if (globalGmailSearchEmail) {
+                        handleSearchAllHistoryByGmail();
+                      } else {
+                        loadMonthTopUps(selectedTopUpMonth, true);
+                      }
+                    }}
+                    className="w-full sm:w-auto min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition disabled:opacity-50 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingTopUpMonth === selectedTopUpMonth ? 'animate-spin' : ''}`} />
+                    <span>{globalGmailSearchEmail ? 'Tải lại lịch sử Gmail' : `Làm mới tháng ${selectedTopUpMonth}`}</span>
+                  </button>
+                </div>
+
+                {globalGmailSearchEmail && (
+                  <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <span>
+                      Đang hiển thị toàn bộ lịch sử nạp trên Firebase cho Gmail:{' '}
+                      <strong className="font-bold break-all">{globalGmailSearchEmail}</strong> ({globalGmailResults.length} giao dịch)
+                    </span>
+                  </div>
+                )}
+
+                {/* 4 Tab trạng thái kèm số lượng (Lưới 2 cột trên điện thoại, 1 hàng trên desktop) */}
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 pt-1">
+                  {(
+                    [
+                      { key: 'pending', label: 'Chờ duyệt', count: topUpTabCounts.pending, activeClass: 'bg-amber-500 text-white border-amber-600' },
+                      { key: 'approved', label: 'Đã duyệt', count: topUpTabCounts.approved, activeClass: 'bg-emerald-600 text-white border-emerald-700' },
+                      { key: 'rejected', label: 'Đã từ chối', count: topUpTabCounts.rejected, activeClass: 'bg-rose-600 text-white border-rose-700' },
+                      { key: 'all', label: 'Tất cả', count: topUpTabCounts.all, activeClass: 'bg-pink-600 text-white border-pink-700' },
+                    ] as const
+                  ).map((tab) => {
+                    const isActive = filterStatus === tab.key;
+                    return (
+                      <button
+                        key={tab.key}
+                        type="button"
+                        onClick={() => setFilterStatus(tab.key)}
+                        className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                          isActive
+                            ? `${tab.activeClass} shadow-xs`
+                            : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                        }`}
+                      >
+                        <span>{tab.label}</span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded-md text-[11px] font-black tabular-nums ${
+                            isActive ? 'bg-white/25 text-white' : 'bg-white text-slate-600 border border-slate-200'
+                          }`}
+                        >
+                          {tab.count}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1530,129 +1921,244 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 </div>
               )}
 
-              {(filteredRequests?.length || 0) === 0 ? (
-                <div className="text-center py-12 text-slate-400 text-xs bg-white rounded-2xl border border-slate-200 shadow-xs">
-                  Không có yêu cầu nạp tiền nào theo bộ lọc.
+              {loadingTopUpMonth === selectedTopUpMonth && !globalGmailSearchEmail && monthlyTopUpCache[selectedTopUpMonth] === undefined ? (
+                <div className="py-12 text-center bg-white rounded-2xl border border-slate-200 shadow-xs flex flex-col items-center justify-center gap-2 text-xs text-pink-600">
+                  <Loader2 className="w-6 h-6 animate-spin" />
+                  <span className="font-semibold">Đang tải danh sách bill tháng {selectedTopUpMonth}...</span>
+                </div>
+              ) : (filteredRequests?.length || 0) === 0 ? (
+                <div className="text-center py-12 px-4 text-slate-500 text-xs bg-white rounded-2xl border border-slate-200 shadow-xs space-y-1.5">
+                  <p className="font-bold text-slate-700 text-sm">Không có yêu cầu nạp tiền nào khớp bộ lọc</p>
+                  <p>
+                    {globalGmailSearchEmail
+                      ? `Không tìm thấy giao dịch nào của Gmail "${globalGmailSearchEmail}" ở trạng thái này.`
+                      : `Tháng ${selectedTopUpMonth}${selectedTopUpDate ? ` (ngày ${selectedTopUpDate})` : ''} chưa có đơn nào ở mục này.`}
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-3">
                   {(filteredRequests || []).map((req) => {
                     const isAnyProcessing = !!processingRequestId;
                     const isThisProcessing = processingRequestId === req.id;
+                    const isDuplicate = duplicateRequestIds.has(req.id);
+                    const createdFormatted = formatDateTimeDdMmYyyyHhMm(req.createdAt);
+                    const processedTimestamp = req.processedAt || req.approvedAt || req.rejectedAt;
+                    const processedFormatted = processedTimestamp
+                      ? formatDateTimeDdMmYyyyHhMm(processedTimestamp)
+                      : null;
+                    const resolvedRejectReason = req.rejectReason || req.rejectionReason;
 
                     return (
                       <div
                         key={req.id}
-                        className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 shadow-xs hover:border-pink-300 transition-all flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4"
+                        className={`p-4 sm:p-5 rounded-2xl bg-white border shadow-xs transition-all flex flex-col gap-3.5 overflow-hidden ${
+                          isDuplicate
+                            ? 'border-amber-400 hover:border-amber-500'
+                            : 'border-slate-200 hover:border-pink-300'
+                        }`}
                       >
-                        <div className="space-y-2 flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-bold text-slate-900 text-sm">
-                              {req.userName}
-                            </span>
-                            <span className="text-xs text-slate-500">
-                              ({req.userEmail})
-                            </span>
-                            <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
-                              req.status === 'approved' 
-                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                                : req.status === 'rejected'
-                                ? 'bg-rose-50 text-rose-700 border-rose-200'
-                                : req.status === 'cancelled'
-                                ? 'bg-slate-100 text-slate-600 border-slate-200'
-                                : 'bg-amber-50 text-amber-700 border-amber-200'
-                            }`}>
-                              {req.status === 'approved' ? '✓ Đã duyệt' : req.status === 'rejected' ? '✕ Đã từ chối' : req.status === 'cancelled' ? 'Đã hủy' : '⏳ Chờ duyệt'}
-                            </span>
-                            <span className="text-[11px] text-slate-400">
-                              • {new Date(req.createdAt).toLocaleString('vi-VN')}
-                            </span>
+                        {/* 1. Đầu thẻ: GMAIL NGƯỜI NẠP NỔI BẬT NHẤT + NÚT COPY + TRẠNG THÁI + CẢNH BÁO TRÙNG */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                          <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0 max-w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5">
+                              <Mail className="w-4 h-4 text-pink-600 shrink-0" />
+                              <span className="font-bold text-slate-900 text-sm sm:text-base break-all select-all">
+                                {req.userEmail || 'Chưa có Gmail'}
+                              </span>
+                            </div>
+
+                            {req.userEmail && (
+                              <button
+                                type="button"
+                                onClick={() => handleCopyEmail(req.id, req.userEmail)}
+                                className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1 cursor-pointer transition shrink-0"
+                                title="Sao chép Gmail người nạp"
+                              >
+                                {copiedEmailId === req.id ? (
+                                  <>
+                                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                    <span className="text-emerald-700">Đã copy</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5" />
+                                    <span>Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
                           </div>
 
-                          <div className="text-xs text-slate-600 flex items-center gap-3 flex-wrap">
-                            <span>Số tiền: <strong className="text-emerald-600 font-bold text-sm">{req.amountVnd.toLocaleString('vi-VN')} đ</strong></span>
-                            <span>Cộng ví: <strong className="text-pink-600 font-bold text-sm">+{req.xuAmount} Xu</strong></span>
-                            <div className="flex items-center gap-1">
-                              <span>Mã GD:</span>
-                              <strong className="font-mono text-pink-700 bg-pink-50 border border-pink-200 px-2 py-0.5 rounded text-xs select-all">
-                                {req.transferCode}
-                              </strong>
+                          <div className="flex items-center gap-2 flex-wrap shrink-0">
+                            {isDuplicate && (
+                              <span
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-100 text-amber-950 border border-amber-400 text-xs font-extrabold"
+                                title="Cùng 1 Gmail gửi từ 2 yêu cầu nạp giống nhau về số tiền trong vòng 24 giờ"
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                                <span>Gửi trùng</span>
+                              </span>
+                            )}
+
+                            <span
+                              className={`inline-flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-bold border ${
+                                req.status === 'approved'
+                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                  : req.status === 'rejected'
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                  : req.status === 'cancelled'
+                                  ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                  : 'bg-amber-50 text-amber-800 border-amber-300'
+                              }`}
+                            >
+                              {req.status === 'approved'
+                                ? 'Đã duyệt'
+                                : req.status === 'rejected'
+                                ? 'Đã từ chối'
+                                : req.status === 'cancelled'
+                                ? 'Đã hủy'
+                                : 'Chờ duyệt'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* 2. Thông tin đối chiếu chi tiết */}
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
+                          <div className="lg:col-span-8 space-y-2 text-xs text-slate-600 min-w-0">
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                              <span>
+                                Tài khoản: <strong className="text-slate-900">{req.userName || 'Độc giả'}</strong>
+                              </span>
+                              <span className="tabular-nums">
+                                Gửi lúc: <strong className="text-slate-800">{createdFormatted}</strong>
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                              <span className="tabular-nums">
+                                Số tiền:{' '}
+                                <strong className="text-emerald-700 font-extrabold text-sm sm:text-base">
+                                  {(req.amountVnd || 0).toLocaleString('vi-VN')} đ
+                                </strong>
+                              </span>
+                              <span className="tabular-nums">
+                                Yêu cầu:{' '}
+                                <strong className="text-pink-600 font-extrabold text-sm sm:text-base">
+                                  +{(req.xuAmount || 0).toLocaleString('vi-VN')} Xu
+                                </strong>
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <span>Mã GD:</span>
+                                <strong className="font-mono text-pink-700 bg-pink-50 border border-pink-200 px-2 py-0.5 rounded text-xs select-all">
+                                  {req.transferCode}
+                                </strong>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyStk(req.id, req.transferCode)}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-pink-600 hover:bg-pink-50 cursor-pointer transition"
+                                  title="Sao chép mã GD"
+                                >
+                                  {copiedStkId === req.id ? (
+                                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                  ) : (
+                                    <Copy className="w-3.5 h-3.5" />
+                                  )}
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Thông tin lịch sử xử lý (Ngày giờ duyệt/từ chối, Admin xử lý, Lý do từ chối) */}
+                            {(req.status === 'approved' || req.status === 'rejected') && (
+                              <div
+                                className={`p-2.5 rounded-xl border text-xs space-y-1 ${
+                                  req.status === 'approved'
+                                    ? 'bg-emerald-50/60 border-emerald-200 text-emerald-900'
+                                    : 'bg-rose-50/70 border-rose-200 text-rose-900'
+                                }`}
+                              >
+                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                                  {processedFormatted && (
+                                    <span className="tabular-nums">
+                                      {req.status === 'approved' ? 'Duyệt lúc:' : 'Từ chối lúc:'}{' '}
+                                      <strong>{processedFormatted}</strong>
+                                    </span>
+                                  )}
+                                  {req.processedBy && (
+                                    <span className="break-all">
+                                      Admin xử lý: <strong>{req.processedBy}</strong>
+                                    </span>
+                                  )}
+                                </div>
+                                {req.status === 'rejected' && resolvedRejectReason && (
+                                  <div className="break-words">
+                                    Lý do từ chối: <strong>{resolvedRejectReason}</strong>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Ảnh bill thu nhỏ bấm phóng to toàn màn hình */}
+                          <div className="lg:col-span-4 min-w-0">
+                            {req.billImageUrl ? (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  navigator.clipboard.writeText(req.transferCode);
-                                  setCopiedStkId(req.id);
-                                  setTimeout(() => setCopiedStkId(null), 2000);
+                                  setIsBillZoomed(false);
+                                  setInspectingBillRequest(req);
                                 }}
-                                className="p-1 rounded text-slate-400 hover:text-pink-600 hover:bg-pink-50 cursor-pointer transition"
-                                title="Sao chép mã GD"
+                                className="w-full flex items-center gap-3 p-2 rounded-xl bg-rose-50/70 hover:bg-rose-100/70 border border-pink-200 text-left cursor-pointer transition"
                               >
-                                {copiedStkId === req.id ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                              </button>
-                            </div>
-                          </div>
-
-                          {/* MỤC ẢNH BILL CHUYỂN KHOẢN (Cho Admin nhìn vào thấy bill đúng để duyệt) */}
-                          <div className="pt-1 flex items-center gap-3 flex-wrap">
-                            {req.billImageUrl ? (
-                              <div className="flex items-center gap-2.5 bg-rose-50/70 border border-pink-200 rounded-xl p-1.5 pr-3 shadow-2xs">
                                 <img
                                   src={req.billImageUrl}
-                                  alt={`Bill của ${req.userName}`}
-                                  onClick={() => setInspectingBillRequest(req)}
-                                  className="w-12 h-12 object-cover rounded-lg border border-pink-300 cursor-pointer hover:scale-105 transition-transform flex-shrink-0"
-                                  title="Bấm để phóng to xem chi tiết bill"
+                                  alt={`Bill của ${req.userEmail || req.userName}`}
+                                  className="w-14 h-14 object-cover rounded-lg border border-pink-300 shrink-0 bg-white"
                                 />
-                                <div>
-                                  <div className="text-[11px] font-bold text-pink-800 flex items-center gap-1">
-                                    <Camera className="w-3 h-3 text-pink-600" />
-                                    <span>Đã gửi ảnh bill chuyển khoản</span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs font-bold text-pink-800 flex items-center gap-1">
+                                    <Camera className="w-3.5 h-3.5 text-pink-600 shrink-0" />
+                                    <span className="truncate">Ảnh bill chuyển khoản</span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => setInspectingBillRequest(req)}
-                                    className="text-[11px] font-bold text-pink-600 hover:text-pink-800 underline flex items-center gap-1 cursor-pointer mt-0.5"
-                                  >
-                                    <Eye className="w-3 h-3" />
-                                    Xem ảnh bill để đối soát
-                                  </button>
+                                  <div className="text-[11px] font-bold text-pink-600 mt-0.5 flex items-center gap-1">
+                                    <Eye className="w-3.5 h-3.5 shrink-0" />
+                                    <span>Bấm để phóng to xem bill</span>
+                                  </div>
                                 </div>
-                              </div>
+                              </button>
                             ) : (
-                              <div className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg flex items-center gap-1.5">
-                                <AlertTriangle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
-                                <span>Chưa gửi ảnh bill (Admin hãy đối soát sao kê MB theo Mã GD {req.transferCode})</span>
+                              <div className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-3 py-2.5 rounded-xl flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                <span>Chưa gửi ảnh bill (đối soát sao kê theo mã {req.transferCode})</span>
                               </div>
                             )}
                           </div>
                         </div>
 
-                        {/* Các nút hành động duyệt / từ chối */}
-                        <div className="flex items-center gap-2 self-end lg:self-center flex-shrink-0">
-                          {req.billImageUrl && (
-                            <button
-                              type="button"
-                              onClick={() => setInspectingBillRequest(req)}
-                              className="px-3 py-2 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
-                              title="Mở ảnh bill toàn màn hình để đối soát"
-                            >
-                              <Eye className="w-4 h-4 text-pink-600" />
-                              <span>Soi Bill</span>
-                            </button>
-                          )}
+                        {/* 3. Hàng nút thao tác lớn, tách biệt rõ ràng cho màn hình cảm ứng */}
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2.5 pt-2 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsBillZoomed(false);
+                              setInspectingBillRequest(req);
+                            }}
+                            className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition"
+                          >
+                            <Eye className="w-4 h-4 text-pink-600" />
+                            <span>{req.billImageUrl ? 'Xem bill' : 'Xem chi tiết'}</span>
+                          </button>
 
                           {req.status === 'pending' && (
-                            <div className="flex items-center gap-2">
+                            <>
                               <button
                                 type="button"
                                 disabled={isAnyProcessing}
                                 onClick={() => handleApprove(req.id)}
-                                className={`px-4 py-2 rounded-xl bg-emerald-600 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition ${
+                                className={`w-full sm:w-auto min-h-[44px] px-5 py-2.5 rounded-xl bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition ${
                                   isAnyProcessing
                                     ? 'opacity-40 cursor-not-allowed pointer-events-none'
-                                    : 'hover:bg-emerald-700 active:scale-98 cursor-pointer shadow-emerald-600/20'
+                                    : 'hover:bg-emerald-700 active:scale-[0.98] cursor-pointer'
                                 }`}
-                                title={isThisProcessing ? 'Đang duyệt và cộng Xu...' : 'Duyệt nạp và cộng Xu vào ví độc giả'}
                               >
                                 {isThisProcessing ? (
                                   <>
@@ -1662,29 +2168,25 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                                 ) : (
                                   <>
                                     <CheckCircle2 className="w-4 h-4" />
-                                    <span>Duyệt Ngay (+{req.xuAmount} Xu)</span>
+                                    <span>Duyệt (+{(req.xuAmount || 0).toLocaleString('vi-VN')} Xu)</span>
                                   </>
                                 )}
                               </button>
+
                               <button
                                 type="button"
                                 disabled={isAnyProcessing}
-                                onClick={() => handleReject(req.id)}
-                                className={`px-3.5 py-2 rounded-xl font-semibold text-xs border transition ${
+                                onClick={() => openRejectModal(req)}
+                                className={`w-full sm:w-auto min-h-[44px] px-4 py-2.5 rounded-xl font-bold text-xs border flex items-center justify-center gap-2 transition ${
                                   isAnyProcessing
                                     ? 'opacity-40 cursor-not-allowed pointer-events-none bg-slate-100 text-slate-400 border-slate-200'
-                                    : 'bg-slate-100 hover:bg-amber-50 text-slate-700 hover:text-amber-800 hover:border-amber-300 border-slate-200 cursor-pointer active:scale-98'
+                                    : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200 cursor-pointer active:scale-[0.98]'
                                 }`}
-                                title={isThisProcessing ? 'Đang xử lý...' : 'Từ chối yêu cầu nạp tiền'}
                               >
-                                {isThisProcessing ? (
-                                  <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
-                                ) : (
-                                  <XCircle className="w-4 h-4 text-slate-500" />
-                                )}
+                                <XCircle className="w-4 h-4" />
                                 <span>Từ chối</span>
                               </button>
-                            </div>
+                            </>
                           )}
                         </div>
                       </div>
@@ -3920,42 +4422,66 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
       )}
 
       {/* =========================================================================
-          MODAL ĐỐI SOÁT BILL CHUYỂN KHOẢN NGÂN HÀNG (DÀNH CHO ADMIN)
+          MODAL ĐỐI SOÁT BILL CHUYỂN KHOẢN NGÂN HÀNG (TOÀN MÀN HÌNH TRÊN MOBILE)
          ========================================================================= */}
       {inspectingBillRequest && (
-        <div 
-          className="fixed inset-0 z-80 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 animate-in fade-in duration-150"
+        <div
+          className="fixed inset-0 z-80 bg-black/90 backdrop-blur-md flex items-center justify-center p-0 sm:p-5 animate-in fade-in duration-150"
           onClick={() => setInspectingBillRequest(null)}
         >
-          <div 
-            className="w-full max-w-5xl bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden max-h-[94vh] flex flex-col md:flex-row animate-in zoom-in-95 duration-200"
+          <div
+            className="w-full h-full sm:h-auto sm:max-w-5xl bg-white sm:rounded-3xl shadow-2xl border border-slate-200 overflow-hidden sm:max-h-[94vh] flex flex-col md:flex-row animate-in zoom-in-95 duration-200"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Cột trái: Hình ảnh bill chuyển khoản phóng to */}
-            <div className="flex-1 bg-slate-950 p-4 sm:p-6 flex flex-col items-center justify-center relative min-h-[350px] md:min-h-[500px] overflow-auto">
-              <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-sm text-white text-[11px] font-bold px-3 py-1 rounded-full border border-white/20 flex items-center gap-1.5 z-10">
+            {/* Cột trái: Hình ảnh bill chuyển khoản phóng to toàn màn hình */}
+            <div className="flex-1 bg-slate-950 p-3 sm:p-6 flex flex-col items-center justify-center relative min-h-[42vh] md:min-h-[520px] overflow-auto">
+              <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-sm text-white text-[11px] font-bold px-3 py-1.5 rounded-full border border-white/20 flex items-center gap-1.5 z-10">
                 <Camera className="w-3.5 h-3.5 text-pink-400" />
                 <span>Ảnh Biên Lai Gốc</span>
+              </div>
+
+              <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
+                {inspectingBillRequest.billImageUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setIsBillZoomed((z) => !z)}
+                    className="min-h-[44px] px-3 py-1.5 rounded-full bg-black/70 hover:bg-black/90 text-white border border-white/20 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isBillZoomed ? <ZoomOut className="w-4 h-4" /> : <ZoomIn className="w-4 h-4" />}
+                    <span>{isBillZoomed ? 'Thu nhỏ' : 'Phóng to'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setInspectingBillRequest(null)}
+                  className="md:hidden min-h-[44px] min-w-[44px] rounded-full bg-black/70 text-white border border-white/20 flex items-center justify-center cursor-pointer"
+                  aria-label="Đóng xem bill"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
               {inspectingBillRequest.billImageUrl ? (
                 <img
                   src={inspectingBillRequest.billImageUrl}
-                  alt={`Biên lai của ${inspectingBillRequest.userName}`}
-                  className="max-h-[75vh] w-auto max-w-full object-contain rounded-xl shadow-2xl border border-slate-800 transition-transform duration-200 hover:scale-102"
+                  alt={`Biên lai của ${inspectingBillRequest.userEmail || inspectingBillRequest.userName}`}
+                  onClick={() => setIsBillZoomed((z) => !z)}
+                  className={`w-auto rounded-xl shadow-2xl border border-slate-800 cursor-zoom-in transition-transform duration-200 ${
+                    isBillZoomed ? 'max-w-none scale-125 sm:scale-150 my-8' : 'max-h-[68vh] max-w-full object-contain'
+                  }`}
                 />
               ) : (
                 <div className="text-center text-slate-400 p-8 space-y-2">
                   <AlertCircle className="w-12 h-12 text-amber-500 mx-auto" />
                   <p className="text-sm font-bold text-white">Độc giả chưa gửi ảnh biên lai</p>
-                  <p className="text-xs text-slate-400">Vui lòng đối soát trực tiếp sao kê app MB Bank theo mã GD.</p>
+                  <p className="text-xs text-slate-400">Vui lòng đối soát trực tiếp sao kê ngân hàng theo mã GD.</p>
                 </div>
               )}
             </div>
 
-            {/* Cột phải: Bảng thông tin đối soát chi tiết & Nút duyệt */}
-            <div className="w-full md:w-96 p-6 sm:p-7 bg-white flex flex-col justify-between border-t md:border-t-0 md:border-l border-slate-200 overflow-y-auto space-y-6">
-              <div className="space-y-4">
+            {/* Cột phải: Bảng thông tin đối soát chi tiết & Nút duyệt / từ chối */}
+            <div className="w-full md:w-96 p-4 sm:p-6 bg-white flex flex-col justify-between border-t md:border-t-0 md:border-l border-slate-200 overflow-y-auto space-y-4">
+              <div className="space-y-3.5">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                   <div className="flex items-center gap-2">
                     <div className="w-8 h-8 rounded-xl bg-pink-50 border border-pink-200 flex items-center justify-center text-pink-600">
@@ -3966,38 +4492,78 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                         Đối Soát Biên Lai
                       </h3>
                       <p className="text-[11px] text-slate-500">
-                        Kiểm tra trước khi cộng Xu
+                        Kiểm tra kỹ Gmail, số tiền &amp; mã GD
                       </p>
                     </div>
                   </div>
 
                   <button
+                    type="button"
                     onClick={() => setInspectingBillRequest(null)}
-                    className="p-1.5 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-800 transition cursor-pointer"
+                    className="hidden md:flex min-h-[40px] min-w-[40px] items-center justify-center rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-800 transition cursor-pointer"
                     title="Đóng cửa sổ"
                   >
                     <X className="w-5 h-5" />
                   </button>
                 </div>
 
+                {/* Gmail nổi bật + Copy */}
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase">Gmail người nạp</div>
+                    <div className="text-xs sm:text-sm font-bold text-slate-900 break-all">
+                      {inspectingBillRequest.userEmail || 'Chưa có Gmail'}
+                    </div>
+                  </div>
+                  {inspectingBillRequest.userEmail && (
+                    <button
+                      type="button"
+                      onClick={() => handleCopyEmail(inspectingBillRequest.id, inspectingBillRequest.userEmail)}
+                      className="min-h-[38px] px-2.5 py-1.5 rounded-lg bg-white hover:bg-pink-50 text-pink-700 border border-pink-200 text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      {copiedEmailId === inspectingBillRequest.id ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5" />
+                      )}
+                      <span>Copy</span>
+                    </button>
+                  )}
+                </div>
+
                 {/* Status Badge */}
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs text-slate-500 font-medium">Trạng thái:</span>
-                  <span className={`text-xs font-bold px-3 py-1 rounded-full border ${
-                    inspectingBillRequest.status === 'approved'
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : inspectingBillRequest.status === 'rejected'
-                      ? 'bg-rose-50 text-rose-700 border-rose-200'
-                      : inspectingBillRequest.status === 'cancelled'
-                      ? 'bg-slate-100 text-slate-600 border-slate-200'
-                      : 'bg-amber-50 text-amber-700 border-amber-200'
-                  }`}>
-                    {inspectingBillRequest.status === 'approved' ? '✓ Đã duyệt thành công' : inspectingBillRequest.status === 'rejected' ? '✕ Đã từ chối' : inspectingBillRequest.status === 'cancelled' ? 'Đã hủy' : '⏳ Chờ Admin duyệt'}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {duplicateRequestIds.has(inspectingBillRequest.id) && (
+                      <span className="text-[11px] font-extrabold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-400">
+                        Gửi trùng
+                      </span>
+                    )}
+                    <span
+                      className={`text-xs font-bold px-3 py-1 rounded-lg border ${
+                        inspectingBillRequest.status === 'approved'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : inspectingBillRequest.status === 'rejected'
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : inspectingBillRequest.status === 'cancelled'
+                          ? 'bg-slate-100 text-slate-600 border-slate-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-300'
+                      }`}
+                    >
+                      {inspectingBillRequest.status === 'approved'
+                        ? 'Đã duyệt'
+                        : inspectingBillRequest.status === 'rejected'
+                        ? 'Đã từ chối'
+                        : inspectingBillRequest.status === 'cancelled'
+                        ? 'Đã hủy'
+                        : 'Chờ duyệt'}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Thông tin đối chiếu */}
-                <div className="p-4 rounded-2xl bg-pink-50/50 border border-pink-200 space-y-2.5 text-xs">
+                <div className="p-3.5 rounded-2xl bg-pink-50/50 border border-pink-200 space-y-2 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-slate-600 font-medium">Mã GD chuyển khoản:</span>
                     <div className="flex items-center gap-1.5">
@@ -4011,7 +4577,7 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                           setCopiedCodeInModal(true);
                           setTimeout(() => setCopiedCodeInModal(false), 2000);
                         }}
-                        className="p-1 rounded bg-white hover:bg-pink-100 text-pink-700 border border-pink-200 cursor-pointer transition"
+                        className="p-1.5 rounded bg-white hover:bg-pink-100 text-pink-700 border border-pink-200 cursor-pointer transition"
                         title="Sao chép mã GD"
                       >
                         {copiedCodeInModal ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
@@ -4021,76 +4587,90 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
 
                   <div className="flex items-center justify-between">
                     <span className="text-slate-600 font-medium">Số tiền nạp:</span>
-                    <strong className="text-emerald-700 font-extrabold text-sm">
-                      {inspectingBillRequest.amountVnd.toLocaleString('vi-VN')} đ
+                    <strong className="text-emerald-700 font-extrabold text-sm tabular-nums">
+                      {(inspectingBillRequest.amountVnd || 0).toLocaleString('vi-VN')} đ
                     </strong>
                   </div>
 
                   <div className="flex items-center justify-between">
                     <span className="text-slate-600 font-medium">Xu được cộng:</span>
-                    <strong className="text-pink-600 font-black text-sm">
-                      +{inspectingBillRequest.xuAmount.toLocaleString('vi-VN')} Xu
+                    <strong className="text-pink-600 font-black text-sm tabular-nums">
+                      +{(inspectingBillRequest.xuAmount || 0).toLocaleString('vi-VN')} Xu
                     </strong>
                   </div>
 
-                  <div className="flex items-center justify-between pt-1 border-t border-pink-200/60">
-                    <span className="text-slate-600 font-medium">Người nạp:</span>
-                    <span className="font-bold text-slate-900 truncate max-w-[170px]" title={inspectingBillRequest.userName}>
+                  <div className="flex items-center justify-between pt-1.5 border-t border-pink-200/60">
+                    <span className="text-slate-600 font-medium">Tên tài khoản:</span>
+                    <span className="font-bold text-slate-900 truncate max-w-[180px]">
                       {inspectingBillRequest.userName}
                     </span>
                   </div>
 
                   <div className="flex items-center justify-between">
-                    <span className="text-slate-600 font-medium">Email:</span>
-                    <span className="font-medium text-slate-600 truncate max-w-[170px]" title={inspectingBillRequest.userEmail}>
-                      {inspectingBillRequest.userEmail}
+                    <span className="text-slate-600 font-medium">Gửi lúc:</span>
+                    <span className="text-xs font-semibold text-slate-700 tabular-nums">
+                      {formatDateTimeDdMmYyyyHhMm(inspectingBillRequest.createdAt)}
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-600 font-medium">Thời gian:</span>
-                    <span className="text-[11px] text-slate-500">
-                      {new Date(inspectingBillRequest.createdAt).toLocaleString('vi-VN')}
-                    </span>
-                  </div>
-                </div>
+                  {(inspectingBillRequest.processedAt || inspectingBillRequest.approvedAt || inspectingBillRequest.rejectedAt) && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 font-medium">Xử lý lúc:</span>
+                      <span className="text-xs font-semibold text-slate-700 tabular-nums">
+                        {formatDateTimeDdMmYyyyHhMm(
+                          inspectingBillRequest.processedAt ||
+                            inspectingBillRequest.approvedAt ||
+                            inspectingBillRequest.rejectedAt
+                        )}
+                      </span>
+                    </div>
+                  )}
 
-                {/* Hướng dẫn kiểm tra */}
-                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 leading-relaxed space-y-1">
-                  <div className="font-bold text-slate-800 flex items-center gap-1">
-                    <span>💡</span>
-                    <span>Quy trình đối soát chuẩn:</span>
-                  </div>
-                  <p>1. So khớp <strong>Mã GD {inspectingBillRequest.transferCode}</strong> và <strong>Số tiền {inspectingBillRequest.amountVnd.toLocaleString('vi-VN')}đ</strong> trên ảnh bill.</p>
-                  <p>2. Đảm bảo tiền đã nổi trên app MB Bank (STK 0703765892).</p>
-                  <p>3. Bấm nút <strong>"Duyệt &amp; Cộng Xu"</strong> để hệ thống tự động cộng Xu vào ví độc giả ngay lập tức.</p>
+                  {inspectingBillRequest.processedBy && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-600 font-medium shrink-0">Admin xử lý:</span>
+                      <span className="text-xs font-semibold text-slate-800 break-all text-right">
+                        {inspectingBillRequest.processedBy}
+                      </span>
+                    </div>
+                  )}
+
+                  {(inspectingBillRequest.rejectReason || inspectingBillRequest.rejectionReason) && (
+                    <div className="pt-1.5 border-t border-pink-200/60 text-rose-800">
+                      <span className="font-bold">Lý do từ chối: </span>
+                      <span>{inspectingBillRequest.rejectReason || inspectingBillRequest.rejectionReason}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Action Buttons */}
-              <div className="space-y-2 pt-4 border-t border-slate-100">
+              <div className="space-y-2.5 pt-3 border-t border-slate-100">
                 {inspectingBillRequest.status === 'pending' && (
                   <>
                     <button
                       type="button"
+                      disabled={!!processingRequestId}
                       onClick={() => {
                         const targetId = inspectingBillRequest.id;
                         setInspectingBillRequest(null);
                         handleApprove(targetId);
                       }}
-                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-bold text-xs shadow-md shadow-emerald-600/30 flex items-center justify-center gap-2 cursor-pointer transition active:scale-98"
+                      className="w-full min-h-[44px] py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-md shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer transition active:scale-[0.98] disabled:opacity-50"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Duyệt &amp; Cộng +{inspectingBillRequest.xuAmount} Xu Ngay</span>
+                      <span>Duyệt &amp; Cộng +{(inspectingBillRequest.xuAmount || 0).toLocaleString('vi-VN')} Xu</span>
                     </button>
 
                     <button
                       type="button"
+                      disabled={!!processingRequestId}
                       onClick={() => {
-                        onRejectRequest(inspectingBillRequest.id);
+                        const targetReq = inspectingBillRequest;
                         setInspectingBillRequest(null);
+                        openRejectModal(targetReq);
                       }}
-                      className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-600 font-bold text-xs border border-slate-200 flex items-center justify-center gap-1.5 cursor-pointer transition"
+                      className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs border border-rose-200 flex items-center justify-center gap-1.5 cursor-pointer transition disabled:opacity-50"
                     >
                       <XCircle className="w-4 h-4" />
                       <span>Từ Chối Đơn Nạp Này</span>
@@ -4101,12 +4681,115 @@ export const AdminDashboardModal: React.FC<AdminDashboardModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setInspectingBillRequest(null)}
-                  className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs border border-slate-200 cursor-pointer transition"
+                  className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs border border-slate-200 cursor-pointer transition"
                 >
                   Đóng Cửa Sổ
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal nhập lý do từ chối bill (không xóa dữ liệu, lưu vĩnh viễn lịch sử xử lý) */}
+      {rejectingModalRequest && (
+        <div
+          className="fixed inset-0 z-[140] bg-black/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4"
+          onClick={() => {
+            if (!processingRequestId) setRejectingModalRequest(null);
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-2xl border border-rose-200 shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 sm:px-5 py-3.5 bg-rose-50 border-b border-rose-200 flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                <XCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 truncate">Từ chối đơn nạp xu</h3>
+                  <p className="text-[11px] text-slate-600 truncate">
+                    {rejectingModalRequest.userEmail || rejectingModalRequest.userName} •{' '}
+                    {(rejectingModalRequest.amountVnd || 0).toLocaleString('vi-VN')}đ
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={!!processingRequestId}
+                onClick={() => setRejectingModalRequest(null)}
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmReject} className="p-4 sm:p-5 space-y-3.5">
+              <div className="text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-1">
+                <div>
+                  Mã GD: <strong className="font-mono text-pink-700">{rejectingModalRequest.transferCode}</strong>
+                </div>
+                <div>
+                  Đơn này sẽ được lưu vĩnh viễn ở trạng thái <strong className="text-rose-700">Đã từ chối</strong> (không bị xóa).
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-slate-800">Lý do từ chối (gửi tới độc giả)</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    'Chưa nhận được tiền trên sao kê MBBank',
+                    'Sai nội dung / mã giao dịch',
+                    'Số tiền chuyển không khớp',
+                    'Ảnh bill bị mờ hoặc không hợp lệ',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setRejectReasonInput(preset)}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-rose-50 text-slate-700 hover:text-rose-700 border border-slate-200 text-[11px] font-semibold cursor-pointer transition"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={rejectReasonInput}
+                  onChange={(e) => setRejectReasonInput(e.target.value)}
+                  rows={3}
+                  placeholder="Nhập lý do từ chối chi tiết..."
+                  className="w-full p-3 rounded-xl border border-slate-300 bg-white text-xs text-slate-900 focus:outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={!!processingRequestId}
+                  onClick={() => setRejectingModalRequest(null)}
+                  className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={!!processingRequestId}
+                  className="w-full sm:w-auto min-h-[44px] px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {processingRequestId === rejectingModalRequest.id ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Đang từ chối...</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-4 h-4" />
+                      <span>Xác nhận từ chối</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

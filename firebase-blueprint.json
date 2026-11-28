@@ -110,8 +110,14 @@
         "bankName": { "type": "string", "description": "Ngân hàng nhận" },
         "accountNumber": { "type": "string", "description": "Số tài khoản nhận" },
         "billImageUrl": { "type": "string", "description": "Ảnh biên lai bill chuyển khoản ngân hàng" },
-        "status": { "type": "string", "description": "pending, approved hoặc rejected" },
-        "createdAt": { "type": "number", "description": "Thời gian tạo yêu cầu" }
+        "status": { "type": "string", "description": "pending, approved, rejected hoặc cancelled" },
+        "createdAt": { "type": "number", "description": "Thời gian tạo yêu cầu" },
+        "approvedAt": { "type": "number", "description": "Thời gian duyệt (ms)" },
+        "rejectedAt": { "type": "number", "description": "Thời gian từ chối (ms)" },
+        "processedAt": { "type": "number", "description": "Thời gian Admin xử lý (duyệt hoặc từ chối, ms)" },
+        "processedBy": { "type": "string", "description": "Email Admin đã xử lý lệnh nạp" },
+        "rejectReason": { "type": "string", "description": "Lý do từ chối khi Admin bấm Từ chối" },
+        "rejectionReason": { "type": "string", "description": "Lý do từ chối (tương thích ngược)" }
       },
       "required": ["userId", "amountVnd", "xuAmount", "transferCode", "status", "createdAt"]
     },

@@ -159,6 +159,9 @@ export interface TopUpRequest {
   createdAt: number;
   approvedAt?: number;
   rejectedAt?: number;
+  processedAt?: number;
+  processedBy?: string;
+  rejectReason?: string;
   rejectionReason?: string;
 }
 
